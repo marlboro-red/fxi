@@ -1,7 +1,8 @@
+use crate::index::build::build_index;
 use crate::index::reader::IndexReader;
 use crate::index::types::SearchMatch;
-use crate::index::build::build_index;
 use crate::query::{parse_query, QueryExecutor};
+use crate::utils::find_codebase_root;
 use anyhow::Result;
 use std::path::PathBuf;
 use std::process::Command;
@@ -15,7 +16,10 @@ pub enum Mode {
 
 /// Application state
 pub struct App {
-    pub path: PathBuf,
+    /// The codebase root (detected or specified)
+    pub root_path: PathBuf,
+    /// Original path user started from (for relative path display)
+    pub start_path: PathBuf,
     pub reader: Option<IndexReader>,
     pub query: String,
     pub results: Vec<SearchMatch>,
@@ -29,13 +33,25 @@ pub struct App {
 
 impl App {
     pub fn new(path: PathBuf) -> Result<Self> {
-        let path = path.canonicalize().unwrap_or(path);
+        let start_path = path.canonicalize().unwrap_or(path);
+
+        // Auto-detect codebase root
+        let root_path = find_codebase_root(&start_path)?;
 
         // Try to open existing index
-        let (reader, index_available, status) = match IndexReader::open(&path) {
+        let (reader, index_available, status) = match IndexReader::open(&root_path) {
             Ok(r) => {
                 let doc_count = r.meta.doc_count;
-                (Some(r), true, format!("{} files indexed", doc_count))
+                let msg = if root_path != start_path {
+                    format!(
+                        "{} files indexed (root: {})",
+                        doc_count,
+                        root_path.file_name().unwrap_or_default().to_string_lossy()
+                    )
+                } else {
+                    format!("{} files indexed", doc_count)
+                };
+                (Some(r), true, msg)
             }
             Err(_) => (
                 None,
@@ -45,7 +61,8 @@ impl App {
         };
 
         Ok(Self {
-            path,
+            root_path,
+            start_path,
             reader,
             query: String::new(),
             results: Vec::new(),
@@ -149,7 +166,7 @@ impl App {
 
     pub fn update_preview(&mut self) {
         if let Some(result) = self.results.get(self.selected) {
-            let full_path = self.path.join(&result.path);
+            let full_path = self.root_path.join(&result.path);
             if let Ok(content) = std::fs::read_to_string(&full_path) {
                 self.preview_content = Some(content);
                 // Scroll to show the match
@@ -180,7 +197,7 @@ impl App {
 
     pub fn open_selected(&mut self) {
         if let Some(result) = self.results.get(self.selected) {
-            let full_path = self.path.join(&result.path);
+            let full_path = self.root_path.join(&result.path);
 
             // Try to open in $EDITOR
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
@@ -198,10 +215,10 @@ impl App {
     pub fn reindex(&mut self) {
         self.status_message = "Building index...".to_string();
 
-        match build_index(&self.path, true) {
+        match build_index(&self.root_path, true) {
             Ok(()) => {
                 // Reload reader
-                match IndexReader::open(&self.path) {
+                match IndexReader::open(&self.root_path) {
                     Ok(r) => {
                         let doc_count = r.meta.doc_count;
                         self.reader = Some(r);

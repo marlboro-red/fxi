@@ -1,9 +1,12 @@
+use crate::utils::{find_codebase_root, get_index_dir};
 use anyhow::Result;
 use std::path::Path;
 
 /// Compact delta segments into the base segment
 pub fn compact_segments(root_path: &Path) -> Result<()> {
-    let index_path = root_path.join(".codesearch");
+    // Auto-detect codebase root
+    let root = find_codebase_root(root_path)?;
+    let index_path = get_index_dir(&root)?;
 
     if !index_path.exists() {
         anyhow::bail!("No index found. Run 'fxi index' first.");

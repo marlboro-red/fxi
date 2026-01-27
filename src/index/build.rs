@@ -1,19 +1,20 @@
 use crate::index::types::IndexConfig;
 use crate::index::writer::IndexWriter;
+use crate::utils::{find_codebase_root, get_index_dir, remove_index};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 /// Build or rebuild the search index
 pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
     let root = root_path.canonicalize().context("Invalid path")?;
-    let index_path = root.join(".codesearch");
+    let index_path = get_index_dir(&root)?;
 
     // Check if we should force rebuild
     if force && index_path.exists() {
-        fs::remove_dir_all(&index_path).context("Failed to remove existing index")?;
+        remove_index(&root).context("Failed to remove existing index")?;
     }
 
     let config = IndexConfig::default();
@@ -108,7 +109,7 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
     // Write the index
     writer.write().context("Failed to write index")?;
 
-    println!("Index built successfully at: {}", index_path.display());
+    println!("Index stored at: {}", index_path.display());
 
     if error_count > 5 {
         eprintln!("({} total warnings/errors suppressed)", error_count - 5);
@@ -125,4 +126,11 @@ pub fn update_index(root_path: &Path) -> Result<()> {
     // 3. Creating delta segment for changed files
     // 4. Merging if delta count exceeds threshold
     build_index(root_path, false)
+}
+
+/// Build index, detecting codebase root from current directory
+pub fn build_index_auto(start_path: &Path, force: bool) -> Result<()> {
+    let root = find_codebase_root(start_path)?;
+    println!("Detected codebase root: {}", root.display());
+    build_index(&root, force)
 }

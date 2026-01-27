@@ -27,7 +27,7 @@ struct Cli {
 enum Commands {
     /// Build or rebuild the index
     Index {
-        /// Path to index
+        /// Path to index (auto-detects git root)
         #[arg(default_value = ".")]
         path: PathBuf,
 
@@ -56,6 +56,13 @@ enum Commands {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// List all indexed codebases
+    List,
+    /// Remove an index
+    Remove {
+        /// Path to the codebase to remove index for
+        path: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -63,7 +70,8 @@ fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Index { path, force }) => {
-            index::build::build_index(&path, force)?;
+            // Auto-detect codebase root
+            index::build::build_index_auto(&path, force)?;
         }
         Some(Commands::Search { query, path }) => {
             tui::run(path, query)?;
@@ -73,6 +81,14 @@ fn main() -> Result<()> {
         }
         Some(Commands::Compact { path }) => {
             index::compact::compact_segments(&path)?;
+        }
+        Some(Commands::List) => {
+            index::stats::list_indexes()?;
+        }
+        Some(Commands::Remove { path }) => {
+            let root = utils::find_codebase_root(&path)?;
+            utils::remove_index(&root)?;
+            println!("Removed index for: {}", root.display());
         }
         None => {
             if cli.query.is_empty() {

@@ -1,15 +1,20 @@
 use crate::index::reader::IndexReader;
+use crate::utils::{find_codebase_root, get_index_dir, list_indexed_codebases};
 use anyhow::Result;
 use std::path::Path;
 
 /// Display index statistics
 pub fn show_stats(root_path: &Path) -> Result<()> {
-    let reader = IndexReader::open(root_path)?;
+    // Auto-detect codebase root
+    let root = find_codebase_root(root_path)?;
+    let reader = IndexReader::open(&root)?;
+    let index_path = get_index_dir(&root)?;
 
     println!("Index Statistics");
     println!("================");
     println!();
     println!("Root path:        {}", reader.root_path().display());
+    println!("Index location:   {}", index_path.display());
     println!("Index version:    {}", reader.meta.version);
     println!("Document count:   {}", reader.meta.doc_count);
     println!("Segment count:    {}", reader.meta.segment_count);
@@ -36,7 +41,6 @@ pub fn show_stats(root_path: &Path) -> Result<()> {
     }
 
     // Index size
-    let index_path = root_path.join(".codesearch");
     if let Ok(size) = dir_size(&index_path) {
         println!();
         println!("Index size:       {}", format_size(size));
@@ -52,6 +56,30 @@ pub fn show_stats(root_path: &Path) -> Result<()> {
         "Updated:          {}",
         format_timestamp(reader.meta.updated_at)
     );
+
+    Ok(())
+}
+
+/// List all indexed codebases
+pub fn list_indexes() -> Result<()> {
+    let codebases = list_indexed_codebases()?;
+
+    if codebases.is_empty() {
+        println!("No indexed codebases found.");
+        return Ok(());
+    }
+
+    println!("Indexed Codebases");
+    println!("=================");
+    println!();
+
+    for codebase in codebases {
+        let exists = codebase.root_path.exists();
+        let status = if exists { "" } else { " [missing]" };
+        println!("  {}{}", codebase.root_path.display(), status);
+        println!("    Index: {}", codebase.index_dir.display());
+        println!();
+    }
 
     Ok(())
 }

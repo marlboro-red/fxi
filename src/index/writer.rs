@@ -1,13 +1,11 @@
 use crate::index::types::*;
-use crate::utils::{delta_encode, extract_tokens, extract_trigrams, is_binary, is_minified};
+use crate::utils::{delta_encode, extract_tokens, extract_trigrams, get_index_dir, is_binary, is_minified};
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-
-const INDEX_DIR: &str = ".codesearch";
 
 /// Index writer for building and updating the search index
 pub struct IndexWriter {
@@ -30,7 +28,7 @@ impl IndexWriter {
     /// Create a new index writer
     pub fn new(root_path: &Path, config: IndexConfig) -> Result<Self> {
         let root_path = root_path.canonicalize()?;
-        let index_path = root_path.join(INDEX_DIR);
+        let index_path = get_index_dir(&root_path)?;
 
         Ok(Self {
             root_path,

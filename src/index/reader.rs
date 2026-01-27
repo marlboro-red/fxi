@@ -1,13 +1,11 @@
 use crate::index::types::*;
-use crate::utils::{decode_varint, delta_decode};
+use crate::utils::{decode_varint, delta_decode, get_index_dir};
 use anyhow::{Context, Result};
 use memmap2::Mmap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-
-const INDEX_DIR: &str = ".codesearch";
 
 /// Memory-mapped index reader for fast queries
 pub struct IndexReader {
@@ -71,7 +69,7 @@ impl IndexReader {
     /// Open an existing index
     pub fn open(root_path: &Path) -> Result<Self> {
         let root_path = root_path.canonicalize()?;
-        let index_path = root_path.join(INDEX_DIR);
+        let index_path = get_index_dir(&root_path)?;
 
         if !index_path.exists() {
             anyhow::bail!("No index found. Run 'fxi index' first.");
