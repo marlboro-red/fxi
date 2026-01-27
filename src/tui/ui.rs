@@ -20,6 +20,11 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_query_input(f, app, chunks[0]);
     draw_main_area(f, app, chunks[1]);
     draw_status_bar(f, app, chunks[2]);
+
+    // Draw help panel overlay if in Help mode
+    if app.mode == Mode::Help {
+        draw_help_panel(f, f.area());
+    }
 }
 
 fn draw_query_input(f: &mut Frame, app: &App, area: Rect) {
@@ -28,7 +33,7 @@ fn draw_query_input(f: &mut Frame, app: &App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Search (F5: reindex, Ctrl+P: preview, Esc: quit) "),
+                .title(" Search (?: help) "),
         );
 
     f.render_widget(input, area);
@@ -40,8 +45,15 @@ fn draw_query_input(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_main_area(f: &mut Frame, app: &App, area: Rect) {
-    match app.mode {
-        Mode::Search => {
+    // When in help mode, draw the underlying mode's content
+    let effective_mode = if app.mode == Mode::Help {
+        app.previous_mode
+    } else {
+        app.mode
+    };
+
+    match effective_mode {
+        Mode::Search | Mode::Help => {
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -193,6 +205,122 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().fg(Color::Cyan));
 
     f.render_widget(status, area);
+}
+
+fn draw_help_panel(f: &mut Frame, area: Rect) {
+    // Calculate centered area for help panel
+    let help_width = 60u16.min(area.width.saturating_sub(4));
+    let help_height = 28u16.min(area.height.saturating_sub(2));
+    let help_x = area.x + (area.width.saturating_sub(help_width)) / 2;
+    let help_y = area.y + (area.height.saturating_sub(help_height)) / 2;
+    let help_area = Rect::new(help_x, help_y, help_width, help_height);
+
+    // Create help content
+    let help_text = vec![
+        Line::from(vec![
+            Span::styled("  SEARCH MODE", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  ?            ", Style::default().fg(Color::Cyan)),
+            Span::raw("Show this help"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc          ", Style::default().fg(Color::Cyan)),
+            Span::raw("Clear query / Exit"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Enter        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Open file in editor"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Tab/Down     ", Style::default().fg(Color::Cyan)),
+            Span::raw("Next result"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Shift+Tab/Up ", Style::default().fg(Color::Cyan)),
+            Span::raw("Previous result"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+d       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Page down"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+u       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Page up"),
+        ]),
+        Line::from(vec![
+            Span::styled("  gg / Ctrl+a  ", Style::default().fg(Color::Cyan)),
+            Span::raw("First result"),
+        ]),
+        Line::from(vec![
+            Span::styled("  G / Ctrl+e   ", Style::default().fg(Color::Cyan)),
+            Span::raw("Last result"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+p       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Toggle preview mode"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+w       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Delete word"),
+        ]),
+        Line::from(vec![
+            Span::styled("  F5           ", Style::default().fg(Color::Cyan)),
+            Span::raw("Rebuild index"),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  PREVIEW MODE", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  j/k          ", Style::default().fg(Color::Cyan)),
+            Span::raw("Scroll down/up"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+d/u     ", Style::default().fg(Color::Cyan)),
+            Span::raw("Half-page down/up"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+f/b     ", Style::default().fg(Color::Cyan)),
+            Span::raw("Full page down/up"),
+        ]),
+        Line::from(vec![
+            Span::styled("  gg / G       ", Style::default().fg(Color::Cyan)),
+            Span::raw("Top / Bottom"),
+        ]),
+        Line::from(vec![
+            Span::styled("  n / N        ", Style::default().fg(Color::Cyan)),
+            Span::raw("Next / Previous result"),
+        ]),
+        Line::from(vec![
+            Span::styled("  o / Enter    ", Style::default().fg(Color::Cyan)),
+            Span::raw("Open file"),
+        ]),
+        Line::from(vec![
+            Span::styled("  q / Esc      ", Style::default().fg(Color::Cyan)),
+            Span::raw("Back to search"),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Press any key to close", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+
+    let help_paragraph = Paragraph::new(help_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(" Keybindings ")
+                .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        )
+        .style(Style::default().bg(Color::Black));
+
+    // Clear the area behind the help panel
+    f.render_widget(ratatui::widgets::Clear, help_area);
+    f.render_widget(help_paragraph, help_area);
 }
 
 /// Highlight matches in text, returning owned spans

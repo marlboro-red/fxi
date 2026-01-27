@@ -59,6 +59,20 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                 }
 
                 match app.mode {
+                    app::Mode::Help => {
+                        // In help mode, any key closes help
+                        match (key.modifiers, key.code) {
+                            (_, KeyCode::Esc)
+                            | (_, KeyCode::Char('q'))
+                            | (KeyModifiers::SHIFT, KeyCode::Char('?')) => {
+                                app.hide_help();
+                            }
+                            _ => {
+                                // Any other key also closes help
+                                app.hide_help();
+                            }
+                        }
+                    }
                     app::Mode::Search => {
                         // Handle pending 'g' key for gg command
                         if app.pending_key == Some('g') {
@@ -120,6 +134,10 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                                 KeyCode::Char('G') => {
                                     // Vim: G - go to last result
                                     app.select_last();
+                                }
+                                KeyCode::Char('?') => {
+                                    // Show help panel
+                                    app.show_help();
                                 }
                                 KeyCode::Char(c) => {
                                     app.query.push(c);
@@ -191,6 +209,10 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                                 // Vim: N/p - previous result (from preview)
                                 KeyCode::Char('N') | KeyCode::Char('p') => {
                                     app.select_prev();
+                                }
+                                // Show help panel
+                                KeyCode::Char('?') => {
+                                    app.show_help();
                                 }
                                 _ => {}
                             },
