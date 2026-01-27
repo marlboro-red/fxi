@@ -2,6 +2,7 @@ use crate::index::types::*;
 use crate::utils::{delta_decode, get_index_dir};
 use anyhow::{Context, Result};
 use memmap2::Mmap;
+use roaring::RoaringBitmap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -105,31 +106,41 @@ impl SegmentReader {
         })
     }
 
-    /// Get documents matching a trigram in this segment
-    fn get_trigram_docs(&self, trigram: Trigram) -> Vec<DocId> {
+    /// Get documents matching a trigram in this segment as a RoaringBitmap
+    fn get_trigram_docs(&self, trigram: Trigram) -> RoaringBitmap {
         if let Some(entry) = self.trigram_dict.lookup(trigram) {
             let start = entry.offset as usize;
             let end = start + entry.length as usize;
 
             if end <= self.trigram_postings.len() {
-                return delta_decode(&self.trigram_postings[start..end]);
+                let doc_ids = delta_decode(&self.trigram_postings[start..end]);
+                return doc_ids.into_iter().collect();
             }
         }
-        Vec::new()
+        RoaringBitmap::new()
     }
 
-    /// Get documents matching a token in this segment
-    fn get_token_docs(&self, token: &str) -> Vec<DocId> {
+    /// Get the doc frequency for a trigram (number of documents containing it)
+    fn get_trigram_doc_freq(&self, trigram: Trigram) -> u32 {
+        self.trigram_dict
+            .lookup(trigram)
+            .map(|e| e.doc_freq)
+            .unwrap_or(0)
+    }
+
+    /// Get documents matching a token in this segment as a RoaringBitmap
+    fn get_token_docs(&self, token: &str) -> RoaringBitmap {
         let lower = token.to_lowercase();
         if let Some(entry) = self.token_dict.lookup(&lower) {
             let start = entry.offset as usize;
             let end = start + entry.length as usize;
 
             if end <= self.token_postings.len() {
-                return delta_decode(&self.token_postings[start..end]);
+                let doc_ids = delta_decode(&self.token_postings[start..end]);
+                return doc_ids.into_iter().collect();
             }
         }
-        Vec::new()
+        RoaringBitmap::new()
     }
 
     /// Get line map for a document in this segment
@@ -144,7 +155,10 @@ pub struct IndexReader {
     #[allow(dead_code)]
     index_path: PathBuf,
     pub meta: IndexMeta,
+    /// Documents stored as Vec for iteration, with a HashMap index for O(1) lookup
     documents: Vec<Document>,
+    /// O(1) lookup index: doc_id -> index in documents Vec
+    doc_id_to_index: HashMap<DocId, usize>,
     paths: Vec<PathBuf>,
     segments: Vec<SegmentReader>,
 }
@@ -166,6 +180,13 @@ impl IndexReader {
 
         // Read documents
         let documents = read_documents(&index_path)?;
+
+        // Build O(1) lookup index
+        let doc_id_to_index: HashMap<DocId, usize> = documents
+            .iter()
+            .enumerate()
+            .map(|(idx, doc)| (doc.doc_id, idx))
+            .collect();
 
         // Read paths
         let paths = read_paths(&index_path)?;
@@ -198,14 +219,17 @@ impl IndexReader {
             index_path,
             meta,
             documents,
+            doc_id_to_index,
             paths,
             segments,
         })
     }
 
-    /// Get document by ID
+    /// Get document by ID - O(1) lookup via HashMap index
     pub fn get_document(&self, doc_id: DocId) -> Option<&Document> {
-        self.documents.iter().find(|d| d.doc_id == doc_id)
+        self.doc_id_to_index
+            .get(&doc_id)
+            .and_then(|&idx| self.documents.get(idx))
     }
 
     /// Get path for document
@@ -223,25 +247,29 @@ impl IndexReader {
         &self.documents
     }
 
-    /// Get documents matching a trigram (queries all segments)
-    pub fn get_trigram_docs(&self, trigram: Trigram) -> Vec<DocId> {
-        let mut results = Vec::new();
+    /// Get documents matching a trigram (queries all segments) as a RoaringBitmap
+    pub fn get_trigram_docs(&self, trigram: Trigram) -> RoaringBitmap {
+        let mut results = RoaringBitmap::new();
         for segment in &self.segments {
-            results.extend(segment.get_trigram_docs(trigram));
+            results |= segment.get_trigram_docs(trigram);
         }
-        results.sort_unstable();
-        results.dedup();
         results
     }
 
-    /// Get documents matching a token (queries all segments)
-    pub fn get_token_docs(&self, token: &str) -> Vec<DocId> {
-        let mut results = Vec::new();
+    /// Get the total doc frequency for a trigram across all segments
+    pub fn get_trigram_doc_freq(&self, trigram: Trigram) -> u32 {
+        self.segments
+            .iter()
+            .map(|s| s.get_trigram_doc_freq(trigram))
+            .sum()
+    }
+
+    /// Get documents matching a token (queries all segments) as a RoaringBitmap
+    pub fn get_token_docs(&self, token: &str) -> RoaringBitmap {
+        let mut results = RoaringBitmap::new();
         for segment in &self.segments {
-            results.extend(segment.get_token_docs(token));
+            results |= segment.get_token_docs(token);
         }
-        results.sort_unstable();
-        results.dedup();
         results
     }
 
@@ -275,8 +303,8 @@ impl IndexReader {
         self.meta.stop_grams.contains(&trigram)
     }
 
-    /// Get all valid (non-stale, non-tombstone) doc IDs
-    pub fn valid_doc_ids(&self) -> Vec<DocId> {
+    /// Get all valid (non-stale, non-tombstone) doc IDs as a RoaringBitmap
+    pub fn valid_doc_ids(&self) -> RoaringBitmap {
         self.documents
             .iter()
             .filter(|d| d.is_valid())

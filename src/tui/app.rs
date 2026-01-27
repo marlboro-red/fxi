@@ -34,6 +34,8 @@ pub struct App {
     pub preview_content: Option<String>,
     /// Path of the currently previewed file (for syntax highlighting)
     pub preview_path: Option<PathBuf>,
+    /// Cached highlighted lines for the current preview (to avoid re-highlighting on every frame)
+    pub preview_highlighted: Option<Vec<Vec<ratatui::text::Span<'static>>>>,
     pub status_message: String,
     pub index_available: bool,
     /// Pending key for vim multi-key commands (e.g., 'g' for 'gg')

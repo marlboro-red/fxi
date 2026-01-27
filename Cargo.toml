@@ -27,6 +27,10 @@ globset = "0.4.18"
 # Regex
 regex = "1.11"
 
+# Performance optimizations
+roaring = "0.10"
+memchr = "2.7"
+
 # TUI
 ratatui = "0.29"
 crossterm = "0.29"
