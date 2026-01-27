@@ -1,5 +1,5 @@
-use crate::index::types::{DocFlags, IndexConfig, Language};
-use crate::index::writer::IndexWriter;
+use crate::index::types::{DocFlags, IndexConfig, Language, SegmentId};
+use crate::index::writer::ChunkedIndexWriter;
 use crate::utils::{
     extract_tokens, extract_trigrams, find_codebase_root, get_index_dir, is_binary, is_minified,
     remove_index,
@@ -98,7 +98,8 @@ pub fn build_index_with_progress(root_path: &Path, force: bool, silent: bool) ->
     }
 
     let config = IndexConfig::default();
-    let mut writer = IndexWriter::new(&root, config.clone())?;
+    let chunk_size = config.chunk_size;
+    let max_file_size = config.max_file_size;
 
     if !silent {
         println!("Indexing: {}", root.display());
@@ -151,99 +152,127 @@ pub fn build_index_with_progress(root_path: &Path, force: bool, silent: bool) ->
         spinner.finish_with_message(format!("Found {} files", total_files));
     }
 
-    // Phase 2: Process files in parallel with progress bar
-    let progress_bar = if !silent {
-        let pb = ProgressBar::new(total_files as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
-                .unwrap()
-                .progress_chars("█▓▒░  "),
-        );
-        pb.set_message("Processing files...");
-        Some(pb)
-    } else {
-        None
-    };
-
+    // Phase 2: Process in chunks
+    let mut chunked_writer = ChunkedIndexWriter::new(&root, config)?;
     let error_count = Arc::new(AtomicUsize::new(0));
-    let max_file_size = config.max_file_size;
-    let pb_clone = progress_bar.clone();
+    let total_processed = Arc::new(AtomicUsize::new(0));
 
-    let processed_files: Vec<ProcessedFile> = file_entries
-        .par_iter()
-        .filter_map(|(full_path, rel_path)| {
-            // Read file content
-            let content = match fs::read(full_path) {
-                Ok(c) => c,
-                Err(_) => {
-                    error_count.fetch_add(1, Ordering::Relaxed);
+    let num_chunks = (total_files + chunk_size - 1) / chunk_size;
+    if num_chunks > 1 && !silent {
+        println!("Processing in {} chunks of up to {} files each", num_chunks, chunk_size);
+    }
+
+    for (chunk_idx, chunk) in file_entries.chunks(chunk_size).enumerate() {
+        let segment_id = (chunk_idx + 1) as SegmentId;
+
+        // Create progress bar for this chunk
+        let progress_bar = if !silent {
+            let pb = ProgressBar::new(chunk.len() as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                    .unwrap()
+                    .progress_chars("█▓▒░  "),
+            );
+            if num_chunks > 1 {
+                pb.set_message(format!("Chunk {}/{}", chunk_idx + 1, num_chunks));
+            } else {
+                pb.set_message("Processing files...");
+            }
+            Some(pb)
+        } else {
+            None
+        };
+
+        let pb_clone = progress_bar.clone();
+        let error_count_clone = error_count.clone();
+        let total_processed_clone = total_processed.clone();
+
+        // Process chunk files in parallel
+        let processed_files: Vec<ProcessedFile> = chunk
+            .par_iter()
+            .filter_map(|(full_path, rel_path)| {
+                // Read file content
+                let content = match fs::read(full_path) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        error_count_clone.fetch_add(1, Ordering::Relaxed);
+                        if let Some(ref pb) = pb_clone {
+                            pb.inc(1);
+                        }
+                        return None;
+                    }
+                };
+
+                // Check size limit
+                if content.len() as u64 > max_file_size {
                     if let Some(ref pb) = pb_clone {
                         pb.inc(1);
                     }
                     return None;
                 }
-            };
 
-            // Check size limit
-            if content.len() as u64 > max_file_size {
+                // Get modification time
+                let mtime = full_path
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64)
+                    .unwrap_or(0);
+
+                // Process file content (trigrams, tokens, line map)
+                let result = process_file_content(rel_path.clone(), &content, mtime);
+
+                if result.is_some() {
+                    total_processed_clone.fetch_add(1, Ordering::Relaxed);
+                }
+
                 if let Some(ref pb) = pb_clone {
                     pb.inc(1);
                 }
-                return None;
+
+                result
+            })
+            .collect();
+
+        let chunk_file_count = processed_files.len();
+
+        if let Some(pb) = progress_bar {
+            if num_chunks > 1 {
+                pb.finish_with_message(format!("Chunk {}/{}: {} files", chunk_idx + 1, num_chunks, chunk_file_count));
+            } else {
+                pb.finish_with_message(format!("Processed {} files", chunk_file_count));
             }
+        }
 
-            // Get modification time
-            let mtime = full_path
-                .metadata()
-                .and_then(|m| m.modified())
-                .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64)
-                .unwrap_or(0);
+        // Write this chunk as a segment
+        chunked_writer.write_chunk(segment_id, processed_files)?;
 
-            // Process file content (trigrams, tokens, line map)
-            let result = process_file_content(rel_path.clone(), &content, mtime);
-
-            if let Some(ref pb) = pb_clone {
-                pb.inc(1);
-            }
-
-            result
-        })
-        .collect();
-
-    let file_count = processed_files.len();
-
-    if let Some(pb) = progress_bar {
-        pb.finish_with_message(format!("Processed {} files", file_count));
+        // Memory freed here - processed_files dropped
     }
 
-    // Phase 3: Merge results into writer (sequential) with spinner
-    let merge_spinner = if !silent {
+    let file_count = total_processed.load(Ordering::Relaxed);
+    if num_chunks > 1 && !silent {
+        println!("Total: {} files processed across {} segments", file_count, num_chunks);
+    }
+
+    // Phase 3: Finalize global data with spinner
+    let finalize_spinner = if !silent {
         let spinner = ProgressBar::new_spinner();
         spinner.set_style(
             ProgressStyle::default_spinner()
                 .template("{spinner:.cyan} {msg}")
                 .unwrap(),
         );
-        spinner.set_message("Merging index data...");
+        spinner.set_message("Finalizing index...");
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
         Some(spinner)
     } else {
         None
     };
 
-    for processed in processed_files {
-        writer.add_processed_file(processed);
-    }
+    chunked_writer.finalize()?;
 
-    if let Some(spinner) = &merge_spinner {
-        spinner.set_message("Writing index to disk...");
-    }
-
-    // Write the index
-    writer.write().context("Failed to write index")?;
-
-    if let Some(spinner) = merge_spinner {
+    if let Some(spinner) = finalize_spinner {
         spinner.finish_with_message("Index complete");
     }
 
