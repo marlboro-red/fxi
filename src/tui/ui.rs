@@ -33,7 +33,7 @@ fn draw_query_input(f: &mut Frame, app: &App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Search (?: help) "),
+                .title(" Search (F1: help) "),
         );
 
     f.render_widget(input, area);
@@ -222,7 +222,7 @@ fn draw_help_panel(f: &mut Frame, area: Rect) {
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  ?            ", Style::default().fg(Color::Cyan)),
+            Span::styled("  F1 / ?       ", Style::default().fg(Color::Cyan)),
             Span::raw("Show this help"),
         ]),
         Line::from(vec![

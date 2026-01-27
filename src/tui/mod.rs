@@ -147,6 +147,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                                     app.query.pop();
                                     app.execute_search();
                                 }
+                                KeyCode::F(1) => app.show_help(),
                                 KeyCode::F(5) => app.reindex(),
                                 _ => {}
                             },
@@ -211,7 +212,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                                     app.select_prev();
                                 }
                                 // Show help panel
-                                KeyCode::Char('?') => {
+                                KeyCode::Char('?') | KeyCode::F(1) => {
                                     app.show_help();
                                 }
                                 _ => {}
