@@ -161,33 +161,70 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let content = if let Some(ref preview) = app.preview_content {
+        // Get the matched line number for highlighting
+        let match_line = app
+            .get_selected_result()
+            .map(|r| r.line_number as usize)
+            .unwrap_or(0);
+
+        // Use syntax highlighting if we have a file path
+        let highlighted_lines = app.preview_path.as_ref().map(|path| {
+            app.highlighter.highlight_content(preview, path)
+        });
+
         let lines: Vec<Line> = preview
             .lines()
             .enumerate()
             .skip(app.preview_scroll)
             .take(area.height.saturating_sub(2) as usize)
-            .map(|(line_num, line)| {
+            .map(|(line_num, plain_line)| {
                 let actual_line = line_num + 1;
-
-                // Check if this is the matched line
-                let is_match = app
-                    .get_selected_result()
-                    .map(|r| r.line_number as usize == actual_line)
-                    .unwrap_or(false);
+                let is_match = actual_line == match_line;
 
                 let line_num_style = Style::default().fg(Color::DarkGray);
-                let content_style = if is_match {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-
-                Line::from(vec![
+                let mut spans = vec![
                     Span::styled(format!("{:4} ", actual_line), line_num_style),
-                    Span::styled(line, content_style),
-                ])
+                ];
+
+                // Use highlighted spans if available, otherwise fall back to plain text
+                if let Some(ref highlighted) = highlighted_lines {
+                    if let Some(line_spans) = highlighted.get(line_num) {
+                        if is_match {
+                            // For matched line, add bold modifier to all spans
+                            for span in line_spans {
+                                let mut style = span.style;
+                                style = style.add_modifier(Modifier::BOLD);
+                                // Also add a subtle background to indicate match
+                                style = style.bg(Color::Rgb(60, 60, 40));
+                                spans.push(Span::styled(span.content.clone(), style));
+                            }
+                        } else {
+                            spans.extend(line_spans.clone());
+                        }
+                    } else {
+                        // Fallback for lines beyond highlighted content
+                        let content_style = if is_match {
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                        };
+                        spans.push(Span::styled(plain_line.to_string(), content_style));
+                    }
+                } else {
+                    // No highlighting available, use plain text
+                    let content_style = if is_match {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    spans.push(Span::styled(plain_line.to_string(), content_style));
+                }
+
+                Line::from(spans)
             })
             .collect();
 

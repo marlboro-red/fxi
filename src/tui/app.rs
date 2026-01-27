@@ -2,6 +2,7 @@ use crate::index::build::build_index;
 use crate::index::reader::IndexReader;
 use crate::index::types::SearchMatch;
 use crate::query::{parse_query, QueryExecutor};
+use crate::tui::highlighter::SyntaxHighlighter;
 use crate::utils::find_codebase_root;
 use anyhow::Result;
 use std::path::PathBuf;
@@ -31,10 +32,14 @@ pub struct App {
     pub previous_mode: Mode,
     pub preview_scroll: usize,
     pub preview_content: Option<String>,
+    /// Path of the currently previewed file (for syntax highlighting)
+    pub preview_path: Option<PathBuf>,
     pub status_message: String,
     pub index_available: bool,
     /// Pending key for vim multi-key commands (e.g., 'g' for 'gg')
     pub pending_key: Option<char>,
+    /// Syntax highlighter for code preview
+    pub highlighter: SyntaxHighlighter,
 }
 
 impl App {
@@ -77,9 +82,11 @@ impl App {
             previous_mode: Mode::Search,
             preview_scroll: 0,
             preview_content: None,
+            preview_path: None,
             status_message: status,
             index_available,
             pending_key: None,
+            highlighter: SyntaxHighlighter::new(),
         })
     }
 
@@ -191,13 +198,16 @@ impl App {
             let full_path = self.root_path.join(&result.path);
             if let Ok(content) = std::fs::read_to_string(&full_path) {
                 self.preview_content = Some(content);
+                self.preview_path = Some(full_path);
                 // Scroll to show the match
                 self.preview_scroll = result.line_number.saturating_sub(5) as usize;
             } else {
                 self.preview_content = None;
+                self.preview_path = None;
             }
         } else {
             self.preview_content = None;
+            self.preview_path = None;
         }
     }
 
