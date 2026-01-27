@@ -12,6 +12,7 @@ use std::process::Command;
 pub enum Mode {
     Search,
     Preview,
+    Help,
 }
 
 /// Application state
@@ -26,6 +27,8 @@ pub struct App {
     pub results: Vec<SearchMatch>,
     pub selected: usize,
     pub mode: Mode,
+    /// Previous mode before entering help (to return to)
+    pub previous_mode: Mode,
     pub preview_scroll: usize,
     pub preview_content: Option<String>,
     pub status_message: String,
@@ -71,6 +74,7 @@ impl App {
             results: Vec::new(),
             selected: 0,
             mode: Mode::Search,
+            previous_mode: Mode::Search,
             preview_scroll: 0,
             preview_content: None,
             status_message: status,
@@ -164,8 +168,22 @@ impl App {
         self.mode = match self.mode {
             Mode::Search => Mode::Preview,
             Mode::Preview => Mode::Search,
+            Mode::Help => Mode::Help, // Don't toggle preview in help mode
         };
         self.update_preview();
+    }
+
+    pub fn show_help(&mut self) {
+        if self.mode != Mode::Help {
+            self.previous_mode = self.mode;
+            self.mode = Mode::Help;
+        }
+    }
+
+    pub fn hide_help(&mut self) {
+        if self.mode == Mode::Help {
+            self.mode = self.previous_mode;
+        }
     }
 
     pub fn update_preview(&mut self) {
