@@ -80,7 +80,7 @@ This document identifies gaps between the `spec.md` specification and the curren
 
 ## Ranking/Scoring Gaps
 
-### 5. Score Factors (spec 10.4)
+### 5. Score Factors (spec 10.4) ✅ IMPLEMENTED
 
 **Spec says:**
 > Score factors:
@@ -90,19 +90,16 @@ This document identifies gaps between the `spec.md` specification and the curren
 > - directory depth
 > - recency
 
-**Current state:** All results have `score = 1.0` (hardcoded in `executor.rs:253`). Scoring is not calculated.
+**Current state:** ✅ Implemented in `src/query/scorer.rs`. Scoring includes:
+- Match count (logarithmic scaling to prevent huge files from dominating)
+- Filename match bonus (configurable)
+- Directory depth penalty (configurable, with max cap)
+- Recency bonus (exponential decay based on mtime)
+- All weights configurable via `ScoringWeights` struct
 
-**Impact:** High - without proper scoring, sort-by-score is meaningless
+**Implementation:** See `src/query/scorer.rs` and integration in `src/query/executor.rs`
 
-**Implementation notes:**
-- Calculate `match_count` during verification
-- Add `proximity_score` for multiple term queries
-- Boost score if match appears in filename
-- Reduce score for deeply nested paths
-- Factor in `mtime` for recency bonus
-- Make scoring weights configurable (spec 17)
-
-**Location:** `src/query/executor.rs:245-254`
+**Note:** Proximity scoring for multiple term queries is not yet implemented (depends on Gap #2 `near:` query)
 
 ---
 
@@ -276,13 +273,14 @@ This document identifies gaps between the `spec.md` specification and the curren
 ## Completed
 
 - ✅ **Match Highlighting in Results** (spec 11: "highlighted matches") - Implemented in this PR
+- ✅ **Result Scoring** (Gap #5, spec 10.4) - Implemented configurable scoring based on match count, filename match, directory depth, and recency
 
 ---
 
 ## Priority Recommendations
 
 **High Priority (implement next):**
-1. Result scoring (Gap #5) - Makes sort-by-score meaningful
+1. ~~Result scoring (Gap #5) - Makes sort-by-score meaningful~~ ✅ DONE
 2. Proximity search `near:` (Gap #2) - Core code search feature
 
 **Medium Priority:**

@@ -2,20 +2,33 @@ use crate::index::reader::IndexReader;
 use crate::index::types::{DocId, Language, SearchMatch};
 use crate::query::parser::{Query, SortOrder};
 use crate::query::planner::{FilterStep, PlanStep, QueryPlan, VerificationStep};
+use crate::query::scorer::{ScoreContext, Scorer, ScoringWeights};
 use anyhow::Result;
 use globset::Glob;
 use regex::Regex;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 /// Query executor
 pub struct QueryExecutor<'a> {
     reader: &'a IndexReader,
+    scorer: Scorer,
 }
 
 impl<'a> QueryExecutor<'a> {
     pub fn new(reader: &'a IndexReader) -> Self {
-        Self { reader }
+        Self {
+            reader,
+            scorer: Scorer::with_defaults(),
+        }
+    }
+
+    /// Create executor with custom scoring weights
+    pub fn with_scoring_weights(reader: &'a IndexReader, weights: ScoringWeights) -> Self {
+        Self {
+            reader,
+            scorer: Scorer::new(weights),
+        }
     }
 
     /// Execute a query and return matches
@@ -227,6 +240,12 @@ impl<'a> QueryExecutor<'a> {
             None => return Ok(matches),
         };
 
+        // Extract search terms for filename matching
+        let search_terms = Self::extract_search_terms(verification);
+
+        // First pass: collect all matches grouped by doc_id
+        let mut doc_matches: HashMap<DocId, Vec<(u32, String, usize, usize)>> = HashMap::new();
+
         for &doc_id in candidates {
             if let Some(doc) = self.reader.get_document(doc_id) {
                 if let Some(full_path) = self.reader.get_full_path(doc) {
@@ -239,24 +258,87 @@ impl<'a> QueryExecutor<'a> {
                     // Find matches
                     let file_matches = self.verify_content(&content, verification, doc_id);
 
-                    for (line_num, line_content, start, end) in file_matches {
-                        let path = self.reader.get_path(doc).cloned().unwrap_or_default();
-
-                        matches.push(SearchMatch {
-                            doc_id,
-                            path,
-                            line_number: line_num,
-                            line_content,
-                            match_start: start,
-                            match_end: end,
-                            score: 1.0,
-                        });
+                    if !file_matches.is_empty() {
+                        doc_matches.insert(doc_id, file_matches);
                     }
                 }
             }
         }
 
+        // Second pass: calculate scores and build results
+        for (doc_id, file_matches) in doc_matches {
+            if let Some(doc) = self.reader.get_document(doc_id) {
+                let path = self.reader.get_path(doc).cloned().unwrap_or_default();
+
+                // Build score context
+                let filename_match = search_terms
+                    .iter()
+                    .any(|term| Scorer::term_in_filename(&path, term));
+
+                let score_ctx = ScoreContext {
+                    match_count: file_matches.len(),
+                    filename_match,
+                    depth: Scorer::path_depth(&path),
+                    mtime: doc.mtime,
+                };
+
+                let score = self.scorer.calculate_score(&score_ctx);
+
+                // Create matches with calculated score
+                for (line_num, line_content, start, end) in file_matches {
+                    matches.push(SearchMatch {
+                        doc_id,
+                        path: path.clone(),
+                        line_number: line_num,
+                        line_content,
+                        match_start: start,
+                        match_end: end,
+                        score,
+                    });
+                }
+            }
+        }
+
         Ok(matches)
+    }
+
+    /// Extract search terms from verification step for filename matching
+    fn extract_search_terms(verification: &VerificationStep) -> Vec<String> {
+        let mut terms = Vec::new();
+        Self::collect_terms(verification, &mut terms);
+        terms
+    }
+
+    /// Recursively collect terms from verification steps
+    fn collect_terms(verification: &VerificationStep, terms: &mut Vec<String>) {
+        match verification {
+            VerificationStep::Literal(text) | VerificationStep::Phrase(text) => {
+                // Split into words and collect meaningful terms
+                for word in text.split_whitespace() {
+                    if word.len() >= 2 {
+                        terms.push(word.to_string());
+                    }
+                }
+            }
+            VerificationStep::Regex(pattern) => {
+                // Try to extract literal parts from regex
+                let literal = pattern
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect::<String>();
+                if literal.len() >= 2 {
+                    terms.push(literal);
+                }
+            }
+            VerificationStep::And(steps) | VerificationStep::Or(steps) => {
+                for step in steps {
+                    Self::collect_terms(step, terms);
+                }
+            }
+            VerificationStep::Not(_) => {
+                // Don't include negated terms in filename matching
+            }
+        }
     }
 
     /// Verify content against a verification step

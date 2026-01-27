@@ -1,3 +1,4 @@
+use crate::query::scorer::ScoringWeights;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -219,6 +220,8 @@ pub struct IndexConfig {
     pub delta_threshold: usize,
     pub compaction_ratio: f32,
     pub ignored_paths: Vec<String>,
+    /// Scoring weights for search result ranking
+    pub scoring_weights: ScoringWeights,
 }
 
 impl Default for IndexConfig {
@@ -234,6 +237,7 @@ impl Default for IndexConfig {
                 "target".to_string(),
                 ".codesearch".to_string(),
             ],
+            scoring_weights: ScoringWeights::default(),
         }
     }
 }
