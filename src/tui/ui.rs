@@ -72,26 +72,56 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
 
             let path_style = Style::default().fg(Color::Blue);
             let line_style = Style::default().fg(Color::Yellow);
-            let content_style = Style::default().fg(Color::White);
 
             // Format: path:line  content
             let path_str = result.path.to_string_lossy();
             let line_num = result.line_number;
 
+            // Trim leading whitespace and track offset adjustment
+            let trimmed = result.line_content.trim_start();
+            let trim_offset = result.line_content.len() - trimmed.len();
+            let trimmed = trimmed.trim_end();
+
             // Truncate content if needed
             let max_content_len = area.width.saturating_sub(path_str.len() as u16 + 10) as usize;
-            let content = if result.line_content.len() > max_content_len {
-                format!("{}...", &result.line_content[..max_content_len.saturating_sub(3)])
+            let (content, truncated) = if trimmed.len() > max_content_len {
+                (
+                    format!("{}...", &trimmed[..max_content_len.saturating_sub(3)]),
+                    true,
+                )
             } else {
-                result.line_content.clone()
+                (trimmed.to_string(), false)
             };
 
-            let line = Line::from(vec![
+            // Build line with highlighted match
+            let mut spans = vec![
                 Span::styled(format!("{}:", path_str), path_style),
                 Span::styled(format!("{}", line_num), line_style),
                 Span::raw("  "),
-                Span::styled(content.trim().to_string(), content_style),
-            ]);
+            ];
+
+            // Adjust match positions for trimming
+            let adj_start = result.match_start.saturating_sub(trim_offset);
+            let adj_end = result.match_end.saturating_sub(trim_offset);
+
+            // Only highlight if match is within the displayed content
+            if adj_start < content.len() && adj_end > adj_start {
+                let end = adj_end.min(content.len());
+                // Account for "..." if truncated and match extends past it
+                let effective_end = if truncated && end > max_content_len.saturating_sub(3) {
+                    max_content_len.saturating_sub(3)
+                } else {
+                    end
+                };
+                spans.extend(highlight_match(&content, adj_start, effective_end));
+            } else {
+                spans.push(Span::styled(
+                    content,
+                    Style::default().fg(Color::White),
+                ));
+            }
+
+            let line = Line::from(spans);
 
             ListItem::new(line).style(style)
         })
@@ -165,24 +195,36 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(status, area);
 }
 
-/// Highlight matches in text
-fn highlight_match(text: &str, start: usize, end: usize) -> Vec<Span<'_>> {
+/// Highlight matches in text, returning owned spans
+fn highlight_match(text: &str, start: usize, end: usize) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
 
+    // Clamp positions to valid bounds
+    let start = start.min(text.len());
+    let end = end.min(text.len()).max(start);
+
     if start > 0 {
-        spans.push(Span::raw(&text[..start]));
+        spans.push(Span::styled(
+            text[..start].to_string(),
+            Style::default().fg(Color::White),
+        ));
     }
 
-    spans.push(Span::styled(
-        &text[start..end],
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    ));
+    if end > start {
+        spans.push(Span::styled(
+            text[start..end].to_string(),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
 
     if end < text.len() {
-        spans.push(Span::raw(&text[end..]));
+        spans.push(Span::styled(
+            text[end..].to_string(),
+            Style::default().fg(Color::White),
+        ));
     }
 
     spans
