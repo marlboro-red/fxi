@@ -124,7 +124,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                                 }
                                 KeyCode::Enter => {
                                     if !app.results.is_empty() {
-                                        app.open_selected();
+                                        app.toggle_preview();
                                     }
                                 }
                                 KeyCode::Down | KeyCode::Tab => app.select_next(),
