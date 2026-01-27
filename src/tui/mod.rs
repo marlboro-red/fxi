@@ -104,7 +104,6 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                             // Vim: Ctrl+h - backspace (terminal standard)
                             (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
                                 app.query.pop();
-                                app.execute_search();
                             }
                             // Vim: Ctrl+a - go to first result
                             (KeyModifiers::CONTROL, KeyCode::Char('a')) => app.select_first(),
@@ -123,9 +122,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                                     app.clear_query();
                                 }
                                 KeyCode::Enter => {
-                                    if !app.results.is_empty() {
-                                        app.toggle_preview();
-                                    }
+                                    app.execute_search();
                                 }
                                 KeyCode::Down | KeyCode::Tab => app.select_next(),
                                 KeyCode::Up | KeyCode::BackTab => app.select_prev(),
@@ -145,11 +142,9 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                                 }
                                 KeyCode::Char(c) => {
                                     app.query.push(c);
-                                    app.execute_search();
                                 }
                                 KeyCode::Backspace => {
                                     app.query.pop();
-                                    app.execute_search();
                                 }
                                 KeyCode::F(1) => app.show_help(),
                                 KeyCode::F(5) => app.reindex(),

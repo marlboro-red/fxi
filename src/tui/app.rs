@@ -328,7 +328,6 @@ impl App {
         while !self.query.is_empty() && !self.query.ends_with(' ') {
             self.query.pop();
         }
-        self.execute_search();
     }
 
     /// Clear pending key state
