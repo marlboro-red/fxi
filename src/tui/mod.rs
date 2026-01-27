@@ -59,47 +59,144 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                 }
 
                 match app.mode {
-                    app::Mode::Search => match key.code {
-                        KeyCode::Esc => {
-                            if app.query.is_empty() {
-                                return Ok(());
+                    app::Mode::Search => {
+                        // Handle pending 'g' key for gg command
+                        if app.pending_key == Some('g') {
+                            app.clear_pending_key();
+                            if key.code == KeyCode::Char('g') {
+                                app.select_first();
+                                continue;
                             }
-                            app.clear_query();
+                            // If not 'g', fall through to normal handling
                         }
-                        KeyCode::Enter => {
-                            if !app.results.is_empty() {
-                                app.open_selected();
-                            }
-                        }
-                        KeyCode::Down | KeyCode::Tab => app.select_next(),
-                        KeyCode::Up | KeyCode::BackTab => app.select_prev(),
-                        KeyCode::PageDown => app.select_page_down(),
-                        KeyCode::PageUp => app.select_page_up(),
-                        KeyCode::Char(c) => {
-                            app.query.push(c);
-                            app.execute_search();
-                        }
-                        KeyCode::Backspace => {
-                            app.query.pop();
-                            app.execute_search();
-                        }
-                        KeyCode::F(5) => app.reindex(),
-                        _ => {}
-                    },
-                    app::Mode::Preview => match key.code {
-                        KeyCode::Esc | KeyCode::Char('q') => app.mode = app::Mode::Search,
-                        KeyCode::Down | KeyCode::Char('j') => app.scroll_preview_down(),
-                        KeyCode::Up | KeyCode::Char('k') => app.scroll_preview_up(),
-                        KeyCode::PageDown => app.scroll_preview_page_down(),
-                        KeyCode::PageUp => app.scroll_preview_page_up(),
-                        KeyCode::Enter | KeyCode::Char('o') => app.open_selected(),
-                        _ => {}
-                    },
-                }
 
-                // Toggle preview mode
-                if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    app.toggle_preview();
+                        // Check for Ctrl+key combinations first
+                        match (key.modifiers, key.code) {
+                            // Vim: Ctrl+j/Ctrl+n - select next result
+                            (KeyModifiers::CONTROL, KeyCode::Char('j'))
+                            | (KeyModifiers::CONTROL, KeyCode::Char('n')) => app.select_next(),
+                            // Vim: Ctrl+k - select previous result (Ctrl+p reserved for toggle preview)
+                            (KeyModifiers::CONTROL, KeyCode::Char('k')) => app.select_prev(),
+                            // Vim: Ctrl+d - page down
+                            (KeyModifiers::CONTROL, KeyCode::Char('d')) => app.select_page_down(),
+                            // Vim: Ctrl+u - page up
+                            (KeyModifiers::CONTROL, KeyCode::Char('u')) => app.select_page_up(),
+                            // Vim: Ctrl+w - delete word backward
+                            (KeyModifiers::CONTROL, KeyCode::Char('w')) => app.delete_word(),
+                            // Vim: Ctrl+h - backspace (terminal standard)
+                            (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
+                                app.query.pop();
+                                app.execute_search();
+                            }
+                            // Vim: Ctrl+a - go to first result
+                            (KeyModifiers::CONTROL, KeyCode::Char('a')) => app.select_first(),
+                            // Vim: Ctrl+e - go to last result
+                            (KeyModifiers::CONTROL, KeyCode::Char('e')) => app.select_last(),
+                            // Toggle preview mode
+                            (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
+                                app.toggle_preview();
+                            }
+                            // Non-Ctrl keybindings
+                            (KeyModifiers::NONE | KeyModifiers::SHIFT, code) => match code {
+                                KeyCode::Esc => {
+                                    if app.query.is_empty() {
+                                        return Ok(());
+                                    }
+                                    app.clear_query();
+                                }
+                                KeyCode::Enter => {
+                                    if !app.results.is_empty() {
+                                        app.open_selected();
+                                    }
+                                }
+                                KeyCode::Down | KeyCode::Tab => app.select_next(),
+                                KeyCode::Up | KeyCode::BackTab => app.select_prev(),
+                                KeyCode::PageDown => app.select_page_down(),
+                                KeyCode::PageUp => app.select_page_up(),
+                                KeyCode::Char('g') => {
+                                    // Start 'gg' sequence for vim-style go to top
+                                    app.pending_key = Some('g');
+                                }
+                                KeyCode::Char('G') => {
+                                    // Vim: G - go to last result
+                                    app.select_last();
+                                }
+                                KeyCode::Char(c) => {
+                                    app.query.push(c);
+                                    app.execute_search();
+                                }
+                                KeyCode::Backspace => {
+                                    app.query.pop();
+                                    app.execute_search();
+                                }
+                                KeyCode::F(5) => app.reindex(),
+                                _ => {}
+                            },
+                            _ => {}
+                        }
+                    }
+                    app::Mode::Preview => {
+                        // Handle pending 'g' key for gg command
+                        if app.pending_key == Some('g') {
+                            app.clear_pending_key();
+                            if key.code == KeyCode::Char('g') {
+                                app.scroll_preview_to_top();
+                                continue;
+                            }
+                            // If not 'g', fall through to normal handling
+                        }
+
+                        // Check for Ctrl+key combinations first
+                        match (key.modifiers, key.code) {
+                            // Vim: Ctrl+d - half-page down
+                            (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
+                                app.scroll_preview_half_page_down()
+                            }
+                            // Vim: Ctrl+u - half-page up
+                            (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
+                                app.scroll_preview_half_page_up()
+                            }
+                            // Vim: Ctrl+f - full page down
+                            (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
+                                app.scroll_preview_page_down()
+                            }
+                            // Vim: Ctrl+b - full page up
+                            (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
+                                app.scroll_preview_page_up()
+                            }
+                            // Toggle preview mode
+                            (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
+                                app.toggle_preview();
+                            }
+                            // Non-Ctrl keybindings
+                            (KeyModifiers::NONE | KeyModifiers::SHIFT, code) => match code {
+                                KeyCode::Esc | KeyCode::Char('q') => app.mode = app::Mode::Search,
+                                KeyCode::Down | KeyCode::Char('j') => app.scroll_preview_down(),
+                                KeyCode::Up | KeyCode::Char('k') => app.scroll_preview_up(),
+                                KeyCode::PageDown => app.scroll_preview_page_down(),
+                                KeyCode::PageUp => app.scroll_preview_page_up(),
+                                KeyCode::Enter | KeyCode::Char('o') => app.open_selected(),
+                                // Vim: g - start 'gg' sequence for go to top
+                                KeyCode::Char('g') => {
+                                    app.pending_key = Some('g');
+                                }
+                                // Vim: G - go to bottom
+                                KeyCode::Char('G') => {
+                                    app.scroll_preview_to_bottom();
+                                }
+                                // Vim: n - next result (from preview)
+                                KeyCode::Char('n') => {
+                                    app.select_next();
+                                }
+                                // Vim: N/p - previous result (from preview)
+                                KeyCode::Char('N') | KeyCode::Char('p') => {
+                                    app.select_prev();
+                                }
+                                _ => {}
+                            },
+                            _ => {}
+                        }
+                    }
                 }
             }
         }

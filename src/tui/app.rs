@@ -29,6 +29,8 @@ pub struct App {
     pub preview_content: Option<String>,
     pub status_message: String,
     pub index_available: bool,
+    /// Pending key for vim multi-key commands (e.g., 'g' for 'gg')
+    pub pending_key: Option<char>,
 }
 
 impl App {
@@ -72,6 +74,7 @@ impl App {
             preview_content: None,
             status_message: status,
             index_available,
+            pending_key: None,
         })
     }
 
@@ -243,5 +246,64 @@ impl App {
 
     pub fn get_selected_result(&self) -> Option<&SearchMatch> {
         self.results.get(self.selected)
+    }
+
+    // Vim-style navigation methods
+
+    /// Jump to first result
+    pub fn select_first(&mut self) {
+        if !self.results.is_empty() {
+            self.selected = 0;
+            self.update_preview();
+        }
+    }
+
+    /// Jump to last result
+    pub fn select_last(&mut self) {
+        if !self.results.is_empty() {
+            self.selected = self.results.len() - 1;
+            self.update_preview();
+        }
+    }
+
+    /// Scroll preview to top (vim 'gg')
+    pub fn scroll_preview_to_top(&mut self) {
+        self.preview_scroll = 0;
+    }
+
+    /// Scroll preview to bottom (vim 'G')
+    pub fn scroll_preview_to_bottom(&mut self) {
+        if let Some(ref content) = self.preview_content {
+            let line_count = content.lines().count();
+            self.preview_scroll = line_count.saturating_sub(20);
+        }
+    }
+
+    /// Scroll preview half-page down (vim Ctrl+d)
+    pub fn scroll_preview_half_page_down(&mut self) {
+        self.preview_scroll += 10;
+    }
+
+    /// Scroll preview half-page up (vim Ctrl+u)
+    pub fn scroll_preview_half_page_up(&mut self) {
+        self.preview_scroll = self.preview_scroll.saturating_sub(10);
+    }
+
+    /// Delete word backward from query (vim Ctrl+w)
+    pub fn delete_word(&mut self) {
+        // Remove trailing whitespace first
+        while self.query.ends_with(' ') {
+            self.query.pop();
+        }
+        // Remove word characters
+        while !self.query.is_empty() && !self.query.ends_with(' ') {
+            self.query.pop();
+        }
+        self.execute_search();
+    }
+
+    /// Clear pending key state
+    pub fn clear_pending_key(&mut self) {
+        self.pending_key = None;
     }
 }
