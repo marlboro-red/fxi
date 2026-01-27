@@ -10,7 +10,8 @@ A terminal-first, ultra-fast code search engine built in Rust.
 - **Rich query syntax**: Boolean operators, field filters, regex
 - **Interactive TUI**: Real-time search with preview
 - **Respects .gitignore**: Automatic filtering of ignored files
-- **Incremental updates**: Delta segment support (LSM-style)
+- **Centralized indexes**: Stored in app data, not in project directories
+- **Auto-detection**: Finds codebase root from any subdirectory
 
 ## Installation
 
@@ -23,22 +24,68 @@ cargo build --release
 ### Build Index
 
 ```bash
-fxi index [path]           # Index a directory
+fxi index                  # Index current directory (auto-detects git root)
+fxi index [path]           # Index a specific directory
 fxi index --force [path]   # Force full rebuild
 ```
 
 ### Search
 
 ```bash
-fxi [query]                # Interactive search
-fxi search [query]         # Interactive search with initial query
+fxi                        # Interactive search (works from any subdirectory)
+fxi [query]                # Interactive search with initial query
+fxi search [query]         # Same as above
 ```
 
-### Other Commands
+### Manage Indexes
 
 ```bash
+fxi list                   # List all indexed codebases
 fxi stats [path]           # Show index statistics
+fxi remove <path>          # Remove index for a codebase
 fxi compact [path]         # Compact delta segments
+```
+
+## Index Storage
+
+Indexes are stored centrally in your app data directory (not in project folders):
+
+| Platform | Location |
+|----------|----------|
+| Linux | `~/.local/share/fxi/indexes/` |
+| macOS | `~/Library/Application Support/fxi/indexes/` |
+| Windows | `%LOCALAPPDATA%/fxi/indexes/` |
+
+Each codebase gets a unique folder based on a hash of its root path:
+
+```
+~/.local/share/fxi/
+└── indexes/
+    ├── myproject-a1b2c3d4e5f6g7h8/
+    │   ├── meta.json
+    │   ├── docs.bin
+    │   ├── paths.bin
+    │   └── segments/
+    │       └── seg_0001/
+    │           ├── grams.dict
+    │           ├── grams.postings
+    │           ├── tokens.dict
+    │           ├── tokens.postings
+    │           └── linemap.bin
+    └── another-repo-i9j0k1l2m3n4o5p6/
+        └── ...
+```
+
+### Subdirectory Support
+
+fxi automatically detects your codebase root by looking for a `.git` directory:
+
+```bash
+$ cd ~/projects/myapp/src/components/Button
+$ fxi stats
+Root path:      /home/user/projects/myapp    # Auto-detected!
+Index location: ~/.local/share/fxi/indexes/myapp-...
+Document count: 1234
 ```
 
 ## Query Syntax
@@ -109,24 +156,8 @@ top:100                    # Limit results
           |
 +---------v--------+
 |  On-Disk Index   |
-|  (segments)      |
+|  (app data dir)  |
 +------------------+
-```
-
-## Index Structure
-
-```
-.codesearch/
-├── meta.json          # Index metadata
-├── docs.bin           # Document table
-├── paths.bin          # Path store
-└── segments/
-    └── seg_0001/
-        ├── grams.dict      # Trigram dictionary
-        ├── grams.postings  # Trigram postings (delta-encoded)
-        ├── tokens.dict     # Token dictionary
-        ├── tokens.postings # Token postings
-        └── linemap.bin     # Line offset maps
 ```
 
 ## Performance Targets
