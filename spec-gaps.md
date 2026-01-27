@@ -4,63 +4,61 @@ This document identifies gaps between the `spec.md` specification and the curren
 
 ## Summary
 
-| Category | Gap Count | Priority |
-|----------|-----------|----------|
-| Query Language | 4 | High |
-| Ranking/Scoring | 5 | High |
-| TUI Features | 1 | Medium |
-| Failure Handling | 4 | Medium |
-| Build Process | 2 | Low |
-| Configuration | 1 | Low |
+| Category | Gap Count | Status |
+|----------|-----------|--------|
+| Query Language | 1 remaining | 3 implemented ✅ (mtime, near, boost) |
+| Ranking/Scoring | 4 | High priority |
+| TUI Features | 1 | Medium priority |
+| Failure Handling | 4 | Medium priority |
+| Build Process | 2 | Low priority |
+| Configuration | 1 | Low priority |
+
+**Recently Implemented:**
+- `mtime:` filter (spec 9.4) ✅
+- `near:` proximity search (spec 9.5) ✅
+- `^` boost priority (spec 9.6) ✅
+- Line filter application (was parsed but not applied) ✅
 
 ---
 
 ## Query Language Gaps
 
-### 1. `mtime:` Filter (spec 9.4)
+### 1. `mtime:` Filter (spec 9.4) ✅ IMPLEMENTED
 
 **Spec says:**
 > `mtime: ranges`
 
-**Current state:** Not implemented. The `QueryFilters` struct has no mtime field, and the parser doesn't recognize `mtime:`.
+**Current state:** ✅ Implemented. Supports:
+- `mtime:>TIMESTAMP` - filter files modified after timestamp
+- `mtime:<TIMESTAMP` - filter files modified before timestamp
+- `mtime:YYYY-MM-DD` - filter files modified on a specific date
 
-**Impact:** Medium - useful for finding recently modified files
-
-**Implementation notes:**
-- Add `mtime_min: Option<u64>` and `mtime_max: Option<u64>` to `QueryFilters`
-- Parse `mtime:>TIMESTAMP`, `mtime:<TIMESTAMP`, `mtime:YYYY-MM-DD` formats
-- Apply filter in `executor.rs` similar to size filter
+**Implementation:** Added mtime_min/mtime_max fields to QueryFilters, parser supports all formats, executor applies filter.
 
 ---
 
-### 2. `near:` Proximity Search (spec 9.5)
+### 2. `near:` Proximity Search (spec 9.5) ✅ IMPLEMENTED
 
 **Spec says:**
 > `near:foo,bar,20` - matches when foo and bar appear within 20 lines of each other
 
-**Current state:** Not implemented. The parser and executor have no proximity search logic.
+**Current state:** ✅ Implemented. The parser recognizes `near:term1,term2,distance` syntax, planner creates narrowing plan using trigrams from all terms, and executor verifies proximity constraints.
 
-**Impact:** High - very useful for code search to find related terms
-
-**Implementation notes:**
-- Add `NearQuery { terms: Vec<String>, distance: u32 }` to `QueryNode`
-- In verification phase, track line numbers of matches and check proximity
-- Consider both word-level and line-level proximity
+**Implementation:** Added `Near { terms, distance }` variant to QueryNode and VerificationStep, with line-based proximity checking in executor.
 
 ---
 
-### 3. `^` Boost Priority (spec 9.6)
+### 3. `^` Boost Priority (spec 9.6) ✅ IMPLEMENTED
 
 **Spec says:**
 > `^foo` - boost priority for term
 
-**Current state:** Not implemented. All terms have equal weight.
+**Current state:** ✅ Implemented. Supports:
+- `^term` - boost with default 2.0x multiplier
+- `^N:term` - boost with custom multiplier (e.g., `^3:important`)
+- `^1.5:term` - boost with float multiplier
 
-**Impact:** Medium - allows fine-tuning search relevance
-
-**Implementation notes:**
-- Add boost field to literal nodes
-- Apply multiplier to scores for boosted terms
+**Implementation:** Added `BoostedLiteral { text, boost }` variant to QueryNode, scorer applies boost multiplier to final score.
 
 ---
 
@@ -274,6 +272,10 @@ This document identifies gaps between the `spec.md` specification and the curren
 
 - ✅ **Match Highlighting in Results** (spec 11: "highlighted matches") - Implemented in this PR
 - ✅ **Result Scoring** (Gap #5, spec 10.4) - Implemented configurable scoring based on match count, filename match, directory depth, and recency
+- ✅ **`mtime:` Filter** (Gap #1, spec 9.4) - Filter by modification time with timestamp and date formats
+- ✅ **`near:` Proximity Search** (Gap #2, spec 9.5) - Find terms within N lines of each other
+- ✅ **`^` Boost Priority** (Gap #3, spec 9.6) - Boost term priority with configurable multiplier
+- ✅ **Line Filter Application** - The `line:` filter was parsed but not applied; now fully functional
 
 ---
 
@@ -281,13 +283,16 @@ This document identifies gaps between the `spec.md` specification and the curren
 
 **High Priority (implement next):**
 1. ~~Result scoring (Gap #5) - Makes sort-by-score meaningful~~ ✅ DONE
-2. Proximity search `near:` (Gap #2) - Core code search feature
+2. ~~Proximity search `near:` (Gap #2) - Core code search feature~~ ✅ DONE
+3. ~~`mtime:` filter (Gap #1) - Commonly requested feature~~ ✅ DONE
+4. ~~`^` boost priority (Gap #3) - Fine-tune relevance~~ ✅ DONE
+5. ~~Line filter application - Was parsed but not applied~~ ✅ DONE
 
 **Medium Priority:**
-3. Atomic writes (Gap #8) - Data safety
-4. `mtime:` filter (Gap #1) - Commonly requested feature
-5. Early termination (Gap #6) - Performance optimization
+6. Atomic writes (Gap #8) - Data safety
+7. Early termination (Gap #6) - Performance optimization
+8. `+field:` boost (Gap #4) - Filter-based boosting
 
 **Low Priority (future work):**
-6. External sort (Gap #12) - Only needed for huge repos
-7. Other gaps - Nice to have
+9. External sort (Gap #12) - Only needed for huge repos
+10. Other gaps - Nice to have

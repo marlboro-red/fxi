@@ -221,6 +221,18 @@ impl<'a> QueryExecutor<'a> {
                     }
                 }
 
+                // Modification time filters
+                if let Some(min) = filter.mtime_min {
+                    if doc.mtime < min {
+                        continue;
+                    }
+                }
+                if let Some(max) = filter.mtime_max {
+                    if doc.mtime > max {
+                        continue;
+                    }
+                }
+
                 result.insert(doc_id);
             }
         }
@@ -244,6 +256,12 @@ impl<'a> QueryExecutor<'a> {
         // Extract search terms for filename matching
         let search_terms = Self::extract_search_terms(verification);
 
+        // Extract boost factor from verification steps
+        let boost = Self::extract_boost(verification);
+
+        // Extract line filter from plan (if present)
+        let (line_start, line_end) = Self::extract_line_filter(&plan.steps);
+
         // First pass: collect all matches grouped by doc_id
         let mut doc_matches: HashMap<DocId, Vec<(u32, String, usize, usize)>> = HashMap::new();
 
@@ -257,7 +275,16 @@ impl<'a> QueryExecutor<'a> {
                     };
 
                     // Find matches
-                    let file_matches = self.verify_content(&content, verification, doc_id);
+                    let mut file_matches = self.verify_content(&content, verification, doc_id);
+
+                    // Apply line filter if specified
+                    if line_start.is_some() || line_end.is_some() {
+                        file_matches.retain(|(line_num, _, _, _)| {
+                            let above_min = line_start.map(|min| *line_num >= min).unwrap_or(true);
+                            let below_max = line_end.map(|max| *line_num <= max).unwrap_or(true);
+                            above_min && below_max
+                        });
+                    }
 
                     if !file_matches.is_empty() {
                         doc_matches.insert(doc_id, file_matches);
@@ -281,6 +308,7 @@ impl<'a> QueryExecutor<'a> {
                     filename_match,
                     depth: Scorer::path_depth(&path),
                     mtime: doc.mtime,
+                    boost,
                 };
 
                 let score = self.scorer.calculate_score(&score_ctx);
@@ -303,6 +331,33 @@ impl<'a> QueryExecutor<'a> {
         Ok(matches)
     }
 
+    /// Extract boost factor from verification steps
+    fn extract_boost(verification: &VerificationStep) -> f32 {
+        match verification {
+            VerificationStep::BoostedLiteral { boost, .. } => *boost,
+            VerificationStep::And(steps) | VerificationStep::Or(steps) => {
+                // Return the maximum boost from all steps
+                steps
+                    .iter()
+                    .map(Self::extract_boost)
+                    .fold(1.0_f32, |a, b| a.max(b))
+            }
+            _ => 1.0,
+        }
+    }
+
+    /// Extract line filter from plan steps
+    fn extract_line_filter(steps: &[PlanStep]) -> (Option<u32>, Option<u32>) {
+        for step in steps {
+            if let PlanStep::Filter(filter) = step {
+                if filter.line_start.is_some() || filter.line_end.is_some() {
+                    return (filter.line_start, filter.line_end);
+                }
+            }
+        }
+        (None, None)
+    }
+
     /// Extract search terms from verification step for filename matching
     fn extract_search_terms(verification: &VerificationStep) -> Vec<String> {
         let mut terms = Vec::new();
@@ -321,6 +376,14 @@ impl<'a> QueryExecutor<'a> {
                     }
                 }
             }
+            VerificationStep::BoostedLiteral { text, .. } => {
+                // Same as literal
+                for word in text.split_whitespace() {
+                    if word.len() >= 2 {
+                        terms.push(word.to_string());
+                    }
+                }
+            }
             VerificationStep::Regex(pattern) => {
                 // Try to extract literal parts from regex
                 let literal = pattern
@@ -329,6 +392,14 @@ impl<'a> QueryExecutor<'a> {
                     .collect::<String>();
                 if literal.len() >= 2 {
                     terms.push(literal);
+                }
+            }
+            VerificationStep::Near { terms: near_terms, .. } => {
+                // Include all proximity search terms
+                for term in near_terms {
+                    if term.len() >= 2 {
+                        terms.push(term.clone());
+                    }
                 }
             }
             VerificationStep::And(steps) | VerificationStep::Or(steps) => {
@@ -353,6 +424,11 @@ impl<'a> QueryExecutor<'a> {
             VerificationStep::Literal(text) => {
                 self.find_literal_matches(content, text, false, doc_id)
             }
+            VerificationStep::BoostedLiteral { text, boost: _ } => {
+                // Boosted literal: same matching as regular literal
+                // The boost is applied during scoring, not matching
+                self.find_literal_matches(content, text, false, doc_id)
+            }
             VerificationStep::Phrase(text) => {
                 self.find_literal_matches(content, text, true, doc_id)
             }
@@ -362,6 +438,9 @@ impl<'a> QueryExecutor<'a> {
                 } else {
                     Vec::new()
                 }
+            }
+            VerificationStep::Near { terms, distance } => {
+                self.find_proximity_matches(content, terms, *distance, doc_id)
             }
             VerificationStep::And(steps) => {
                 // All must have at least one match
@@ -401,6 +480,84 @@ impl<'a> QueryExecutor<'a> {
                 }
             }
         }
+    }
+
+    /// Find proximity matches: all terms must appear within distance lines of each other
+    fn find_proximity_matches(
+        &self,
+        content: &str,
+        terms: &[String],
+        distance: u32,
+        _doc_id: DocId,
+    ) -> Vec<(u32, String, usize, usize)> {
+        if terms.is_empty() {
+            return Vec::new();
+        }
+
+        // Collect line numbers for each term
+        let mut term_lines: Vec<Vec<u32>> = Vec::with_capacity(terms.len());
+
+        for term in terms {
+            let term_lower = term.to_lowercase();
+            let mut lines_with_term = Vec::new();
+
+            for (line_num, line) in content.lines().enumerate() {
+                if line.to_lowercase().contains(&term_lower) {
+                    lines_with_term.push((line_num + 1) as u32);
+                }
+            }
+
+            if lines_with_term.is_empty() {
+                // One of the terms doesn't exist in the file
+                return Vec::new();
+            }
+
+            term_lines.push(lines_with_term);
+        }
+
+        // Find line combinations where all terms are within distance
+        let mut matches = Vec::new();
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Start with lines containing the first term
+        for &first_line in &term_lines[0] {
+            let mut all_within_distance = true;
+
+            // Check if all other terms have a match within distance
+            for other_term_lines in term_lines.iter().skip(1) {
+                let has_nearby = other_term_lines.iter().any(|&other_line| {
+                    let diff = if first_line > other_line {
+                        first_line - other_line
+                    } else {
+                        other_line - first_line
+                    };
+                    diff <= distance
+                });
+
+                if !has_nearby {
+                    all_within_distance = false;
+                    break;
+                }
+            }
+
+            if all_within_distance {
+                // Found a valid proximity match - return the first term's match
+                let line_idx = (first_line - 1) as usize;
+                if let Some(line_content) = lines.get(line_idx) {
+                    let term_lower = terms[0].to_lowercase();
+                    if let Some(pos) = line_content.to_lowercase().find(&term_lower) {
+                        matches.push((
+                            first_line,
+                            line_content.to_string(),
+                            pos,
+                            pos + terms[0].len(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        matches
     }
 
     /// Find literal string matches

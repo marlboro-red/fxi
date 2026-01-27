@@ -35,6 +35,10 @@ pub struct FilterStep {
     pub language: Option<String>,
     pub size_min: Option<u64>,
     pub size_max: Option<u64>,
+    pub mtime_min: Option<u64>,
+    pub mtime_max: Option<u64>,
+    pub line_start: Option<u32>,
+    pub line_end: Option<u32>,
 }
 
 /// Verification step (run against candidate documents)
@@ -42,10 +46,14 @@ pub struct FilterStep {
 pub enum VerificationStep {
     /// Literal substring match
     Literal(String),
+    /// Literal with boost factor for scoring
+    BoostedLiteral { text: String, boost: f32 },
     /// Exact phrase match
     Phrase(String),
     /// Regex match
     Regex(String),
+    /// Proximity search: terms must appear within distance lines
+    Near { terms: Vec<String>, distance: u32 },
     /// Compound verification
     And(Vec<VerificationStep>),
     Or(Vec<VerificationStep>),
@@ -77,6 +85,10 @@ impl QueryPlanner {
             || query.filters.lang.is_some()
             || query.filters.size_min.is_some()
             || query.filters.size_max.is_some()
+            || query.filters.mtime_min.is_some()
+            || query.filters.mtime_max.is_some()
+            || query.filters.line_start.is_some()
+            || query.filters.line_end.is_some()
         {
             self.steps.push(PlanStep::Filter(FilterStep {
                 path_glob: query.filters.path.clone(),
@@ -84,6 +96,10 @@ impl QueryPlanner {
                 language: query.filters.lang.clone(),
                 size_min: query.filters.size_min,
                 size_max: query.filters.size_max,
+                mtime_min: query.filters.mtime_min,
+                mtime_max: query.filters.mtime_max,
+                line_start: query.filters.line_start,
+                line_end: query.filters.line_end,
             }));
         }
 
@@ -129,6 +145,76 @@ impl QueryPlanner {
                         Some(VerificationStep::Literal(text.clone())),
                     )
                 }
+            }
+
+            QueryNode::BoostedLiteral { text, boost } => {
+                let trigrams = query_trigrams(text);
+
+                if trigrams.is_empty() {
+                    let tokens: Vec<_> = text
+                        .split_whitespace()
+                        .filter(|t| t.len() >= 2)
+                        .map(|t| t.to_lowercase())
+                        .collect();
+
+                    if tokens.is_empty() {
+                        return (
+                            Vec::new(),
+                            Some(VerificationStep::BoostedLiteral {
+                                text: text.clone(),
+                                boost: *boost,
+                            }),
+                        );
+                    }
+
+                    let steps: Vec<_> = tokens
+                        .into_iter()
+                        .map(PlanStep::TokenLookup)
+                        .collect();
+
+                    (
+                        steps,
+                        Some(VerificationStep::BoostedLiteral {
+                            text: text.clone(),
+                            boost: *boost,
+                        }),
+                    )
+                } else {
+                    (
+                        vec![PlanStep::TrigramIntersect(trigrams)],
+                        Some(VerificationStep::BoostedLiteral {
+                            text: text.clone(),
+                            boost: *boost,
+                        }),
+                    )
+                }
+            }
+
+            QueryNode::Near { terms, distance } => {
+                // For proximity search, narrow using trigrams from all terms
+                let mut all_trigrams = Vec::new();
+                for term in terms {
+                    all_trigrams.extend(query_trigrams(term));
+                }
+
+                let steps = if all_trigrams.is_empty() {
+                    // Use token lookups for short terms
+                    terms
+                        .iter()
+                        .filter(|t| t.len() >= 2)
+                        .map(|t| PlanStep::TokenLookup(t.to_lowercase()))
+                        .collect()
+                } else {
+                    vec![PlanStep::TrigramIntersect(all_trigrams)]
+                };
+
+                (
+                    steps,
+                    Some(VerificationStep::Near {
+                        terms: terms.clone(),
+                        distance: *distance,
+                    }),
+                )
             }
 
             QueryNode::Phrase(text) => {
