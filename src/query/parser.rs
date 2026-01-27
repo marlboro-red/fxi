@@ -50,6 +50,7 @@ pub struct QueryOptions {
     /// Maximum results
     pub limit: usize,
     /// Case sensitive
+    #[allow(dead_code)]
     pub case_sensitive: bool,
 }
 
@@ -362,6 +363,7 @@ impl<'a> QueryParser<'a> {
 
 impl Query {
     /// Get the raw text for simple literal/phrase queries
+    #[allow(dead_code)]
     pub fn get_search_text(&self) -> Option<&str> {
         match &self.root {
             QueryNode::Literal(s) | QueryNode::Phrase(s) => Some(s),

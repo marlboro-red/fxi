@@ -19,6 +19,7 @@ pub struct App {
     /// The codebase root (detected or specified)
     pub root_path: PathBuf,
     /// Original path user started from (for relative path display)
+    #[allow(dead_code)]
     pub start_path: PathBuf,
     pub reader: Option<IndexReader>,
     pub query: String,

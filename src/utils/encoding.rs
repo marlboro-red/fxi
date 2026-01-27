@@ -36,6 +36,7 @@ pub fn decode_varint(buf: &[u8]) -> Option<(u32, usize)> {
 }
 
 /// Encode a u64 as a variable-length integer
+#[allow(dead_code)]
 pub fn encode_varint_u64(mut value: u64, buf: &mut Vec<u8>) {
     loop {
         if value < 0x80 {
@@ -48,6 +49,7 @@ pub fn encode_varint_u64(mut value: u64, buf: &mut Vec<u8>) {
 }
 
 /// Decode a u64 variable-length integer
+#[allow(dead_code)]
 pub fn decode_varint_u64(buf: &[u8]) -> Option<(u64, usize)> {
     let mut result: u64 = 0;
     let mut shift = 0;
@@ -99,11 +101,13 @@ pub fn delta_decode(buf: &[u8]) -> Vec<u32> {
 }
 
 /// Write a u32 in little-endian format
+#[allow(dead_code)]
 pub fn write_u32_le<W: Write>(writer: &mut W, value: u32) -> io::Result<()> {
     writer.write_all(&value.to_le_bytes())
 }
 
 /// Read a u32 in little-endian format
+#[allow(dead_code)]
 pub fn read_u32_le<R: Read>(reader: &mut R) -> io::Result<u32> {
     let mut buf = [0u8; 4];
     reader.read_exact(&mut buf)?;
@@ -111,11 +115,13 @@ pub fn read_u32_le<R: Read>(reader: &mut R) -> io::Result<u32> {
 }
 
 /// Write a u64 in little-endian format
+#[allow(dead_code)]
 pub fn write_u64_le<W: Write>(writer: &mut W, value: u64) -> io::Result<()> {
     writer.write_all(&value.to_le_bytes())
 }
 
 /// Read a u64 in little-endian format
+#[allow(dead_code)]
 pub fn read_u64_le<R: Read>(reader: &mut R) -> io::Result<u64> {
     let mut buf = [0u8; 8];
     reader.read_exact(&mut buf)?;
@@ -123,11 +129,13 @@ pub fn read_u64_le<R: Read>(reader: &mut R) -> io::Result<u64> {
 }
 
 /// Write a u16 in little-endian format
+#[allow(dead_code)]
 pub fn write_u16_le<W: Write>(writer: &mut W, value: u16) -> io::Result<()> {
     writer.write_all(&value.to_le_bytes())
 }
 
 /// Read a u16 in little-endian format
+#[allow(dead_code)]
 pub fn read_u16_le<R: Read>(reader: &mut R) -> io::Result<u16> {
     let mut buf = [0u8; 2];
     reader.read_exact(&mut buf)?;

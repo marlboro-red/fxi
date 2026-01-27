@@ -119,6 +119,7 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
 }
 
 /// Incrementally update the index
+#[allow(dead_code)]
 pub fn update_index(root_path: &Path) -> Result<()> {
     // For now, just rebuild. Full incremental support would require:
     // 1. Reading existing meta.json

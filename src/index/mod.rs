@@ -5,6 +5,10 @@ pub mod stats;
 pub mod types;
 pub mod writer;
 
+// Re-exports for public API
+#[allow(unused_imports)]
 pub use reader::IndexReader;
+#[allow(unused_imports)]
 pub use types::*;
+#[allow(unused_imports)]
 pub use writer::IndexWriter;

@@ -19,6 +19,7 @@ pub enum PlanStep {
     /// Union results from sub-plans
     Union(Vec<QueryPlan>),
     /// Intersect results from sub-plans
+    #[allow(dead_code)]
     Intersect(Vec<QueryPlan>),
     /// Exclude results matching sub-plan
     Exclude(Box<QueryPlan>),

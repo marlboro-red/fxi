@@ -51,6 +51,7 @@ pub fn extract_tokens(content: &str) -> HashSet<String> {
 }
 
 /// Extract tokens suitable for query matching
+#[allow(dead_code)]
 pub fn tokenize_query(query: &str) -> Vec<String> {
     let tokens = extract_tokens(query);
     let mut result: Vec<_> = tokens.into_iter().collect();
@@ -89,6 +90,7 @@ fn add_token(tokens: &mut HashSet<String>, token: &str) {
 }
 
 /// Extract identifiers (complete symbols) from code
+#[allow(dead_code)]
 pub fn extract_identifiers(content: &str) -> HashSet<String> {
     let mut identifiers = HashSet::new();
     let mut current = String::new();

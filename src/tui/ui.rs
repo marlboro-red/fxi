@@ -3,11 +3,14 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
 pub fn draw(f: &mut Frame, app: &App) {
+    // Clear the entire frame to prevent artifacts when content changes
+    f.render_widget(Clear, f.area());
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -189,8 +192,10 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    let status = Paragraph::new(app.status_message.as_str())
-        .style(Style::default().fg(Color::Cyan));
+    // Pad the status message to fill the entire width to prevent artifacts
+    let padded_message = format!("{:<width$}", app.status_message, width = area.width as usize);
+    let status = Paragraph::new(padded_message)
+        .style(Style::default().fg(Color::Cyan).bg(Color::Reset));
 
     f.render_widget(status, area);
 }
