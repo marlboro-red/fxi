@@ -6,6 +6,7 @@ use crate::utils::{
 };
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -83,6 +84,11 @@ fn build_line_map(content: &[u8]) -> Vec<u32> {
 
 /// Build or rebuild the search index
 pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
+    build_index_with_progress(root_path, force, false)
+}
+
+/// Build or rebuild the search index with optional silent mode
+pub fn build_index_with_progress(root_path: &Path, force: bool, silent: bool) -> Result<()> {
     let root = root_path.canonicalize().context("Invalid path")?;
     let index_path = get_index_dir(&root)?;
 
@@ -94,9 +100,25 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
     let config = IndexConfig::default();
     let mut writer = IndexWriter::new(&root, config.clone())?;
 
-    println!("Indexing: {}", root.display());
+    if !silent {
+        println!("Indexing: {}", root.display());
+    }
 
-    // Phase 1: Collect all file paths
+    // Phase 1: Collect all file paths with spinner
+    let collect_spinner = if !silent {
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.cyan} {msg}")
+                .unwrap(),
+        );
+        spinner.set_message("Discovering files...");
+        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+        Some(spinner)
+    } else {
+        None
+    };
+
     let walker = WalkBuilder::new(&root)
         .hidden(true)
         .git_ignore(true)
@@ -124,12 +146,29 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
         .collect();
 
     let total_files = file_entries.len();
-    println!("Found {} files to index", total_files);
 
-    // Phase 2: Process files in parallel
-    let processed_count = Arc::new(AtomicUsize::new(0));
+    if let Some(spinner) = collect_spinner {
+        spinner.finish_with_message(format!("Found {} files", total_files));
+    }
+
+    // Phase 2: Process files in parallel with progress bar
+    let progress_bar = if !silent {
+        let pb = ProgressBar::new(total_files as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                .unwrap()
+                .progress_chars("█▓▒░  "),
+        );
+        pb.set_message("Processing files...");
+        Some(pb)
+    } else {
+        None
+    };
+
     let error_count = Arc::new(AtomicUsize::new(0));
     let max_file_size = config.max_file_size;
+    let pb_clone = progress_bar.clone();
 
     let processed_files: Vec<ProcessedFile> = file_entries
         .par_iter()
@@ -139,12 +178,18 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
                 Ok(c) => c,
                 Err(_) => {
                     error_count.fetch_add(1, Ordering::Relaxed);
+                    if let Some(ref pb) = pb_clone {
+                        pb.inc(1);
+                    }
                     return None;
                 }
             };
 
             // Check size limit
             if content.len() as u64 > max_file_size {
+                if let Some(ref pb) = pb_clone {
+                    pb.inc(1);
+                }
                 return None;
             }
 
@@ -158,12 +203,8 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
             // Process file content (trigrams, tokens, line map)
             let result = process_file_content(rel_path.clone(), &content, mtime);
 
-            if result.is_some() {
-                let count = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
-                if count % 1000 == 0 {
-                    print!("\rProcessing files... {}/{}", count, total_files);
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
-                }
+            if let Some(ref pb) = pb_clone {
+                pb.inc(1);
             }
 
             result
@@ -171,24 +212,47 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
         .collect();
 
     let file_count = processed_files.len();
-    println!("\rProcessed {} files.                    ", file_count);
 
-    // Phase 3: Merge results into writer (sequential)
-    print!("Merging index data...");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
+    if let Some(pb) = progress_bar {
+        pb.finish_with_message(format!("Processed {} files", file_count));
+    }
+
+    // Phase 3: Merge results into writer (sequential) with spinner
+    let merge_spinner = if !silent {
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.cyan} {msg}")
+                .unwrap(),
+        );
+        spinner.set_message("Merging index data...");
+        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+        Some(spinner)
+    } else {
+        None
+    };
 
     for processed in processed_files {
         writer.add_processed_file(processed);
     }
-    println!(" done.");
+
+    if let Some(spinner) = &merge_spinner {
+        spinner.set_message("Writing index to disk...");
+    }
 
     // Write the index
     writer.write().context("Failed to write index")?;
 
-    println!("Index stored at: {}", index_path.display());
+    if let Some(spinner) = merge_spinner {
+        spinner.finish_with_message("Index complete");
+    }
+
+    if !silent {
+        println!("Index stored at: {}", index_path.display());
+    }
 
     let errors = error_count.load(Ordering::Relaxed);
-    if errors > 0 {
+    if errors > 0 && !silent {
         eprintln!("({} files could not be read)", errors);
     }
 
