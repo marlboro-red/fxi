@@ -111,6 +111,7 @@ pub fn is_indexed(root_path: &Path) -> Result<bool> {
 }
 
 /// Get metadata about an indexed codebase
+#[allow(dead_code)]
 pub fn get_index_metadata(root_path: &Path) -> Result<Option<IndexLocation>> {
     let index_dir = get_index_dir(root_path)?;
     let meta_path = index_dir.join("meta.json");

@@ -21,6 +21,9 @@ pub fn run(path: PathBuf, initial_query: Option<String>) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // Clear the terminal to prevent any artifacts from previous content
+    terminal.clear()?;
+
     // Create app state
     let mut app = App::new(path)?;
 

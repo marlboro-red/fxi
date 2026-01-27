@@ -1,5 +1,5 @@
 use crate::index::types::*;
-use crate::utils::{decode_varint, delta_decode, get_index_dir};
+use crate::utils::{delta_decode, get_index_dir};
 use anyhow::{Context, Result};
 use memmap2::Mmap;
 use std::collections::HashMap;
@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 /// Memory-mapped index reader for fast queries
 pub struct IndexReader {
     root_path: PathBuf,
+    #[allow(dead_code)]
     index_path: PathBuf,
     pub meta: IndexMeta,
     documents: Vec<Document>,
@@ -18,6 +19,7 @@ pub struct IndexReader {
     trigram_postings: Mmap,
     token_dict: TokenDict,
     token_postings: Mmap,
+    #[allow(dead_code)]
     line_maps: HashMap<DocId, Vec<u32>>,
 }
 
@@ -26,6 +28,7 @@ struct TrigramDictEntry {
     trigram: Trigram,
     offset: u64,
     length: u32,
+    #[allow(dead_code)]
     doc_freq: u32,
 }
 
@@ -48,6 +51,7 @@ struct TokenDictEntry {
     token: String,
     offset: u64,
     length: u32,
+    #[allow(dead_code)]
     doc_freq: u32,
 }
 
@@ -182,11 +186,13 @@ impl IndexReader {
     }
 
     /// Get line offsets for a document
+    #[allow(dead_code)]
     pub fn get_line_map(&self, doc_id: DocId) -> Option<&Vec<u32>> {
         self.line_maps.get(&doc_id)
     }
 
     /// Convert byte offset to line number
+    #[allow(dead_code)]
     pub fn offset_to_line(&self, doc_id: DocId, offset: usize) -> u32 {
         if let Some(line_map) = self.line_maps.get(&doc_id) {
             // Binary search for the line

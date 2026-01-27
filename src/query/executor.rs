@@ -24,6 +24,7 @@ impl<'a> QueryExecutor<'a> {
     }
 
     /// Create executor with custom scoring weights
+    #[allow(dead_code)]
     pub fn with_scoring_weights(reader: &'a IndexReader, weights: ScoringWeights) -> Self {
         Self {
             reader,
@@ -412,14 +413,11 @@ impl<'a> QueryExecutor<'a> {
     ) -> Vec<(u32, String, usize, usize)> {
         let mut matches = Vec::new();
 
-        let (search_content, search_needle);
-        if case_sensitive {
-            search_content = content.to_string();
-            search_needle = needle.to_string();
+        let search_needle = if case_sensitive {
+            needle.to_string()
         } else {
-            search_content = content.to_lowercase();
-            search_needle = needle.to_lowercase();
-        }
+            needle.to_lowercase()
+        };
 
         for (line_num, line) in content.lines().enumerate() {
             let search_line = if case_sensitive {

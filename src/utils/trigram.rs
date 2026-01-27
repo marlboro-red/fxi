@@ -35,6 +35,7 @@ pub fn query_trigrams(query: &str) -> Vec<Trigram> {
 }
 
 /// Extract trigrams with their positions for phrase matching
+#[allow(dead_code)]
 pub fn extract_trigrams_with_positions(content: &[u8]) -> Vec<(Trigram, usize)> {
     let mut results = Vec::new();
 

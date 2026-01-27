@@ -99,8 +99,11 @@ pub struct DocFlags(pub u16);
 
 impl DocFlags {
     pub const NONE: u16 = 0;
+    #[allow(dead_code)]
     pub const BINARY: u16 = 1 << 0;
+    #[allow(dead_code)]
     pub const GENERATED: u16 = 1 << 1;
+    #[allow(dead_code)]
     pub const VENDOR: u16 = 1 << 2;
     pub const MINIFIED: u16 = 1 << 3;
     pub const STALE: u16 = 1 << 4;
@@ -110,6 +113,7 @@ impl DocFlags {
         Self(Self::NONE)
     }
 
+    #[allow(dead_code)]
     pub fn is_binary(&self) -> bool {
         self.0 & Self::BINARY != 0
     }
@@ -122,6 +126,7 @@ impl DocFlags {
         self.0 & Self::TOMBSTONE != 0
     }
 
+    #[allow(dead_code)]
     pub fn set_binary(&mut self) {
         self.0 |= Self::BINARY;
     }
@@ -130,6 +135,7 @@ impl DocFlags {
         self.0 |= Self::STALE;
     }
 
+    #[allow(dead_code)]
     pub fn set_tombstone(&mut self) {
         self.0 |= Self::TOMBSTONE;
     }
@@ -149,6 +155,7 @@ pub struct Document {
 
 impl Document {
     /// Size of a document entry in bytes (fixed-size for mmap)
+    #[allow(dead_code)]
     pub const SIZE: usize = 4 + 4 + 8 + 8 + 2 + 2 + 2; // 30 bytes
 
     pub fn is_valid(&self) -> bool {
@@ -187,12 +194,14 @@ impl Default for IndexMeta {
 }
 
 /// Posting entry - a reference to a document containing a term
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Posting {
     pub doc_id: DocId,
 }
 
 /// Dictionary entry mapping a term to its postings
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct DictEntry {
     pub offset: u64,
@@ -250,6 +259,7 @@ pub fn bytes_to_trigram(b0: u8, b1: u8, b2: u8) -> Trigram {
 
 /// Convert trigram back to bytes
 #[inline]
+#[allow(dead_code)]
 pub fn trigram_to_bytes(t: Trigram) -> [u8; 3] {
     [
         ((t >> 16) & 0xFF) as u8,

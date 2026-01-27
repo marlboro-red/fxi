@@ -1,6 +1,6 @@
 use crate::index::types::*;
 use crate::utils::{delta_encode, extract_tokens, extract_trigrams, get_index_dir, is_binary, is_minified};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -45,6 +45,7 @@ impl IndexWriter {
     }
 
     /// Create a delta segment writer
+    #[allow(dead_code)]
     pub fn new_delta(root_path: &Path, config: IndexConfig, segment_id: SegmentId) -> Result<Self> {
         let mut writer = Self::new(root_path, config)?;
         writer.segment_id = segment_id;
@@ -366,11 +367,13 @@ impl IndexWriter {
     }
 
     /// Get current document count
+    #[allow(dead_code)]
     pub fn doc_count(&self) -> usize {
         self.documents.len()
     }
 
     /// Mark a document as stale (for incremental updates)
+    #[allow(dead_code)]
     pub fn mark_stale(&mut self, doc_id: DocId) {
         if let Some(doc) = self.documents.iter_mut().find(|d| d.doc_id == doc_id) {
             doc.flags.set_stale();
