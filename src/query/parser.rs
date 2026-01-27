@@ -11,10 +11,14 @@ pub struct Query {
 pub enum QueryNode {
     /// Simple literal search
     Literal(String),
+    /// Simple literal search with boost
+    BoostedLiteral { text: String, boost: f32 },
     /// Exact phrase search (quoted)
     Phrase(String),
     /// Regex pattern
     Regex(String),
+    /// Proximity search: terms must appear within distance lines of each other
+    Near { terms: Vec<String>, distance: u32 },
     /// Boolean AND (all must match)
     And(Vec<QueryNode>),
     /// Boolean OR (any can match)
@@ -40,6 +44,9 @@ pub struct QueryFilters {
     /// Line range filter (line:100-200)
     pub line_start: Option<u32>,
     pub line_end: Option<u32>,
+    /// Modification time filter (mtime:>2024-01-01, mtime:<1704067200)
+    pub mtime_min: Option<u64>,
+    pub mtime_max: Option<u64>,
 }
 
 /// Query options
@@ -148,6 +155,39 @@ impl<'a> QueryParser<'a> {
         if self.consume_char('-') {
             let inner = self.parse_primary();
             return QueryNode::Not(Box::new(inner));
+        }
+
+        // Handle boost prefix ^term or ^N:term (e.g., ^foo, ^2:foo, ^1.5:term)
+        if self.consume_char('^') {
+            // Try to parse optional boost value
+            let mut boost = 2.0_f32; // Default boost value
+            let boost_start = self.pos;
+
+            // Check for explicit boost value like ^2:term or ^1.5:term
+            while !self.is_eof() {
+                let ch = self.peek_char().unwrap();
+                if ch.is_ascii_digit() || ch == '.' {
+                    self.advance();
+                } else if ch == ':' {
+                    let boost_str = &self.input[boost_start..self.pos];
+                    if let Ok(b) = boost_str.parse::<f32>() {
+                        boost = b;
+                    }
+                    self.advance(); // consume ':'
+                    break;
+                } else {
+                    // No explicit boost value, reset position
+                    self.pos = boost_start;
+                    break;
+                }
+            }
+
+            let inner = self.parse_primary();
+            return match inner {
+                QueryNode::Literal(text) => QueryNode::BoostedLiteral { text, boost },
+                QueryNode::Phrase(text) => QueryNode::BoostedLiteral { text, boost },
+                other => other, // Can't boost complex nodes, return as-is
+            };
         }
 
         self.parse_primary()
@@ -280,6 +320,14 @@ impl<'a> QueryParser<'a> {
                 self.parse_line_filter(&value);
                 QueryNode::Empty
             }
+            "mtime" => {
+                self.parse_mtime_filter(&value);
+                QueryNode::Empty
+            }
+            "near" => {
+                // Parse near:term1,term2,distance
+                return self.parse_near_query(&value);
+            }
             "sort" => {
                 self.parse_sort(&value);
                 QueryNode::Empty
@@ -327,6 +375,81 @@ impl<'a> QueryParser<'a> {
         };
     }
 
+    fn parse_mtime_filter(&mut self, value: &str) {
+        // Parse mtime:>timestamp, mtime:<timestamp, or mtime:YYYY-MM-DD
+        if let Some(rest) = value.strip_prefix('>') {
+            self.filters.mtime_min = Self::parse_timestamp(rest);
+        } else if let Some(rest) = value.strip_prefix('<') {
+            self.filters.mtime_max = Self::parse_timestamp(rest);
+        } else if value.contains('-') && value.len() >= 10 {
+            // Parse as date: YYYY-MM-DD (start of day)
+            if let Some(ts) = Self::parse_date(value) {
+                // Set both min and max for a specific day
+                self.filters.mtime_min = Some(ts);
+                self.filters.mtime_max = Some(ts + 86400); // Next day
+            }
+        } else if let Ok(n) = value.parse::<u64>() {
+            // Direct timestamp
+            self.filters.mtime_min = Some(n);
+            self.filters.mtime_max = Some(n + 86400);
+        }
+    }
+
+    fn parse_timestamp(s: &str) -> Option<u64> {
+        // First try parsing as a direct timestamp
+        if let Ok(n) = s.parse::<u64>() {
+            return Some(n);
+        }
+        // Try parsing as YYYY-MM-DD date
+        Self::parse_date(s)
+    }
+
+    fn parse_date(s: &str) -> Option<u64> {
+        // Parse YYYY-MM-DD format
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() >= 3 {
+            let year: i32 = parts[0].parse().ok()?;
+            let month: u32 = parts[1].parse().ok()?;
+            let day: u32 = parts[2].parse().ok()?;
+
+            // Simple calculation: days since Unix epoch
+            // Note: This is approximate, ignoring leap seconds
+            if year >= 1970 && month >= 1 && month <= 12 && day >= 1 && day <= 31 {
+                let days_since_epoch = (year - 1970) as u64 * 365
+                    + ((year - 1969) / 4) as u64  // Leap years
+                    + days_before_month(month, is_leap_year(year))
+                    + (day - 1) as u64;
+                return Some(days_since_epoch * 86400);
+            }
+        }
+        None
+    }
+
+    fn parse_near_query(&self, value: &str) -> QueryNode {
+        // Parse near:term1,term2,distance format
+        let parts: Vec<&str> = value.split(',').collect();
+        if parts.len() >= 2 {
+            let terms: Vec<String> = parts[..parts.len().saturating_sub(1)]
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            // Last part should be the distance
+            let distance = parts.last()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or(10); // Default distance of 10 lines
+
+            if terms.len() >= 2 {
+                return QueryNode::Near { terms, distance };
+            } else if terms.len() == 1 {
+                // If only one term, treat as literal
+                return QueryNode::Literal(terms.into_iter().next().unwrap());
+            }
+        }
+        QueryNode::Empty
+    }
+
     fn skip_whitespace(&mut self) {
         while !self.is_eof() && self.peek_char().map(|c| c.is_whitespace()).unwrap_or(false) {
             self.advance();
@@ -358,6 +481,22 @@ impl<'a> QueryParser<'a> {
 
     fn remaining(&self) -> &str {
         &self.input[self.pos..]
+    }
+}
+
+/// Check if a year is a leap year
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+/// Get days before a given month (0-indexed cumulative days)
+fn days_before_month(month: u32, leap: bool) -> u64 {
+    const DAYS: [u64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+    let days = DAYS.get(month.saturating_sub(1) as usize).copied().unwrap_or(0);
+    if leap && month > 2 {
+        days + 1
+    } else {
+        days
     }
 }
 
@@ -421,5 +560,107 @@ mod tests {
     fn test_regex() {
         let q = parse_query("re:/foo.*bar/");
         assert!(matches!(q.root, QueryNode::Regex(_)));
+    }
+
+    #[test]
+    fn test_mtime_filter_min() {
+        let q = parse_query("mtime:>1704067200 test");
+        assert_eq!(q.filters.mtime_min, Some(1704067200));
+        assert!(q.filters.mtime_max.is_none());
+    }
+
+    #[test]
+    fn test_mtime_filter_max() {
+        let q = parse_query("mtime:<1704067200 test");
+        assert_eq!(q.filters.mtime_max, Some(1704067200));
+        assert!(q.filters.mtime_min.is_none());
+    }
+
+    #[test]
+    fn test_mtime_filter_date() {
+        let q = parse_query("mtime:2024-01-01 test");
+        assert!(q.filters.mtime_min.is_some());
+        assert!(q.filters.mtime_max.is_some());
+        // The mtime_max should be 86400 seconds (1 day) after mtime_min
+        assert_eq!(
+            q.filters.mtime_max.unwrap() - q.filters.mtime_min.unwrap(),
+            86400
+        );
+    }
+
+    #[test]
+    fn test_near_query() {
+        let q = parse_query("near:function,return,10");
+        assert!(matches!(q.root, QueryNode::Near { ref terms, distance } if terms.len() == 2 && distance == 10));
+    }
+
+    #[test]
+    fn test_near_query_default_distance() {
+        // If no valid distance is parsed, should use default of 10
+        let q = parse_query("near:foo,bar,abc");
+        assert!(
+            matches!(q.root, QueryNode::Near { ref terms, distance } if terms.len() == 2 && distance == 10)
+        );
+    }
+
+    #[test]
+    fn test_boost_simple() {
+        let q = parse_query("^test");
+        assert!(
+            matches!(q.root, QueryNode::BoostedLiteral { ref text, boost } if text == "test" && boost == 2.0)
+        );
+    }
+
+    #[test]
+    fn test_boost_with_value() {
+        let q = parse_query("^3:important");
+        assert!(
+            matches!(q.root, QueryNode::BoostedLiteral { ref text, boost } if text == "important" && boost == 3.0)
+        );
+    }
+
+    #[test]
+    fn test_boost_float_value() {
+        let q = parse_query("^1.5:term");
+        assert!(
+            matches!(q.root, QueryNode::BoostedLiteral { ref text, boost } if text == "term" && (boost - 1.5).abs() < 0.01)
+        );
+    }
+
+    #[test]
+    fn test_line_filter_single() {
+        let q = parse_query("line:100 test");
+        assert_eq!(q.filters.line_start, Some(100));
+        assert_eq!(q.filters.line_end, Some(100));
+    }
+
+    #[test]
+    fn test_line_filter_range() {
+        let q = parse_query("line:100-200 test");
+        assert_eq!(q.filters.line_start, Some(100));
+        assert_eq!(q.filters.line_end, Some(200));
+    }
+
+    #[test]
+    fn test_combined_filters() {
+        let q = parse_query("ext:rs path:src mtime:>1704067200 ^important");
+        assert_eq!(q.filters.ext, Some("rs".to_string()));
+        assert_eq!(q.filters.path, Some("src".to_string()));
+        assert_eq!(q.filters.mtime_min, Some(1704067200));
+        // The query root contains the boosted term (filters produce Empty nodes that get filtered)
+        match &q.root {
+            QueryNode::BoostedLiteral { text, boost } => {
+                assert_eq!(text, "important");
+                assert!((boost - 2.0).abs() < 0.01);
+            }
+            QueryNode::And(nodes) => {
+                // Should contain a BoostedLiteral among the nodes
+                let has_boosted = nodes.iter().any(|n| {
+                    matches!(n, QueryNode::BoostedLiteral { text, .. } if text == "important")
+                });
+                assert!(has_boosted, "Expected BoostedLiteral in And nodes");
+            }
+            _ => panic!("Expected BoostedLiteral or And node"),
+        }
     }
 }

@@ -51,6 +51,8 @@ pub struct ScoreContext {
     pub depth: usize,
     /// File modification time as unix timestamp
     pub mtime: u64,
+    /// Boost multiplier from ^term syntax (default 1.0)
+    pub boost: f32,
 }
 
 /// Scorer calculates relevance scores for search results
@@ -94,6 +96,10 @@ impl Scorer {
 
         // Recency bonus
         score += self.recency_bonus(ctx.mtime);
+
+        // Apply boost multiplier (default 1.0 if not set)
+        let boost = if ctx.boost > 0.0 { ctx.boost } else { 1.0 };
+        score *= boost;
 
         // Ensure score is non-negative
         score.max(0.1)
@@ -233,5 +239,29 @@ mod tests {
         assert_eq!(Scorer::path_depth(&path1), 1);
         assert_eq!(Scorer::path_depth(&path2), 2);
         assert_eq!(Scorer::path_depth(&path3), 3);
+    }
+
+    #[test]
+    fn test_boost_scoring() {
+        let scorer = Scorer::with_defaults();
+
+        let ctx_no_boost = ScoreContext {
+            match_count: 1,
+            boost: 1.0,
+            ..Default::default()
+        };
+        let ctx_boosted = ScoreContext {
+            match_count: 1,
+            boost: 2.0,
+            ..Default::default()
+        };
+
+        let score_no = scorer.calculate_score(&ctx_no_boost);
+        let score_boosted = scorer.calculate_score(&ctx_boosted);
+
+        // Boosted score should be approximately 2x the non-boosted score
+        assert!(score_boosted > score_no);
+        // Allow for the non-linear effects of other factors
+        assert!((score_boosted / score_no - 2.0).abs() < 0.5);
     }
 }
