@@ -1,5 +1,5 @@
-use crate::index::types::{DocFlags, IndexConfig, Language};
-use crate::index::writer::IndexWriter;
+use crate::index::types::{DocFlags, IndexConfig, Language, SegmentId};
+use crate::index::writer::ChunkedIndexWriter;
 use crate::utils::{
     extract_tokens, extract_trigrams, find_codebase_root, get_index_dir, is_binary, is_minified,
     remove_index,
@@ -92,7 +92,8 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
     }
 
     let config = IndexConfig::default();
-    let mut writer = IndexWriter::new(&root, config.clone())?;
+    let chunk_size = config.chunk_size;
+    let max_file_size = config.max_file_size;
 
     println!("Indexing: {}", root.display());
 
@@ -126,64 +127,89 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
     let total_files = file_entries.len();
     println!("Found {} files to index", total_files);
 
-    // Phase 2: Process files in parallel
-    let processed_count = Arc::new(AtomicUsize::new(0));
+    // Phase 2: Process in chunks
+    let mut chunked_writer = ChunkedIndexWriter::new(&root, config)?;
     let error_count = Arc::new(AtomicUsize::new(0));
-    let max_file_size = config.max_file_size;
+    let total_processed = Arc::new(AtomicUsize::new(0));
 
-    let processed_files: Vec<ProcessedFile> = file_entries
-        .par_iter()
-        .filter_map(|(full_path, rel_path)| {
-            // Read file content
-            let content = match fs::read(full_path) {
-                Ok(c) => c,
-                Err(_) => {
-                    error_count.fetch_add(1, Ordering::Relaxed);
+    let num_chunks = (total_files + chunk_size - 1) / chunk_size;
+    if num_chunks > 1 {
+        println!("Processing in {} chunks of up to {} files each", num_chunks, chunk_size);
+    }
+
+    for (chunk_idx, chunk) in file_entries.chunks(chunk_size).enumerate() {
+        let segment_id = (chunk_idx + 1) as SegmentId;
+
+        if num_chunks > 1 {
+            print!("\rChunk {}/{}: processing...", chunk_idx + 1, num_chunks);
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
+
+        // Process chunk files in parallel
+        let processed_files: Vec<ProcessedFile> = chunk
+            .par_iter()
+            .filter_map(|(full_path, rel_path)| {
+                // Read file content
+                let content = match fs::read(full_path) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        error_count.fetch_add(1, Ordering::Relaxed);
+                        return None;
+                    }
+                };
+
+                // Check size limit
+                if content.len() as u64 > max_file_size {
                     return None;
                 }
-            };
 
-            // Check size limit
-            if content.len() as u64 > max_file_size {
-                return None;
-            }
+                // Get modification time
+                let mtime = full_path
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64)
+                    .unwrap_or(0);
 
-            // Get modification time
-            let mtime = full_path
-                .metadata()
-                .and_then(|m| m.modified())
-                .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64)
-                .unwrap_or(0);
+                // Process file content (trigrams, tokens, line map)
+                let result = process_file_content(rel_path.clone(), &content, mtime);
 
-            // Process file content (trigrams, tokens, line map)
-            let result = process_file_content(rel_path.clone(), &content, mtime);
-
-            if result.is_some() {
-                let count = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
-                if count % 1000 == 0 {
-                    print!("\rProcessing files... {}/{}", count, total_files);
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                if result.is_some() {
+                    let count = total_processed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if num_chunks == 1 && count % 1000 == 0 {
+                        print!("\rProcessing files... {}/{}", count, total_files);
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                    }
                 }
-            }
 
-            result
-        })
-        .collect();
+                result
+            })
+            .collect();
 
-    let file_count = processed_files.len();
-    println!("\rProcessed {} files.                    ", file_count);
+        let chunk_file_count = processed_files.len();
 
-    // Phase 3: Merge results into writer (sequential)
-    print!("Merging index data...");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
+        // Write this chunk as a segment
+        chunked_writer.write_chunk(segment_id, processed_files)?;
 
-    for processed in processed_files {
-        writer.add_processed_file(processed);
+        if num_chunks > 1 {
+            println!("\rChunk {}/{}: {} files written to seg_{:04}         ",
+                chunk_idx + 1, num_chunks, chunk_file_count, segment_id);
+        }
+
+        // Memory freed here - processed_files dropped
     }
-    println!(" done.");
 
-    // Write the index
-    writer.write().context("Failed to write index")?;
+    let file_count = total_processed.load(Ordering::Relaxed);
+    if num_chunks == 1 {
+        println!("\rProcessed {} files.                    ", file_count);
+    } else {
+        println!("Total: {} files processed across {} segments", file_count, num_chunks);
+    }
+
+    // Phase 3: Finalize global data
+    print!("Finalizing index...");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    chunked_writer.finalize()?;
+    println!(" done.");
 
     println!("Index stored at: {}", index_path.display());
 

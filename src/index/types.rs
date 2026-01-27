@@ -231,6 +231,8 @@ pub struct IndexConfig {
     pub ignored_paths: Vec<String>,
     /// Scoring weights for search result ranking
     pub scoring_weights: ScoringWeights,
+    /// Number of files per segment chunk (for memory-bounded indexing)
+    pub chunk_size: usize,
 }
 
 impl Default for IndexConfig {
@@ -247,6 +249,7 @@ impl Default for IndexConfig {
                 ".codesearch".to_string(),
             ],
             scoring_weights: ScoringWeights::default(),
+            chunk_size: 5000, // Files per segment chunk
         }
     }
 }

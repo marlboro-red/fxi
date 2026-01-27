@@ -7,22 +7,6 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
-/// Memory-mapped index reader for fast queries
-pub struct IndexReader {
-    root_path: PathBuf,
-    #[allow(dead_code)]
-    index_path: PathBuf,
-    pub meta: IndexMeta,
-    documents: Vec<Document>,
-    paths: Vec<PathBuf>,
-    trigram_dict: TrigramDict,
-    trigram_postings: Mmap,
-    token_dict: TokenDict,
-    token_postings: Mmap,
-    #[allow(dead_code)]
-    line_maps: HashMap<DocId, Vec<u32>>,
-}
-
 /// Trigram dictionary entry
 struct TrigramDictEntry {
     trigram: Trigram,
@@ -69,6 +53,102 @@ impl TokenDict {
     }
 }
 
+/// Reader for a single segment
+struct SegmentReader {
+    #[allow(dead_code)]
+    segment_id: SegmentId,
+    trigram_dict: TrigramDict,
+    trigram_postings: Mmap,
+    token_dict: TokenDict,
+    token_postings: Mmap,
+    line_maps: HashMap<DocId, Vec<u32>>,
+}
+
+impl SegmentReader {
+    /// Open a segment from disk
+    fn open(segment_path: &Path, segment_id: SegmentId, index_path: &Path) -> Result<Self> {
+        // Read trigram dictionary
+        let trigram_dict = read_trigram_dict(segment_path)?;
+
+        // mmap trigram postings
+        let postings_path = segment_path.join("grams.postings");
+        let trigram_postings = if postings_path.exists() {
+            let file = File::open(&postings_path)?;
+            unsafe { Mmap::map(&file)? }
+        } else {
+            // Empty mmap for empty segment
+            unsafe { Mmap::map(&File::open(&index_path.join("meta.json"))?)? }
+        };
+
+        // Read token dictionary
+        let token_dict = read_token_dict(segment_path)?;
+
+        // mmap token postings
+        let token_postings_path = segment_path.join("tokens.postings");
+        let token_postings = if token_postings_path.exists() {
+            let file = File::open(&token_postings_path)?;
+            unsafe { Mmap::map(&file)? }
+        } else {
+            unsafe { Mmap::map(&File::open(&index_path.join("meta.json"))?)? }
+        };
+
+        // Read line maps
+        let line_maps = read_line_maps(segment_path)?;
+
+        Ok(Self {
+            segment_id,
+            trigram_dict,
+            trigram_postings,
+            token_dict,
+            token_postings,
+            line_maps,
+        })
+    }
+
+    /// Get documents matching a trigram in this segment
+    fn get_trigram_docs(&self, trigram: Trigram) -> Vec<DocId> {
+        if let Some(entry) = self.trigram_dict.lookup(trigram) {
+            let start = entry.offset as usize;
+            let end = start + entry.length as usize;
+
+            if end <= self.trigram_postings.len() {
+                return delta_decode(&self.trigram_postings[start..end]);
+            }
+        }
+        Vec::new()
+    }
+
+    /// Get documents matching a token in this segment
+    fn get_token_docs(&self, token: &str) -> Vec<DocId> {
+        let lower = token.to_lowercase();
+        if let Some(entry) = self.token_dict.lookup(&lower) {
+            let start = entry.offset as usize;
+            let end = start + entry.length as usize;
+
+            if end <= self.token_postings.len() {
+                return delta_decode(&self.token_postings[start..end]);
+            }
+        }
+        Vec::new()
+    }
+
+    /// Get line map for a document in this segment
+    fn get_line_map(&self, doc_id: DocId) -> Option<&Vec<u32>> {
+        self.line_maps.get(&doc_id)
+    }
+}
+
+/// Memory-mapped index reader for fast queries
+pub struct IndexReader {
+    root_path: PathBuf,
+    #[allow(dead_code)]
+    index_path: PathBuf,
+    pub meta: IndexMeta,
+    documents: Vec<Document>,
+    paths: Vec<PathBuf>,
+    segments: Vec<SegmentReader>,
+}
+
 impl IndexReader {
     /// Open an existing index
     pub fn open(root_path: &Path) -> Result<Self> {
@@ -90,39 +170,28 @@ impl IndexReader {
         // Read paths
         let paths = read_paths(&index_path)?;
 
-        // Get the base segment path
-        let segment_id = meta.base_segment.unwrap_or(1);
-        let segment_path = index_path
-            .join("segments")
-            .join(format!("seg_{:04}", segment_id));
+        // Load all segments
+        let mut segments = Vec::new();
 
-        // Read trigram dictionary
-        let trigram_dict = read_trigram_dict(&segment_path)?;
+        // Load base segment
+        if let Some(base_id) = meta.base_segment {
+            let segment_path = index_path
+                .join("segments")
+                .join(format!("seg_{:04}", base_id));
+            if segment_path.exists() {
+                segments.push(SegmentReader::open(&segment_path, base_id, &index_path)?);
+            }
+        }
 
-        // mmap trigram postings
-        let postings_path = segment_path.join("grams.postings");
-        let trigram_postings = if postings_path.exists() {
-            let file = File::open(&postings_path)?;
-            unsafe { Mmap::map(&file)? }
-        } else {
-            // Empty mmap for empty index
-            unsafe { Mmap::map(&File::open(&index_path.join("meta.json"))?)? }
-        };
-
-        // Read token dictionary
-        let token_dict = read_token_dict(&segment_path)?;
-
-        // mmap token postings
-        let token_postings_path = segment_path.join("tokens.postings");
-        let token_postings = if token_postings_path.exists() {
-            let file = File::open(&token_postings_path)?;
-            unsafe { Mmap::map(&file)? }
-        } else {
-            unsafe { Mmap::map(&File::open(&index_path.join("meta.json"))?)? }
-        };
-
-        // Read line maps
-        let line_maps = read_line_maps(&segment_path)?;
+        // Load delta segments
+        for &delta_id in &meta.delta_segments {
+            let segment_path = index_path
+                .join("segments")
+                .join(format!("seg_{:04}", delta_id));
+            if segment_path.exists() {
+                segments.push(SegmentReader::open(&segment_path, delta_id, &index_path)?);
+            }
+        }
 
         Ok(Self {
             root_path,
@@ -130,11 +199,7 @@ impl IndexReader {
             meta,
             documents,
             paths,
-            trigram_dict,
-            trigram_postings,
-            token_dict,
-            token_postings,
-            line_maps,
+            segments,
         })
     }
 
@@ -158,43 +223,43 @@ impl IndexReader {
         &self.documents
     }
 
-    /// Get documents matching a trigram
+    /// Get documents matching a trigram (queries all segments)
     pub fn get_trigram_docs(&self, trigram: Trigram) -> Vec<DocId> {
-        if let Some(entry) = self.trigram_dict.lookup(trigram) {
-            let start = entry.offset as usize;
-            let end = start + entry.length as usize;
-
-            if end <= self.trigram_postings.len() {
-                return delta_decode(&self.trigram_postings[start..end]);
-            }
+        let mut results = Vec::new();
+        for segment in &self.segments {
+            results.extend(segment.get_trigram_docs(trigram));
         }
-        Vec::new()
+        results.sort_unstable();
+        results.dedup();
+        results
     }
 
-    /// Get documents matching a token
+    /// Get documents matching a token (queries all segments)
     pub fn get_token_docs(&self, token: &str) -> Vec<DocId> {
-        let lower = token.to_lowercase();
-        if let Some(entry) = self.token_dict.lookup(&lower) {
-            let start = entry.offset as usize;
-            let end = start + entry.length as usize;
-
-            if end <= self.token_postings.len() {
-                return delta_decode(&self.token_postings[start..end]);
-            }
+        let mut results = Vec::new();
+        for segment in &self.segments {
+            results.extend(segment.get_token_docs(token));
         }
-        Vec::new()
+        results.sort_unstable();
+        results.dedup();
+        results
     }
 
-    /// Get line offsets for a document
+    /// Get line offsets for a document (searches all segments)
     #[allow(dead_code)]
     pub fn get_line_map(&self, doc_id: DocId) -> Option<&Vec<u32>> {
-        self.line_maps.get(&doc_id)
+        for segment in &self.segments {
+            if let Some(line_map) = segment.get_line_map(doc_id) {
+                return Some(line_map);
+            }
+        }
+        None
     }
 
     /// Convert byte offset to line number
     #[allow(dead_code)]
     pub fn offset_to_line(&self, doc_id: DocId, offset: usize) -> u32 {
-        if let Some(line_map) = self.line_maps.get(&doc_id) {
+        if let Some(line_map) = self.get_line_map(doc_id) {
             // Binary search for the line
             match line_map.binary_search(&(offset as u32)) {
                 Ok(i) => i as u32 + 1,
