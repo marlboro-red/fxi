@@ -5,7 +5,8 @@
       "Bash(cargo build:*)",
       "Bash(target\\\\release\\\\fxi.exe index:*)",
       "Bash(./target/release/fxi.exe index:*)",
-      "Bash(./target/release/fxi.exe search:*)"
+      "Bash(./target/release/fxi.exe search:*)",
+      "Bash(cargo check:*)"
     ]
   }
 }
