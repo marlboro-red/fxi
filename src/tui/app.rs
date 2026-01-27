@@ -1,4 +1,4 @@
-use crate::index::build::build_index;
+use crate::index::build::build_index_with_progress;
 use crate::index::reader::IndexReader;
 use crate::index::types::SearchMatch;
 use crate::query::{parse_query, QueryExecutor};
@@ -247,7 +247,7 @@ impl App {
     pub fn reindex(&mut self) {
         self.status_message = "Building index...".to_string();
 
-        match build_index(&self.root_path, true) {
+        match build_index_with_progress(&self.root_path, true, true) {
             Ok(()) => {
                 // Reload reader
                 match IndexReader::open(&self.root_path) {
@@ -328,7 +328,6 @@ impl App {
         while !self.query.is_empty() && !self.query.ends_with(' ') {
             self.query.pop();
         }
-        self.execute_search();
     }
 
     /// Clear pending key state

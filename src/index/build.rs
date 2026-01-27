@@ -6,6 +6,7 @@ use crate::utils::{
 };
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -83,6 +84,11 @@ fn build_line_map(content: &[u8]) -> Vec<u32> {
 
 /// Build or rebuild the search index
 pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
+    build_index_with_progress(root_path, force, false)
+}
+
+/// Build or rebuild the search index with optional silent mode
+pub fn build_index_with_progress(root_path: &Path, force: bool, silent: bool) -> Result<()> {
     let root = root_path.canonicalize().context("Invalid path")?;
     let index_path = get_index_dir(&root)?;
 
@@ -95,9 +101,25 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
     let chunk_size = config.chunk_size;
     let max_file_size = config.max_file_size;
 
-    println!("Indexing: {}", root.display());
+    if !silent {
+        println!("Indexing: {}", root.display());
+    }
 
-    // Phase 1: Collect all file paths
+    // Phase 1: Collect all file paths with spinner
+    let collect_spinner = if !silent {
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.cyan} {msg}")
+                .unwrap(),
+        );
+        spinner.set_message("Discovering files...");
+        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+        Some(spinner)
+    } else {
+        None
+    };
+
     let walker = WalkBuilder::new(&root)
         .hidden(true)
         .git_ignore(true)
@@ -125,7 +147,10 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
         .collect();
 
     let total_files = file_entries.len();
-    println!("Found {} files to index", total_files);
+
+    if let Some(spinner) = collect_spinner {
+        spinner.finish_with_message(format!("Found {} files", total_files));
+    }
 
     // Phase 2: Process in chunks
     let mut chunked_writer = ChunkedIndexWriter::new(&root, config)?;
@@ -133,17 +158,35 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
     let total_processed = Arc::new(AtomicUsize::new(0));
 
     let num_chunks = (total_files + chunk_size - 1) / chunk_size;
-    if num_chunks > 1 {
+    if num_chunks > 1 && !silent {
         println!("Processing in {} chunks of up to {} files each", num_chunks, chunk_size);
     }
 
     for (chunk_idx, chunk) in file_entries.chunks(chunk_size).enumerate() {
         let segment_id = (chunk_idx + 1) as SegmentId;
 
-        if num_chunks > 1 {
-            print!("\rChunk {}/{}: processing...", chunk_idx + 1, num_chunks);
-            let _ = std::io::Write::flush(&mut std::io::stdout());
-        }
+        // Create progress bar for this chunk
+        let progress_bar = if !silent {
+            let pb = ProgressBar::new(chunk.len() as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                    .unwrap()
+                    .progress_chars("█▓▒░  "),
+            );
+            if num_chunks > 1 {
+                pb.set_message(format!("Chunk {}/{}", chunk_idx + 1, num_chunks));
+            } else {
+                pb.set_message("Processing files...");
+            }
+            Some(pb)
+        } else {
+            None
+        };
+
+        let pb_clone = progress_bar.clone();
+        let error_count_clone = error_count.clone();
+        let total_processed_clone = total_processed.clone();
 
         // Process chunk files in parallel
         let processed_files: Vec<ProcessedFile> = chunk
@@ -153,13 +196,19 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
                 let content = match fs::read(full_path) {
                     Ok(c) => c,
                     Err(_) => {
-                        error_count.fetch_add(1, Ordering::Relaxed);
+                        error_count_clone.fetch_add(1, Ordering::Relaxed);
+                        if let Some(ref pb) = pb_clone {
+                            pb.inc(1);
+                        }
                         return None;
                     }
                 };
 
                 // Check size limit
                 if content.len() as u64 > max_file_size {
+                    if let Some(ref pb) = pb_clone {
+                        pb.inc(1);
+                    }
                     return None;
                 }
 
@@ -174,11 +223,11 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
                 let result = process_file_content(rel_path.clone(), &content, mtime);
 
                 if result.is_some() {
-                    let count = total_processed.fetch_add(1, Ordering::Relaxed) + 1;
-                    if num_chunks == 1 && count % 1000 == 0 {
-                        print!("\rProcessing files... {}/{}", count, total_files);
-                        let _ = std::io::Write::flush(&mut std::io::stdout());
-                    }
+                    total_processed_clone.fetch_add(1, Ordering::Relaxed);
+                }
+
+                if let Some(ref pb) = pb_clone {
+                    pb.inc(1);
                 }
 
                 result
@@ -187,34 +236,52 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
 
         let chunk_file_count = processed_files.len();
 
+        if let Some(pb) = progress_bar {
+            if num_chunks > 1 {
+                pb.finish_with_message(format!("Chunk {}/{}: {} files", chunk_idx + 1, num_chunks, chunk_file_count));
+            } else {
+                pb.finish_with_message(format!("Processed {} files", chunk_file_count));
+            }
+        }
+
         // Write this chunk as a segment
         chunked_writer.write_chunk(segment_id, processed_files)?;
-
-        if num_chunks > 1 {
-            println!("\rChunk {}/{}: {} files written to seg_{:04}         ",
-                chunk_idx + 1, num_chunks, chunk_file_count, segment_id);
-        }
 
         // Memory freed here - processed_files dropped
     }
 
     let file_count = total_processed.load(Ordering::Relaxed);
-    if num_chunks == 1 {
-        println!("\rProcessed {} files.                    ", file_count);
-    } else {
+    if num_chunks > 1 && !silent {
         println!("Total: {} files processed across {} segments", file_count, num_chunks);
     }
 
-    // Phase 3: Finalize global data
-    print!("Finalizing index...");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-    chunked_writer.finalize()?;
-    println!(" done.");
+    // Phase 3: Finalize global data with spinner
+    let finalize_spinner = if !silent {
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.cyan} {msg}")
+                .unwrap(),
+        );
+        spinner.set_message("Finalizing index...");
+        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+        Some(spinner)
+    } else {
+        None
+    };
 
-    println!("Index stored at: {}", index_path.display());
+    chunked_writer.finalize()?;
+
+    if let Some(spinner) = finalize_spinner {
+        spinner.finish_with_message("Index complete");
+    }
+
+    if !silent {
+        println!("Index stored at: {}", index_path.display());
+    }
 
     let errors = error_count.load(Ordering::Relaxed);
-    if errors > 0 {
+    if errors > 0 && !silent {
         eprintln!("({} files could not be read)", errors);
     }
 

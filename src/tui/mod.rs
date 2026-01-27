@@ -5,7 +5,9 @@ mod ui;
 use anyhow::Result;
 use app::App;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -54,7 +56,12 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
 
         // Poll for events with timeout for responsive UI
         if event::poll(Duration::from_millis(100))? {
+            // Only handle key press events, not release or repeat
+            // This fixes duplicate keypresses on Windows where both press and release are reported
             if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
                 // Global keybindings
                 match (key.modifiers, key.code) {
                     (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Ok(()),
@@ -104,7 +111,6 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                             // Vim: Ctrl+h - backspace (terminal standard)
                             (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
                                 app.query.pop();
-                                app.execute_search();
                             }
                             // Vim: Ctrl+a - go to first result
                             (KeyModifiers::CONTROL, KeyCode::Char('a')) => app.select_first(),
@@ -123,9 +129,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                                     app.clear_query();
                                 }
                                 KeyCode::Enter => {
-                                    if !app.results.is_empty() {
-                                        app.toggle_preview();
-                                    }
+                                    app.execute_search();
                                 }
                                 KeyCode::Down | KeyCode::Tab => app.select_next(),
                                 KeyCode::Up | KeyCode::BackTab => app.select_prev(),
@@ -145,11 +149,9 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                                 }
                                 KeyCode::Char(c) => {
                                     app.query.push(c);
-                                    app.execute_search();
                                 }
                                 KeyCode::Backspace => {
                                     app.query.pop();
-                                    app.execute_search();
                                 }
                                 KeyCode::F(1) => app.show_help(),
                                 KeyCode::F(5) => app.reindex(),
