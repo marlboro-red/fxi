@@ -97,13 +97,11 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
             let trim_offset = result.line_content.len() - trimmed.len();
             let trimmed = trimmed.trim_end();
 
-            // Truncate content if needed
+            // Truncate content if needed (using floor_char_boundary for UTF-8 safety)
             let max_content_len = area.width.saturating_sub(path_str.len() as u16 + 10) as usize;
             let (content, truncated) = if trimmed.len() > max_content_len {
-                (
-                    format!("{}...", &trimmed[..max_content_len.saturating_sub(3)]),
-                    true,
-                )
+                let truncate_at = trimmed.floor_char_boundary(max_content_len.saturating_sub(3));
+                (format!("{}...", &trimmed[..truncate_at]), true)
             } else {
                 (trimmed.to_string(), false)
             };
@@ -369,9 +367,9 @@ fn draw_help_panel(f: &mut Frame, area: Rect) {
 fn highlight_match(text: &str, start: usize, end: usize) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
 
-    // Clamp positions to valid bounds
-    let start = start.min(text.len());
-    let end = end.min(text.len()).max(start);
+    // Clamp positions to valid char boundaries for UTF-8 safety
+    let start = text.floor_char_boundary(start.min(text.len()));
+    let end = text.floor_char_boundary(end.min(text.len())).max(start);
 
     if start > 0 {
         spans.push(Span::styled(
