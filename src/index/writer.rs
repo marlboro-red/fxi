@@ -1,4 +1,6 @@
+use crate::index::build::ProcessedFile;
 use crate::index::types::*;
+#[allow(unused_imports)]
 use crate::utils::{delta_encode, extract_tokens, extract_trigrams, get_index_dir, is_binary, is_minified};
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -52,7 +54,8 @@ impl IndexWriter {
         Ok(writer)
     }
 
-    /// Add a file to the index
+    /// Add a file to the index (used for incremental updates)
+    #[allow(dead_code)]
     pub fn add_file(&mut self, rel_path: &Path, content: &[u8], mtime: u64) -> Result<DocId> {
         // Check if binary
         if is_binary(content) {
@@ -114,6 +117,42 @@ impl IndexWriter {
         self.line_maps.insert(doc_id, line_offsets);
 
         Ok(doc_id)
+    }
+
+    /// Add a pre-processed file to the index (for parallel indexing)
+    pub fn add_processed_file(&mut self, processed: ProcessedFile) -> DocId {
+        let doc_id = self.documents.len() as DocId + 1;
+        let path_id = self.add_path(&processed.rel_path);
+
+        // Create document entry
+        let doc = Document {
+            doc_id,
+            path_id,
+            size: processed.size,
+            mtime: processed.mtime,
+            language: processed.language,
+            flags: processed.flags,
+            segment_id: self.segment_id,
+        };
+        self.documents.push(doc);
+
+        // Add trigrams to postings
+        for trigram in processed.trigrams {
+            self.trigram_postings
+                .entry(trigram)
+                .or_default()
+                .push(doc_id);
+        }
+
+        // Add tokens to postings
+        for token in processed.tokens {
+            self.token_postings.entry(token).or_default().push(doc_id);
+        }
+
+        // Store line map
+        self.line_maps.insert(doc_id, processed.line_offsets);
+
+        doc_id
     }
 
     /// Get or create path ID
@@ -381,7 +420,8 @@ impl IndexWriter {
     }
 }
 
-/// Build line offset map from content
+/// Build line offset map from content (used by add_file for incremental updates)
+#[allow(dead_code)]
 fn build_line_map(content: &[u8]) -> Vec<u32> {
     let mut offsets = vec![0u32]; // Line 1 starts at offset 0
 
