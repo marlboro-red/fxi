@@ -1,0 +1,19 @@
+# Build artifacts
+/target/
+debug/
+release/
+
+# Index directory
+.codesearch/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Rust - Cargo.lock is kept for reproducible builds
