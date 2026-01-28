@@ -7,8 +7,9 @@ A terminal-first, ultra-fast code search engine built in Rust.
 - **Hybrid indexing**: Trigram + token index for fast narrowing
 - **Sub-50ms query latency** on warm searches
 - **Memory-efficient**: Disk-backed structures with mmap
-- **Rich query syntax**: Boolean operators, field filters, regex
-- **Interactive TUI**: Real-time search with preview
+- **Rich query syntax**: Boolean operators, proximity search, field filters, regex
+- **Interactive TUI**: Real-time search with vim-style keybindings
+- **Instant preview**: File preview with matched line highlighting
 - **Respects .gitignore**: Automatic filtering of ignored files
 - **Centralized indexes**: Stored in app data, not in project directories
 - **Auto-detection**: Finds codebase root from any subdirectory
@@ -94,6 +95,7 @@ Document count: 1234
 ```
 foo bar                    # AND: both terms must match
 "exact phrase"             # Exact phrase match
+foo^2                      # Boosted term (higher priority)
 ```
 
 ### Boolean Operators
@@ -101,6 +103,12 @@ foo bar                    # AND: both terms must match
 foo | bar                  # OR: either term matches
 -foo                       # NOT: exclude matches
 (foo | bar) baz            # Grouping
+```
+
+### Proximity Search
+```
+near/5:foo,bar             # Terms within 5 lines of each other
+near:foo,bar               # Terms within 3 lines (default)
 ```
 
 ### Regex
@@ -115,6 +123,9 @@ ext:rs                     # File extension
 lang:rust                  # Language filter
 size:>1000                 # Minimum file size
 size:<10000                # Maximum file size
+line:100-200               # Line range filter
+mtime:>2024-01-01          # Modified after date
+mtime:<2024-06-01          # Modified before date
 ```
 
 ### Options
@@ -126,14 +137,34 @@ top:100                    # Limit results
 
 ## TUI Keybindings
 
+Press `F1` or `?` to show help in the TUI.
+
+### Search Mode
+
 | Key | Action |
 |-----|--------|
-| `↑/↓` | Navigate results |
-| `Enter` | Open in editor |
-| `Ctrl+P` | Toggle preview |
+| `↑/↓` or `Tab/Shift+Tab` | Navigate results |
+| `Ctrl+d` / `Ctrl+u` | Page down / up |
+| `gg` or `Ctrl+a` | First result |
+| `G` or `Ctrl+e` | Last result |
+| `Enter` | Execute search / Open file |
+| `Ctrl+p` | Toggle preview mode |
+| `Ctrl+w` | Delete word |
 | `F5` | Rebuild index |
 | `Esc` | Clear query / Exit |
-| `Ctrl+C` | Exit |
+| `Ctrl+c` | Exit |
+
+### Preview Mode
+
+| Key | Action |
+|-----|--------|
+| `j/k` | Scroll down / up |
+| `Ctrl+d` / `Ctrl+u` | Half-page down / up |
+| `Ctrl+f` / `Ctrl+b` | Full page down / up |
+| `gg` / `G` | Top / Bottom |
+| `n` / `N` | Next / Previous result |
+| `o` or `Enter` | Open file in editor |
+| `q` or `Esc` | Back to search |
 
 ## Architecture
 
