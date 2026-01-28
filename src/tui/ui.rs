@@ -95,7 +95,7 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
             let line_style = Style::default().fg(Color::Yellow);
 
             // Format: path:line  content
-            let path_str = result.path.to_string_lossy();
+            let path_str = truncate_path(&result.path.to_string_lossy());
             let line_num = result.line_number;
 
             // Trim leading whitespace and track offset adjustment
@@ -510,6 +510,21 @@ fn draw_help_panel(f: &mut Frame, area: Rect) {
     // Clear the area behind the help panel
     f.render_widget(ratatui::widgets::Clear, help_area);
     f.render_widget(help_paragraph, help_area);
+}
+
+/// Truncate a path to show at most 3 directory components, prefixing with "..." if truncated
+fn truncate_path(path_str: &str) -> String {
+    // Split by both forward and back slashes to handle cross-platform paths
+    let components: Vec<&str> = path_str.split(['/', '\\']).collect();
+
+    if components.len() <= 4 {
+        // 3 directories + filename = 4 components max without truncation
+        path_str.to_string()
+    } else {
+        // Take last 4 components (3 dirs + filename) and prefix with ...
+        let truncated: Vec<&str> = components.iter().rev().take(4).rev().cloned().collect();
+        format!(".../{}", truncated.join("/"))
+    }
 }
 
 /// Highlight matches in text, returning owned spans
