@@ -358,6 +358,11 @@ impl App {
             return;
         }
 
+        // Clear stale results immediately when starting a new search
+        // This prevents showing old results if the new search fails
+        self.results.clear();
+        self.selected = 0;
+
         // Use daemon if available (fast path)
         if self.using_daemon {
             if let Some(ref client) = self.client {
