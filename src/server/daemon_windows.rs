@@ -1,6 +1,6 @@
-//! Index server daemon
+//! Windows index server daemon
 //!
-//! Keeps indexes loaded in memory and serves search requests over Unix socket.
+//! Keeps indexes loaded in memory and serves search requests over named pipes.
 
 use crate::index::reader::IndexReader;
 use crate::query::{parse_query, QueryExecutor};
@@ -8,30 +8,151 @@ use crate::server::protocol::{
     read_message, write_message, ContentMatch, ContentSearchOptions, ContentSearchResponse,
     Request, Response, SearchMatchData, SearchResponse, StatusResponse,
 };
-use crate::server::{get_pid_path, get_socket_path};
+use crate::server::{get_pid_path, get_pipe_name};
 use anyhow::{Context, Result};
 use lru::LruCache;
 use std::collections::HashMap;
-use std::fs;
-use std::io::{BufReader, BufWriter};
+use std::ffi::OsStr;
+use std::fs::{self, File};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::num::NonZeroUsize;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
+use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+// Windows API constants
+const PIPE_ACCESS_DUPLEX: u32 = 0x00000003;
+const PIPE_TYPE_BYTE: u32 = 0x00000000;
+const PIPE_READMODE_BYTE: u32 = 0x00000000;
+const PIPE_WAIT: u32 = 0x00000000;
+const PIPE_UNLIMITED_INSTANCES: u32 = 255;
+const INVALID_HANDLE_VALUE: *mut std::ffi::c_void = -1isize as *mut std::ffi::c_void;
+const ERROR_PIPE_CONNECTED: u32 = 535;
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn CreateNamedPipeW(
+        lpName: *const u16,
+        dwOpenMode: u32,
+        dwPipeMode: u32,
+        nMaxInstances: u32,
+        nOutBufferSize: u32,
+        nInBufferSize: u32,
+        nDefaultTimeOut: u32,
+        lpSecurityAttributes: *mut std::ffi::c_void,
+    ) -> *mut std::ffi::c_void;
+
+    fn ConnectNamedPipe(
+        hNamedPipe: *mut std::ffi::c_void,
+        lpOverlapped: *mut std::ffi::c_void,
+    ) -> i32;
+
+    fn DisconnectNamedPipe(hNamedPipe: *mut std::ffi::c_void) -> i32;
+
+    fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+
+    fn GetLastError() -> u32;
+
+    fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> *mut std::ffi::c_void;
+
+    fn TerminateProcess(hProcess: *mut std::ffi::c_void, uExitCode: u32) -> i32;
+}
+
+const PROCESS_TERMINATE: u32 = 0x0001;
+const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
 /// LRU cache size for search results per index
 const CACHE_SIZE: usize = 128;
 
-/// Connection timeout
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
+/// Connection timeout in milliseconds
+const CONNECTION_TIMEOUT_MS: u32 = 30000;
 
 /// Maximum results to return to avoid exceeding message size limits
-/// This caps unbounded (limit=0) requests to prevent excessive memory/transfer
-/// Set very high since the protocol already has a 100MB message limit
 const MAX_RESULTS_CAP: usize = 10_000_000;
+
+/// Buffer size for named pipe
+const PIPE_BUFFER_SIZE: u32 = 65536;
+
+/// A Send-safe wrapper for a Windows HANDLE
+#[derive(Clone, Copy)]
+struct SendableHandle(isize);
+
+// Safety: Windows HANDLEs can be used from any thread
+unsafe impl Send for SendableHandle {}
+
+impl SendableHandle {
+    fn from_raw(ptr: *mut std::ffi::c_void) -> Self {
+        Self(ptr as isize)
+    }
+
+    fn as_raw(&self) -> *mut std::ffi::c_void {
+        self.0 as *mut std::ffi::c_void
+    }
+}
+
+/// Wrapper for Windows handle that implements Read + Write
+struct PipeHandle {
+    handle: SendableHandle,
+}
+
+impl PipeHandle {
+    #[allow(dead_code)]
+    fn try_clone(&self) -> std::io::Result<Self> {
+        // For simplicity, we don't actually clone the handle
+        // The server uses separate reader/writer on the same handle
+        Ok(Self { handle: self.handle })
+    }
+}
+
+impl Read for PipeHandle {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::os::windows::io::FromRawHandle;
+        // Convert to File temporarily to use its Read impl
+        let file = unsafe { File::from_raw_handle(self.handle.as_raw() as *mut _) };
+        let result = (&file).read(buf);
+        // Prevent the File from closing our handle
+        std::mem::forget(file);
+        result
+    }
+}
+
+impl Write for PipeHandle {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use std::os::windows::io::FromRawHandle;
+        let file = unsafe { File::from_raw_handle(self.handle.as_raw() as *mut _) };
+        let result = (&file).write(buf);
+        std::mem::forget(file);
+        result
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        use std::os::windows::io::FromRawHandle;
+        let file = unsafe { File::from_raw_handle(self.handle.as_raw() as *mut _) };
+        let result = (&file).flush();
+        std::mem::forget(file);
+        result
+    }
+}
+
+impl Drop for PipeHandle {
+    fn drop(&mut self) {
+        let raw = self.handle.as_raw();
+        if raw != INVALID_HANDLE_VALUE && !raw.is_null() {
+            unsafe {
+                CloseHandle(raw);
+            }
+        }
+    }
+}
+
+/// Convert a Rust string to a null-terminated wide string
+fn to_wide_string(s: &str) -> Vec<u16> {
+    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+}
 
 /// Cached index with its query cache
 struct CachedIndex {
@@ -108,86 +229,103 @@ impl IndexServer {
 
     /// Start the server (blocking)
     pub fn run(self: &Arc<Self>) -> Result<()> {
-        let socket_path = get_socket_path();
+        let pipe_name = get_pipe_name();
         let pid_path = get_pid_path();
 
-        // Ensure parent directory exists
-        if let Some(parent) = socket_path.parent() {
+        // Ensure parent directory exists for PID file
+        if let Some(parent) = pid_path.parent() {
             fs::create_dir_all(parent)?;
-        }
-
-        // Remove stale socket file
-        if socket_path.exists() {
-            fs::remove_file(&socket_path)?;
         }
 
         // Write PID file
         fs::write(&pid_path, format!("{}", std::process::id()))?;
 
-        // Bind to socket
-        let listener = UnixListener::bind(&socket_path)
-            .with_context(|| format!("Failed to bind to {}", socket_path.display()))?;
+        eprintln!("fxid: listening on {}", pipe_name);
 
-        // Set socket permissions (user only)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
-        }
-
-        eprintln!("fxid: listening on {}", socket_path.display());
-
-        // Accept connections
-        for stream in listener.incoming() {
+        // Main server loop - create pipe instances and accept connections
+        loop {
             if self.shutdown.load(Ordering::Relaxed) {
                 break;
             }
 
-            match stream {
-                Ok(stream) => {
-                    // Set timeout
-                    let _ = stream.set_read_timeout(Some(CONNECTION_TIMEOUT));
-                    let _ = stream.set_write_timeout(Some(CONNECTION_TIMEOUT));
+            // Create a new pipe instance
+            let wide_name = to_wide_string(&pipe_name);
+            let pipe_handle = unsafe {
+                CreateNamedPipeW(
+                    wide_name.as_ptr(),
+                    PIPE_ACCESS_DUPLEX,
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                    PIPE_UNLIMITED_INSTANCES,
+                    PIPE_BUFFER_SIZE,
+                    PIPE_BUFFER_SIZE,
+                    CONNECTION_TIMEOUT_MS,
+                    ptr::null_mut(),
+                )
+            };
 
-                    // Handle in new thread
-                    let server = Arc::clone(self);
-                    thread::spawn(move || {
-                        if let Err(e) = server.handle_connection(stream) {
-                            eprintln!("fxid: connection error: {}", e);
-                        }
-                    });
-                }
-                Err(e) => {
-                    eprintln!("fxid: accept error: {}", e);
+            if pipe_handle == INVALID_HANDLE_VALUE {
+                let err = unsafe { GetLastError() };
+                eprintln!("fxid: failed to create pipe: error {}", err);
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+
+            // Wait for client connection
+            let connected = unsafe { ConnectNamedPipe(pipe_handle, ptr::null_mut()) };
+
+            if connected == 0 {
+                let err = unsafe { GetLastError() };
+                if err != ERROR_PIPE_CONNECTED {
+                    unsafe { CloseHandle(pipe_handle); }
+                    continue;
                 }
             }
+
+            if self.shutdown.load(Ordering::Relaxed) {
+                unsafe { CloseHandle(pipe_handle); }
+                break;
+            }
+
+            // Handle connection in new thread
+            let server = Arc::clone(self);
+            let sendable_handle = SendableHandle::from_raw(pipe_handle);
+            thread::spawn(move || {
+                let handle = PipeHandle { handle: sendable_handle };
+                if let Err(e) = server.handle_connection(handle) {
+                    eprintln!("fxid: connection error: {}", e);
+                }
+            });
         }
 
         // Cleanup
-        let _ = fs::remove_file(&socket_path);
         let _ = fs::remove_file(&pid_path);
 
         Ok(())
     }
 
     /// Handle a single client connection
-    fn handle_connection(&self, stream: UnixStream) -> Result<()> {
-        let mut reader = BufReader::new(stream.try_clone()?);
-        let mut writer = BufWriter::new(stream);
+    fn handle_connection(&self, pipe: PipeHandle) -> Result<()> {
+        let mut reader = BufReader::new(PipeHandle { handle: pipe.handle });
+        let mut writer = BufWriter::new(PipeHandle { handle: pipe.handle });
+
+        // Prevent the original pipe from being dropped (closing the handle)
+        std::mem::forget(pipe);
 
         loop {
             // Read request
             let request: Request = match read_message(&mut reader) {
                 Ok(req) => req,
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    // Client disconnected
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
                     break;
                 }
                 Err(e) => {
                     let resp = Response::Error {
                         message: format!("Invalid request: {}", e),
                     };
-                    write_message(&mut writer, &resp)?;
+                    let _ = write_message(&mut writer, &resp);
                     continue;
                 }
             };
@@ -196,12 +334,19 @@ impl IndexServer {
             let response = self.handle_request(request);
 
             // Send response
-            write_message(&mut writer, &response)?;
+            if write_message(&mut writer, &response).is_err() {
+                break;
+            }
 
             // Check for shutdown
             if matches!(response, Response::ShuttingDown) {
                 break;
             }
+        }
+
+        // Disconnect and close the pipe
+        unsafe {
+            DisconnectNamedPipe(reader.into_inner().handle.as_raw());
         }
 
         Ok(())
@@ -277,7 +422,6 @@ impl IndexServer {
                 self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
                 let mut matches = cached_matches.clone();
-                // Only truncate if limit is non-zero (0 means use query's top:N limit)
                 if limit > 0 {
                     matches.truncate(limit);
                 }
@@ -331,7 +475,6 @@ impl IndexServer {
         self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
         let mut result_matches = match_data;
-        // Only truncate if limit is non-zero (0 means use query's top:N limit)
         if limit > 0 {
             result_matches.truncate(limit);
         }
@@ -384,9 +527,7 @@ impl IndexServer {
         cached.touch();
 
         // Build query - handle case insensitivity by wrapping pattern
-        // Skip wrapping if pattern is already a regex (starts with "re:/")
         let query_str = if options.case_insensitive && !pattern.starts_with("re:/") {
-            // Use regex for case-insensitive search
             format!("re:/(?i){}/", regex::escape(&pattern))
         } else {
             pattern.clone()
@@ -416,7 +557,6 @@ impl IndexServer {
                 }
             };
 
-            // Convert to minimal ContentMatch (just path, no content)
             let file_count = matching_files.len();
             let match_data: Vec<ContentMatch> = matching_files
                 .into_iter()
@@ -461,7 +601,6 @@ impl IndexServer {
         }
 
         // Convert to protocol type and apply limit
-        // Cap unlimited requests to prevent exceeding message size limits
         let effective_limit = if limit == 0 { MAX_RESULTS_CAP } else { limit.min(MAX_RESULTS_CAP) };
         let iter = matches.into_iter().take(effective_limit);
         let match_data: Vec<ContentMatch> = iter
@@ -493,11 +632,9 @@ impl IndexServer {
 
         let loaded_roots: Vec<PathBuf> = indexes.keys().cloned().collect();
 
-        // Estimate memory usage (rough)
         let memory_bytes: u64 = indexes
             .values()
             .map(|idx| {
-                // Rough estimate: doc count * 100 bytes per doc + overhead
                 (idx.reader.meta.doc_count as u64) * 100 + 1024 * 1024
             })
             .sum();
@@ -584,70 +721,26 @@ impl IndexServer {
     }
 }
 
-/// Daemonize the current process
+/// Daemonize the current process (Windows version - runs as background process)
 pub fn daemonize() -> Result<()> {
-    // Fork using double-fork technique for proper daemonization
-    match unsafe { libc::fork() } {
-        -1 => anyhow::bail!("First fork failed"),
-        0 => {
-            // Child process
-            // Create new session
-            if unsafe { libc::setsid() } == -1 {
-                anyhow::bail!("setsid failed");
-            }
+    use std::process::Command;
 
-            // Second fork to prevent acquiring a controlling terminal
-            match unsafe { libc::fork() } {
-                -1 => anyhow::bail!("Second fork failed"),
-                0 => {
-                    // Grandchild - this becomes the daemon
-                    // Close standard file descriptors
-                    unsafe {
-                        libc::close(0);
-                        libc::close(1);
-                        libc::close(2);
+    // On Windows, we spawn a detached child process
+    let exe = std::env::current_exe()?;
 
-                        // Redirect to /dev/null
-                        let null = libc::open(
-                            b"/dev/null\0".as_ptr() as *const libc::c_char,
-                            libc::O_RDWR,
-                        );
-                        if null != -1 {
-                            libc::dup2(null, 0);
-                            libc::dup2(null, 1);
-                            libc::dup2(null, 2);
-                            if null > 2 {
-                                libc::close(null);
-                            }
-                        }
-                    }
+    // Start the server in foreground mode as a detached process
+    Command::new(&exe)
+        .args(["server", "--foreground"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| "Failed to spawn daemon process")?;
 
-                    // Change to root directory to avoid holding mounts
-                    let _ = std::env::set_current_dir("/");
+    // Give it a moment to start
+    thread::sleep(Duration::from_millis(100));
 
-                    // Now run the server
-                    let server = IndexServer::new();
-                    if let Err(e) = server.run() {
-                        // Can't really report this since stdout is closed
-                        let _ = fs::write("/tmp/fxid-error.log", format!("{}", e));
-                    }
-                    std::process::exit(0);
-                }
-                _ => {
-                    // First child exits immediately
-                    std::process::exit(0);
-                }
-            }
-        }
-        _ => {
-            // Parent process - wait for first child then exit
-            unsafe {
-                let mut status: libc::c_int = 0;
-                libc::wait(&mut status);
-            }
-            Ok(())
-        }
-    }
+    Ok(())
 }
 
 /// Start the daemon in foreground (for debugging)
@@ -665,27 +758,29 @@ pub fn stop_daemon() -> Result<bool> {
     }
 
     let pid_str = fs::read_to_string(&pid_path)?;
-    let pid: i32 = pid_str.trim().parse()?;
+    let pid: u32 = pid_str.trim().parse()?;
 
-    // Send SIGTERM
+    // Open the process and terminate it
     unsafe {
-        if libc::kill(pid, libc::SIGTERM) == 0 {
-            // Wait a bit for graceful shutdown
-            thread::sleep(Duration::from_millis(500));
+        let handle = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            // Process doesn't exist
+            let _ = fs::remove_file(&pid_path);
+            return Ok(false);
+        }
 
-            // Check if still running, send SIGKILL if needed
-            if libc::kill(pid, 0) == 0 {
-                thread::sleep(Duration::from_secs(1));
-                if libc::kill(pid, 0) == 0 {
-                    libc::kill(pid, libc::SIGKILL);
-                }
-            }
+        let result = TerminateProcess(handle, 0);
+        CloseHandle(handle);
+
+        if result == 0 {
+            return Ok(false);
         }
     }
 
-    // Clean up socket and pid files
-    let socket_path = get_socket_path();
-    let _ = fs::remove_file(&socket_path);
+    // Wait a bit for process to exit
+    thread::sleep(Duration::from_millis(500));
+
+    // Clean up pid file
     let _ = fs::remove_file(&pid_path);
 
     Ok(true)

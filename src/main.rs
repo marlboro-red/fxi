@@ -203,7 +203,7 @@ fn main() -> Result<()> {
 }
 
 fn handle_daemon_command(action: DaemonAction) -> Result<()> {
-    use server::{get_socket_path, is_daemon_running, IndexClient};
+    use server::{is_daemon_running, IndexClient};
 
     match action {
         DaemonAction::Start => {
@@ -219,9 +219,15 @@ fn handle_daemon_command(action: DaemonAction) -> Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(500));
 
             if is_daemon_running() {
-                println!("Daemon started (socket: {})", get_socket_path().display());
+                #[cfg(unix)]
+                println!("Daemon started (socket: {})", server::get_socket_path().display());
+                #[cfg(windows)]
+                println!("Daemon started (pipe: {})", server::get_pipe_name());
             } else {
+                #[cfg(unix)]
                 println!("Daemon may have failed to start. Check /tmp/fxid-error.log");
+                #[cfg(windows)]
+                println!("Daemon may have failed to start.");
             }
         }
 

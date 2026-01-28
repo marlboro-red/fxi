@@ -1,4 +1,4 @@
-//! Client for connecting to the index server daemon
+//! Unix client for connecting to the index server daemon
 
 use crate::index::types::SearchMatch;
 use crate::server::protocol::{
