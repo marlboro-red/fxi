@@ -1,5 +1,6 @@
 mod index;
 mod query;
+mod server;
 mod tui;
 mod utils;
 
@@ -63,6 +64,29 @@ enum Commands {
         /// Path to the codebase to remove index for
         path: PathBuf,
     },
+    /// Start the index server daemon (keeps indexes warm for fast searches)
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Start the daemon in background
+    Start,
+    /// Stop the running daemon
+    Stop,
+    /// Check daemon status
+    Status,
+    /// Run daemon in foreground (for debugging)
+    Foreground,
+    /// Reload index for a path
+    Reload {
+        /// Path to the codebase to reload
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -90,6 +114,9 @@ fn main() -> Result<()> {
             utils::remove_index(&root)?;
             println!("Removed index for: {}", root.display());
         }
+        Some(Commands::Daemon { action }) => {
+            handle_daemon_command(action)?;
+        }
         None => {
             if cli.query.is_empty() {
                 // Interactive mode
@@ -98,6 +125,129 @@ fn main() -> Result<()> {
                 // Direct query mode
                 let query_str = cli.query.join(" ");
                 tui::run(cli.path, Some(query_str))?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_daemon_command(action: DaemonAction) -> Result<()> {
+    use server::{get_socket_path, is_daemon_running, IndexClient};
+
+    match action {
+        DaemonAction::Start => {
+            if is_daemon_running() {
+                println!("Daemon is already running");
+                return Ok(());
+            }
+
+            println!("Starting fxid daemon...");
+            server::daemon::daemonize()?;
+
+            // Wait a moment for daemon to start
+            std::thread::sleep(std::time::Duration::from_millis(500));
+
+            if is_daemon_running() {
+                println!("Daemon started (socket: {})", get_socket_path().display());
+            } else {
+                println!("Daemon may have failed to start. Check /tmp/fxid-error.log");
+            }
+        }
+
+        DaemonAction::Stop => {
+            if !is_daemon_running() {
+                println!("Daemon is not running");
+                return Ok(());
+            }
+
+            println!("Stopping daemon...");
+
+            // Try graceful shutdown via client first
+            if let Some(mut client) = IndexClient::connect() {
+                let _ = client.shutdown();
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+
+            // Force stop if still running
+            if is_daemon_running() {
+                server::daemon::stop_daemon()?;
+            }
+
+            println!("Daemon stopped");
+        }
+
+        DaemonAction::Status => {
+            if !is_daemon_running() {
+                println!("Daemon is not running");
+                return Ok(());
+            }
+
+            match IndexClient::connect() {
+                Some(mut client) => {
+                    match client.status() {
+                        Ok(status) => {
+                            println!("fxid daemon status:");
+                            println!("  Uptime: {}s", status.uptime_secs);
+                            println!("  Indexes loaded: {}", status.indexes_loaded);
+                            println!("  Total documents: {}", status.total_docs);
+                            println!("  Queries served: {}", status.queries_served);
+                            println!("  Cache hit rate: {:.1}%", status.cache_hit_rate * 100.0);
+                            println!("  Memory (approx): {:.1} MB", status.memory_bytes as f64 / 1024.0 / 1024.0);
+                            if !status.loaded_roots.is_empty() {
+                                println!("  Loaded codebases:");
+                                for root in &status.loaded_roots {
+                                    println!("    - {}", root.display());
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("Failed to get status: {}", e);
+                        }
+                    }
+                }
+                None => {
+                    println!("Daemon is running but not responding");
+                }
+            }
+        }
+
+        DaemonAction::Foreground => {
+            if is_daemon_running() {
+                println!("Daemon is already running in background. Stop it first with 'fxi daemon stop'");
+                return Ok(());
+            }
+
+            println!("Running daemon in foreground (Ctrl+C to stop)...");
+            server::daemon::run_foreground()?;
+        }
+
+        DaemonAction::Reload { path } => {
+            let root = utils::find_codebase_root(&path)?;
+
+            if !is_daemon_running() {
+                println!("Daemon is not running. Start it with 'fxi daemon start'");
+                return Ok(());
+            }
+
+            match IndexClient::connect() {
+                Some(mut client) => {
+                    match client.reload(&root) {
+                        Ok((success, message)) => {
+                            if success {
+                                println!("Reloaded: {}", message);
+                            } else {
+                                println!("Reload failed: {}", message);
+                            }
+                        }
+                        Err(e) => {
+                            println!("Failed to reload: {}", e);
+                        }
+                    }
+                }
+                None => {
+                    println!("Failed to connect to daemon");
+                }
             }
         }
     }

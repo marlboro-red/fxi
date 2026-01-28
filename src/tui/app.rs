@@ -2,6 +2,7 @@ use crate::index::build::build_index_with_progress;
 use crate::index::reader::IndexReader;
 use crate::index::types::SearchMatch;
 use crate::query::{parse_query, QueryExecutor};
+use crate::server::IndexClient;
 use crate::utils::find_codebase_root;
 use anyhow::Result;
 use lru::LruCache;
@@ -10,7 +11,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
@@ -62,7 +63,12 @@ pub struct App {
     /// Original path user started from (for relative path display)
     #[allow(dead_code)]
     pub start_path: PathBuf,
+    /// Client connection to daemon (if available)
+    client: Option<Arc<Mutex<IndexClient>>>,
+    /// Whether we're using the daemon (vs direct index loading)
+    using_daemon: bool,
     /// Shared reader for background search (Arc for thread safety)
+    /// Only used when daemon is not available
     reader: Option<Arc<IndexReader>>,
     pub query: String,
     pub results: Vec<SearchMatch>,
@@ -91,13 +97,51 @@ pub struct App {
 }
 
 impl App {
-    /// Create new app with INSTANT startup - index loads in background
+    /// Create new app with INSTANT startup
+    /// Tries to connect to daemon first for instant warm searches,
+    /// falls back to background index loading if daemon unavailable
     pub fn new(path: PathBuf) -> Result<Self> {
         let start_path = path.canonicalize().unwrap_or(path);
 
         // Auto-detect codebase root (fast operation)
         let root_path = find_codebase_root(&start_path)?;
 
+        // Try connecting to daemon first (instant if running)
+        if let Some(mut client) = IndexClient::connect() {
+            // Ping to verify connection works
+            if client.ping().is_ok() {
+                let status = format!(
+                    "Connected to daemon (root: {})",
+                    root_path.file_name().unwrap_or_default().to_string_lossy()
+                );
+
+                return Ok(Self {
+                    root_path,
+                    start_path,
+                    client: Some(Arc::new(Mutex::new(client))),
+                    using_daemon: true,
+                    reader: None,
+                    query: String::new(),
+                    results: Vec::new(),
+                    selected: 0,
+                    mode: Mode::Search,
+                    previous_mode: Mode::Search,
+                    preview_scroll: 0,
+                    preview_content: None,
+                    preview_path: None,
+                    status_message: status,
+                    index_available: true, // Daemon handles index
+                    pending_key: None,
+                    editing: true,
+                    load_state: IndexLoadState::Ready,
+                    search_state: SearchState::Idle,
+                    search_cache: LruCache::new(NonZeroUsize::new(SEARCH_CACHE_SIZE).unwrap()),
+                    prefetch_cache: HashMap::new(),
+                });
+            }
+        }
+
+        // Fallback: load index directly (daemon not running)
         // Check if index exists (fast - just check file existence)
         let index_dir = crate::utils::get_index_dir(&root_path)?;
         let meta_path = index_dir.join("meta.json");
@@ -121,6 +165,8 @@ impl App {
         Ok(Self {
             root_path,
             start_path,
+            client: None,
+            using_daemon: false,
             reader: None,
             query: String::new(),
             results: Vec::new(),
@@ -288,17 +334,21 @@ impl App {
             self.results.clear();
             self.search_state = SearchState::Idle;
             self.status_message = if self.index_available {
-                format!(
-                    "{} files indexed",
-                    self.reader.as_ref().map(|r| r.meta.doc_count).unwrap_or(0)
-                )
+                if self.using_daemon {
+                    "Connected to daemon".to_string()
+                } else {
+                    format!(
+                        "{} files indexed",
+                        self.reader.as_ref().map(|r| r.meta.doc_count).unwrap_or(0)
+                    )
+                }
             } else {
                 "No index. Press F5 to build.".to_string()
             };
             return;
         }
 
-        // Check cache first for instant results (LRU cache)
+        // Check local cache first for instant results (LRU cache)
         if let Some(cached) = self.search_cache.get(&self.query) {
             self.results = cached.clone();
             self.selected = 0;
@@ -308,6 +358,42 @@ impl App {
             return;
         }
 
+        // Use daemon if available (fast path)
+        if self.using_daemon {
+            if let Some(ref client) = self.client {
+                let client = Arc::clone(client);
+                let (tx, rx) = mpsc::channel();
+                let query = self.query.clone();
+                let query_for_thread = query.clone();
+                let root_path = self.root_path.clone();
+
+                self.status_message = "Searching (daemon)...".to_string();
+                self.search_state = SearchState::Searching {
+                    query: query.clone(),
+                    receiver: rx,
+                    start_time: Instant::now(),
+                };
+
+                thread::spawn(move || {
+                    let result = if let Ok(mut client) = client.lock() {
+                        match client.search(&query_for_thread, &root_path, 500) {
+                            Ok(sr) => Ok(sr.matches),
+                            Err(e) => Err(e.to_string()),
+                        }
+                    } else {
+                        Err("Failed to lock client".to_string())
+                    };
+
+                    let _ = tx.send(SearchResult {
+                        matches: result,
+                        query: query_for_thread,
+                    });
+                });
+                return;
+            }
+        }
+
+        // Fallback to direct index search
         let reader = match &self.reader {
             Some(r) => Arc::clone(r),
             None => {
@@ -460,23 +546,38 @@ impl App {
 
         match build_index_with_progress(&self.root_path, true, true) {
             Ok(()) => {
-                // Reload reader
-                match IndexReader::open(&self.root_path) {
-                    Ok(r) => {
-                        let doc_count = r.meta.doc_count;
-                        self.reader = Some(Arc::new(r));
-                        self.index_available = true;
-                        self.load_state = IndexLoadState::Ready;
-                        self.status_message = format!("Index rebuilt: {} files", doc_count);
-
-                        // Re-run query if any
-                        if !self.query.is_empty() {
-                            self.execute_search();
+                // Notify daemon to reload if we're using it
+                if self.using_daemon {
+                    if let Some(ref client) = self.client {
+                        if let Ok(mut client) = client.lock() {
+                            let _ = client.reload(&self.root_path);
                         }
                     }
-                    Err(e) => {
-                        self.status_message = format!("Error loading index: {}", e);
-                        self.load_state = IndexLoadState::Failed;
+                    self.status_message = "Index rebuilt (daemon notified)".to_string();
+
+                    // Re-run query if any
+                    if !self.query.is_empty() {
+                        self.execute_search();
+                    }
+                } else {
+                    // Reload reader directly
+                    match IndexReader::open(&self.root_path) {
+                        Ok(r) => {
+                            let doc_count = r.meta.doc_count;
+                            self.reader = Some(Arc::new(r));
+                            self.index_available = true;
+                            self.load_state = IndexLoadState::Ready;
+                            self.status_message = format!("Index rebuilt: {} files", doc_count);
+
+                            // Re-run query if any
+                            if !self.query.is_empty() {
+                                self.execute_search();
+                            }
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Error loading index: {}", e);
+                            self.load_state = IndexLoadState::Failed;
+                        }
                     }
                 }
             }

@@ -560,6 +560,7 @@ dependencies = [
  "globset",
  "ignore",
  "indicatif",
+ "libc",
  "lru",
  "memchr",
  "memmap2",
