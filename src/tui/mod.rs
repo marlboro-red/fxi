@@ -1,5 +1,4 @@
 mod app;
-mod highlighter;
 mod ui;
 
 use anyhow::Result;

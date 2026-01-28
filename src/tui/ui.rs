@@ -167,10 +167,6 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
             .map(|r| r.line_number as usize)
             .unwrap_or(0);
 
-        // Use cached highlighted content with viewport offset
-        // (highlighted_lines, start_offset) where start_offset is 0-indexed line number
-        let highlighted_data = app.get_highlighted();
-
         let mut lines: Vec<Line> = preview
             .lines()
             .enumerate()
@@ -193,72 +189,6 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
                     Span::styled(format!("{:4} ", actual_line), line_num_style),
                 ];
 
-                // Use highlighted spans if available, otherwise fall back to plain text
-                // Account for viewport offset when looking up highlighted lines
-                if let Some((highlighted, start_offset)) = highlighted_data {
-                    // Convert absolute line number to relative index in highlighted buffer
-                    let relative_idx = line_num.checked_sub(start_offset);
-                    if let Some(idx) = relative_idx {
-                        if let Some(line_spans) = highlighted.get(idx) {
-                            // Calculate total content length for padding
-                            let mut content_len = 0usize;
-                            if is_match {
-                                // For matched line, add bold modifier to all spans
-                                for span in line_spans {
-                                    // Truncate span content if needed
-                                    let span_content = if content_len + span.content.len() > content_width {
-                                        let remaining = content_width.saturating_sub(content_len);
-                                        let truncate_at = span.content.floor_char_boundary(remaining);
-                                        &span.content[..truncate_at]
-                                    } else {
-                                        &span.content
-                                    };
-                                    content_len += span_content.len();
-
-                                    let mut style = span.style;
-                                    style = style.add_modifier(Modifier::BOLD);
-                                    // Also add a subtle background to indicate match
-                                    style = style.bg(Color::Rgb(60, 60, 40));
-                                    spans.push(Span::styled(span_content.to_string(), style));
-
-                                    if content_len >= content_width {
-                                        break;
-                                    }
-                                }
-                                // Pad match line to extend background to edge
-                                if content_len < content_width {
-                                    let padding = " ".repeat(content_width - content_len);
-                                    spans.push(Span::styled(
-                                        padding,
-                                        Style::default()
-                                            .bg(Color::Rgb(60, 60, 40))
-                                            .add_modifier(Modifier::BOLD),
-                                    ));
-                                }
-                            } else {
-                                for span in line_spans {
-                                    // Truncate span content if needed
-                                    let span_content = if content_len + span.content.len() > content_width {
-                                        let remaining = content_width.saturating_sub(content_len);
-                                        let truncate_at = span.content.floor_char_boundary(remaining);
-                                        &span.content[..truncate_at]
-                                    } else {
-                                        &span.content
-                                    };
-                                    content_len += span_content.len();
-                                    spans.push(Span::styled(span_content.to_string(), span.style));
-
-                                    if content_len >= content_width {
-                                        break;
-                                    }
-                                }
-                            }
-                            return Line::from(spans);
-                        }
-                    }
-                }
-
-                // Fallback for lines outside highlighted range or no highlighting available
                 if is_match {
                     let content_style = Style::default()
                         .fg(Color::Yellow)

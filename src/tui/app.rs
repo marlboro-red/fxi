@@ -2,7 +2,6 @@ use crate::index::build::build_index_with_progress;
 use crate::index::reader::IndexReader;
 use crate::index::types::SearchMatch;
 use crate::query::{parse_query, QueryExecutor};
-use crate::tui::highlighter::SyntaxHighlighter;
 use crate::utils::find_codebase_root;
 use anyhow::Result;
 use lru::LruCache;
@@ -73,19 +72,14 @@ pub struct App {
     pub previous_mode: Mode,
     pub preview_scroll: usize,
     pub preview_content: Option<String>,
-    /// Path of the currently previewed file (for syntax highlighting)
+    /// Path of the currently previewed file
     pub preview_path: Option<PathBuf>,
-    /// Cache of highlighted content by file path: (lines, start_offset)
-    /// Cleared on new search, re-computed on viewport change
-    highlight_cache: HashMap<PathBuf, (Vec<Vec<ratatui::text::Span<'static>>>, usize)>,
     pub status_message: String,
     pub index_available: bool,
     /// Pending key for vim multi-key commands (e.g., 'g' for 'gg')
     pub pending_key: Option<char>,
     /// Whether user is actively editing the query (vim bindings disabled until Enter)
     pub editing: bool,
-    /// Syntax highlighter for code preview
-    pub highlighter: SyntaxHighlighter,
     /// Background index loading state
     load_state: IndexLoadState,
     /// Background search state
@@ -136,12 +130,10 @@ impl App {
             preview_scroll: 0,
             preview_content: None,
             preview_path: None,
-            highlight_cache: HashMap::new(),
             status_message: status,
             index_available: false,
             pending_key: None,
             editing: true,
-            highlighter: SyntaxHighlighter::new(),
             load_state,
             search_state: SearchState::Idle,
             search_cache: LruCache::new(NonZeroUsize::new(SEARCH_CACHE_SIZE).unwrap()),
@@ -290,8 +282,6 @@ impl App {
     }
 
     pub fn execute_search(&mut self) {
-        // Clear highlight cache on new search
-        self.highlight_cache.clear();
         self.prefetch_cache.clear();
 
         if self.query.is_empty() {
@@ -405,11 +395,6 @@ impl App {
     }
 
     pub fn update_preview(&mut self) {
-        self.update_preview_with_viewport(50); // Default viewport height
-    }
-
-    /// Update preview with specific viewport height for viewport-optimized highlighting
-    pub fn update_preview_with_viewport(&mut self, viewport_height: usize) {
         if let Some(result) = self.results.get(self.selected) {
             let full_path = self.root_path.join(&result.path);
 
@@ -417,19 +402,10 @@ impl App {
             let content = self.get_preview_content(&full_path);
 
             if let Some(content) = content {
-                self.preview_content = Some(content.clone());
-                self.preview_path = Some(full_path.clone());
+                self.preview_content = Some(content);
+                self.preview_path = Some(full_path);
                 // Scroll to show the match
                 self.preview_scroll = result.line_number.saturating_sub(5) as usize;
-
-                // Use viewport-optimized highlighting (only highlight visible region + buffer)
-                let (highlighted, offset) = self.highlighter.highlight_viewport(
-                    &content,
-                    &full_path,
-                    self.preview_scroll,
-                    viewport_height,
-                );
-                self.highlight_cache.insert(full_path, (highlighted, offset));
             } else {
                 self.preview_content = None;
                 self.preview_path = None;
@@ -441,16 +417,6 @@ impl App {
 
         // Prefetch adjacent results for faster navigation
         self.prefetch_adjacent_previews();
-    }
-
-    /// Get cached highlighted content for the current preview
-    /// Returns (highlighted_lines, start_offset) where start_offset is the 0-indexed line number
-    /// of the first highlighted line
-    pub fn get_highlighted(&self) -> Option<(&Vec<Vec<ratatui::text::Span<'static>>>, usize)> {
-        self.preview_path
-            .as_ref()
-            .and_then(|p| self.highlight_cache.get(p))
-            .map(|(lines, offset)| (lines, *offset))
     }
 
     pub fn scroll_preview_down(&mut self) {
