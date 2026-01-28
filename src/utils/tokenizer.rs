@@ -2,10 +2,83 @@ use std::collections::HashSet;
 
 /// Extract tokens from source code content
 /// Handles: identifiers, snake_case splits, camelCase splits, words
+/// Optimized for speed with byte-level processing where possible.
 pub fn extract_tokens(content: &str) -> HashSet<String> {
-    let mut tokens = HashSet::new();
+    let bytes = content.as_bytes();
 
-    // State machine for tokenization
+    // For small files, use simple approach
+    if bytes.len() < 256 {
+        return extract_tokens_simple(content);
+    }
+
+    // Pre-allocate with reasonable capacity
+    let mut tokens = HashSet::with_capacity(bytes.len() / 8);
+
+    // Process as bytes for speed (ASCII-focused, as most code is ASCII)
+    let mut token_start: Option<usize> = None;
+    let mut prev_was_lower = false;
+
+    for (i, &byte) in bytes.iter().enumerate() {
+        let is_lower = byte.is_ascii_lowercase();
+        let is_upper = byte.is_ascii_uppercase();
+        let is_digit = byte.is_ascii_digit();
+        let is_underscore = byte == b'_';
+
+        if is_lower || is_upper || is_digit {
+            // CamelCase split: uppercase after lowercase
+            if is_upper && prev_was_lower {
+                if let Some(start) = token_start {
+                    let slice = &bytes[start..i];
+                    if slice.len() >= 2 {
+                        // SAFETY: we only process ASCII bytes
+                        let s = unsafe { std::str::from_utf8_unchecked(slice) };
+                        tokens.insert(s.to_ascii_lowercase());
+                    }
+                }
+                token_start = Some(i);
+            } else if token_start.is_none() {
+                token_start = Some(i);
+            }
+            prev_was_lower = is_lower;
+        } else {
+            // End of token (underscore or other char)
+            if let Some(start) = token_start {
+                let slice = &bytes[start..i];
+                if slice.len() >= 2 {
+                    // SAFETY: we only process ASCII bytes
+                    let s = unsafe { std::str::from_utf8_unchecked(slice) };
+                    tokens.insert(s.to_ascii_lowercase());
+                }
+            }
+            token_start = None;
+            prev_was_lower = false;
+
+            // Skip non-ASCII chars entirely
+            if !is_underscore && byte > 127 {
+                // Non-ASCII: skip to next ASCII
+                continue;
+            }
+        }
+    }
+
+    // Handle last token
+    if let Some(start) = token_start {
+        let slice = &bytes[start..];
+        if slice.len() >= 2 {
+            // Check if it's valid UTF-8 ASCII
+            if slice.iter().all(|&b| b < 128) {
+                let s = unsafe { std::str::from_utf8_unchecked(slice) };
+                tokens.insert(s.to_ascii_lowercase());
+            }
+        }
+    }
+
+    tokens
+}
+
+/// Simple tokenization for small content (original algorithm)
+fn extract_tokens_simple(content: &str) -> HashSet<String> {
+    let mut tokens = HashSet::new();
     let mut current_token = String::new();
     let mut prev_char_type = CharType::Other;
 
@@ -17,7 +90,6 @@ pub fn extract_tokens(content: &str) -> HashSet<String> {
                 current_token.push(ch);
             }
             CharType::Upper => {
-                // CamelCase split: if prev was lowercase, start new token
                 if prev_char_type == CharType::Lower && !current_token.is_empty() {
                     add_token(&mut tokens, &current_token);
                     current_token.clear();
@@ -25,7 +97,6 @@ pub fn extract_tokens(content: &str) -> HashSet<String> {
                 current_token.push(ch.to_ascii_lowercase());
             }
             CharType::Underscore => {
-                // snake_case split
                 if !current_token.is_empty() {
                     add_token(&mut tokens, &current_token);
                     current_token.clear();
@@ -42,7 +113,6 @@ pub fn extract_tokens(content: &str) -> HashSet<String> {
         prev_char_type = char_type;
     }
 
-    // Don't forget the last token
     if !current_token.is_empty() {
         add_token(&mut tokens, &current_token);
     }
