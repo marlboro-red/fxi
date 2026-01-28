@@ -649,9 +649,38 @@ impl App {
     fn get_preview_content(&self, path: &PathBuf) -> Option<String> {
         // Check prefetch cache first
         if let Some(content) = self.prefetch_cache.get(path) {
-            return Some(content.to_string());
+            return Some(expand_tabs(content));
         }
         // Fall back to disk read
-        std::fs::read_to_string(path).ok()
+        std::fs::read_to_string(path).ok().map(|s| expand_tabs(&s))
     }
+}
+
+/// Expand tabs to spaces with a tab width of 4.
+/// This ensures consistent rendering in the terminal where tab stops vary.
+fn expand_tabs(s: &str) -> String {
+    const TAB_WIDTH: usize = 4;
+
+    let mut result = String::with_capacity(s.len());
+    let mut column = 0;
+
+    for c in s.chars() {
+        match c {
+            '\t' => {
+                let spaces = TAB_WIDTH - (column % TAB_WIDTH);
+                result.extend(std::iter::repeat(' ').take(spaces));
+                column += spaces;
+            }
+            '\n' | '\r' => {
+                result.push(c);
+                column = 0;
+            }
+            _ => {
+                result.push(c);
+                column += 1;
+            }
+        }
+    }
+
+    result
 }
