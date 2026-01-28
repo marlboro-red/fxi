@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
 };
 
@@ -78,16 +78,7 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
         .results
         .iter()
-        .enumerate()
-        .map(|(i, result)| {
-            let style = if i == app.selected {
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-
+        .map(|result| {
             let path_style = Style::default().fg(Color::Blue);
             let line_style = Style::default().fg(Color::Yellow);
 
@@ -139,7 +130,7 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
 
             let line = Line::from(spans);
 
-            ListItem::new(line).style(style)
+            ListItem::new(line)
         })
         .collect();
 
@@ -149,9 +140,19 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .title(format!(" Results ({}) ", app.results.len())),
         )
-        .highlight_style(Style::default().bg(Color::DarkGray));
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
 
-    f.render_widget(list, area);
+    // Use ListState to properly track selection and enable automatic scrolling
+    let mut state = ListState::default();
+    if !app.results.is_empty() {
+        state.select(Some(app.selected));
+    }
+
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
