@@ -12,7 +12,34 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Get the number of available CPU threads (cached for performance)
+fn get_num_threads() -> usize {
+    static NUM_THREADS: OnceLock<usize> = OnceLock::new();
+    *NUM_THREADS.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    })
+}
+
+/// Calculate optimal threshold for parallel vs sequential processing
+/// Returns true if parallel processing should be used
+#[inline]
+fn should_use_parallel(candidate_count: usize) -> bool {
+    // Adaptive threshold based on CPU cores
+    // Use sequential for small result sets to leverage cache locality
+    // Use parallel for larger sets where parallelism overhead is worth it
+    let num_threads = get_num_threads();
+
+    // Minimum candidates per thread to justify parallelism overhead
+    // (rayon spawn overhead is ~1-2µs, file read is ~10-100µs)
+    let min_per_thread = 4;
+    let parallel_threshold = num_threads * min_per_thread;
+
+    candidate_count > parallel_threshold
+}
 
 /// Thread-safe regex cache for avoiding repeated compilation
 /// Uses a simple LRU-like approach with a bounded size
@@ -325,16 +352,18 @@ impl<'a> QueryExecutor<'a> {
             .collect();
 
         // Process files - use cache for small result sets, parallel for large
+        // Adaptive threshold based on CPU cores
         let candidate_count = candidate_infos.len();
-        let use_cache = candidate_count <= 16; // Use cache for small result sets
+        let use_cache = !should_use_parallel(candidate_count);
 
-        // Track match count for early termination (collect 2x limit for better ranking)
-        let target_matches = limit.saturating_mul(2);
+        // Track match count for early termination
+        // Collect 1.5x limit for better ranking (was 2x, reduced for faster termination)
+        let target_matches = limit + (limit / 2);
         let match_count = AtomicUsize::new(0);
 
         let all_matches: Vec<(DocId, PathBuf, u64, Vec<(u32, String, usize, usize)>)> = if use_cache {
             // Small result set: use cached reads (sequential to leverage cache)
-            let mut results = Vec::new();
+            let mut results = Vec::with_capacity(candidate_count.min(target_matches));
             let mut total_matches = 0;
 
             for (doc_id, full_path, rel_path, mtime) in candidate_infos {
@@ -370,10 +399,13 @@ impl<'a> QueryExecutor<'a> {
             results
         } else {
             // Large result set: use parallel uncached reads with early termination
+            // Use with_min_len to ensure good work stealing granularity
             candidate_infos
                 .into_par_iter()
+                .with_min_len(4) // Ensure chunks aren't too small
                 .filter_map(|(doc_id, full_path, rel_path, mtime)| {
                     // Early termination check - skip if we have enough matches
+                    // Use Relaxed ordering for maximum performance (occasional over-collection is OK)
                     if match_count.load(Ordering::Relaxed) >= target_matches {
                         return None;
                     }
@@ -406,7 +438,10 @@ impl<'a> QueryExecutor<'a> {
         };
 
         // Build final results with scoring
-        let mut matches = Vec::new();
+        // Pre-allocate based on expected match count (typically 1-3 matches per file)
+        let estimated_total = all_matches.len() * 2;
+        let mut matches = Vec::with_capacity(estimated_total.min(limit * 2));
+
         for (doc_id, path, mtime, file_matches) in all_matches {
             // Build score context
             let filename_match = search_terms
@@ -593,6 +628,7 @@ impl<'a> QueryExecutor<'a> {
 
 
     /// Find proximity matches: all terms must appear within distance lines of each other (static)
+    /// Optimized to minimize allocations and leverage pre-computed lowercase lines
     fn find_proximity_matches_static(
         content: &str,
         terms: &[String],
@@ -606,22 +642,26 @@ impl<'a> QueryExecutor<'a> {
         // Pre-lowercase all terms once
         let terms_lower: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
 
-        // Collect line numbers for each term
+        // Collect lines with their lowercase versions ONCE (avoid repeated to_lowercase)
+        let lines: Vec<(&str, String)> = content
+            .lines()
+            .map(|line| (line, line.to_lowercase()))
+            .collect();
+
+        // For each term, collect line numbers where it appears
         let mut term_lines: Vec<Vec<u32>> = Vec::with_capacity(terms.len());
 
         for term_lower in &terms_lower {
             let mut lines_with_term = Vec::new();
 
-            for (line_num, line) in content.lines().enumerate() {
-                // Use ASCII case-insensitive comparison when possible
-                let line_lower = line.to_lowercase();
-                if line_lower.contains(term_lower) {
+            for (line_num, (_original, line_lower)) in lines.iter().enumerate() {
+                if line_lower.contains(term_lower.as_str()) {
                     lines_with_term.push((line_num + 1) as u32);
                 }
             }
 
             if lines_with_term.is_empty() {
-                // One of the terms doesn't exist in the file
+                // One of the terms doesn't exist in the file - early exit
                 return Vec::new();
             }
 
@@ -630,7 +670,6 @@ impl<'a> QueryExecutor<'a> {
 
         // Find line combinations where all terms are within distance
         let mut matches = Vec::new();
-        let lines: Vec<&str> = content.lines().collect();
 
         // Start with lines containing the first term
         for &first_line in &term_lines[0] {
@@ -656,12 +695,11 @@ impl<'a> QueryExecutor<'a> {
             if all_within_distance {
                 // Found a valid proximity match - return the first term's match
                 let line_idx = (first_line - 1) as usize;
-                if let Some(line_content) = lines.get(line_idx) {
-                    let line_lower = line_content.to_lowercase();
+                if let Some((original_line, line_lower)) = lines.get(line_idx) {
                     if let Some(pos) = line_lower.find(&terms_lower[0]) {
                         matches.push((
                             first_line,
-                            line_content.to_string(),
+                            original_line.to_string(),
                             pos,
                             pos + terms[0].len(),
                         ));
@@ -675,6 +713,7 @@ impl<'a> QueryExecutor<'a> {
 
 
     /// Find literal string matches using memchr for fast search (static)
+    /// Optimized single-pass iteration for both case-sensitive and case-insensitive modes
     fn find_literal_matches_static(
         content: &str,
         needle: &str,
@@ -685,27 +724,11 @@ impl<'a> QueryExecutor<'a> {
 
         let mut matches = Vec::new();
 
-        // Pre-lowercase the needle once for case-insensitive search
-        let search_needle = if case_sensitive {
-            needle.to_string()
-        } else {
-            needle.to_lowercase()
-        };
-        let needle_bytes = search_needle.as_bytes();
-        let finder = memmem::Finder::new(needle_bytes);
-
-        for (line_num, line) in content.lines().enumerate() {
-            let search_bytes = if case_sensitive {
-                // Use line bytes directly for case-sensitive search
-                line.as_bytes()
-            } else {
-                // We need to lowercase the line for case-insensitive search
-                // This is unavoidable for non-ASCII text
-                continue; // Will be handled below
-            };
-
-            if case_sensitive {
-                if let Some(pos) = finder.find(search_bytes) {
+        if case_sensitive {
+            // Case-sensitive: search directly on original bytes
+            let finder = memmem::Finder::new(needle.as_bytes());
+            for (line_num, line) in content.lines().enumerate() {
+                if let Some(pos) = finder.find(line.as_bytes()) {
                     matches.push((
                         (line_num + 1) as u32,
                         line.to_string(),
@@ -714,19 +737,59 @@ impl<'a> QueryExecutor<'a> {
                     ));
                 }
             }
-        }
+        } else {
+            // Case-insensitive: pre-lowercase needle once, lowercase each line
+            let needle_lower = needle.to_lowercase();
+            let finder = memmem::Finder::new(needle_lower.as_bytes());
 
-        // Handle case-insensitive search separately (requires lowercasing)
-        if !case_sensitive {
             for (line_num, line) in content.lines().enumerate() {
-                let line_lower = line.to_lowercase();
-                if let Some(pos) = finder.find(line_lower.as_bytes()) {
-                    matches.push((
-                        (line_num + 1) as u32,
-                        line.to_string(),
-                        pos,
-                        pos + needle.len(),
-                    ));
+                // Fast path: check if line could possibly match using ASCII comparison first
+                // This avoids expensive to_lowercase() for lines that can't match
+                let line_bytes = line.as_bytes();
+
+                // Quick rejection: if line is shorter than needle, skip
+                if line_bytes.len() < needle_lower.len() {
+                    continue;
+                }
+
+                // Try ASCII lowercase comparison first (common case, avoids allocation)
+                let mut found_ascii = false;
+                if line.is_ascii() && needle.is_ascii() {
+                    // Fast ASCII-only path: compare in-place without allocation
+                    let needle_bytes = needle_lower.as_bytes();
+                    for i in 0..=(line_bytes.len() - needle_bytes.len()) {
+                        let mut matched = true;
+                        for j in 0..needle_bytes.len() {
+                            let line_char = line_bytes[i + j].to_ascii_lowercase();
+                            if line_char != needle_bytes[j] {
+                                matched = false;
+                                break;
+                            }
+                        }
+                        if matched {
+                            matches.push((
+                                (line_num + 1) as u32,
+                                line.to_string(),
+                                i,
+                                i + needle.len(),
+                            ));
+                            found_ascii = true;
+                            break; // Only report first match per line
+                        }
+                    }
+                }
+
+                // Fallback to full Unicode lowercase for non-ASCII
+                if !found_ascii && (!line.is_ascii() || !needle.is_ascii()) {
+                    let line_lower = line.to_lowercase();
+                    if let Some(pos) = finder.find(line_lower.as_bytes()) {
+                        matches.push((
+                            (line_num + 1) as u32,
+                            line.to_string(),
+                            pos,
+                            pos + needle.len(),
+                        ));
+                    }
                 }
             }
         }

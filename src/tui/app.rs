@@ -5,7 +5,9 @@ use crate::query::{parse_query, QueryExecutor};
 use crate::tui::highlighter::SyntaxHighlighter;
 use crate::utils::find_codebase_root;
 use anyhow::Result;
+use lru::LruCache;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -51,6 +53,9 @@ pub struct SearchResult {
     pub query: String,
 }
 
+/// LRU cache size for search results (larger = more memory, faster re-queries)
+const SEARCH_CACHE_SIZE: usize = 64;
+
 /// Application state
 pub struct App {
     /// The codebase root (detected or specified)
@@ -70,8 +75,9 @@ pub struct App {
     pub preview_content: Option<String>,
     /// Path of the currently previewed file (for syntax highlighting)
     pub preview_path: Option<PathBuf>,
-    /// Cache of highlighted content by file path (cleared on new search)
-    highlight_cache: HashMap<PathBuf, Vec<Vec<ratatui::text::Span<'static>>>>,
+    /// Cache of highlighted content by file path: (lines, start_offset)
+    /// Cleared on new search, re-computed on viewport change
+    highlight_cache: HashMap<PathBuf, (Vec<Vec<ratatui::text::Span<'static>>>, usize)>,
     pub status_message: String,
     pub index_available: bool,
     /// Pending key for vim multi-key commands (e.g., 'g' for 'gg')
@@ -82,10 +88,8 @@ pub struct App {
     load_state: IndexLoadState,
     /// Background search state
     search_state: SearchState,
-    /// Cache of recent search results (query -> results)
-    search_cache: HashMap<String, Vec<SearchMatch>>,
-    /// Maximum number of cached searches
-    max_cache_size: usize,
+    /// LRU cache of recent search results for instant recall
+    search_cache: LruCache<String, Vec<SearchMatch>>,
     /// Prefetched preview content for adjacent results
     prefetch_cache: HashMap<PathBuf, String>,
 }
@@ -137,8 +141,7 @@ impl App {
             highlighter: SyntaxHighlighter::new(),
             load_state,
             search_state: SearchState::Idle,
-            search_cache: HashMap::new(),
-            max_cache_size: 32,
+            search_cache: LruCache::new(NonZeroUsize::new(SEARCH_CACHE_SIZE).unwrap()),
             prefetch_cache: HashMap::new(),
         })
     }
@@ -237,14 +240,8 @@ impl App {
                                         elapsed.as_secs_f64() * 1000.0
                                     );
 
-                                    // Cache the results
-                                    if self.search_cache.len() >= self.max_cache_size {
-                                        // Remove oldest entry (simple strategy)
-                                        if let Some(key) = self.search_cache.keys().next().cloned() {
-                                            self.search_cache.remove(&key);
-                                        }
-                                    }
-                                    self.search_cache.insert(result.query.clone(), matches.clone());
+                                    // Cache the results (LRU automatically evicts oldest)
+                                    self.search_cache.put(result.query.clone(), matches.clone());
 
                                     self.results = matches;
                                     self.selected = 0;
@@ -307,9 +304,9 @@ impl App {
             return;
         }
 
-        // Check cache first for instant results
-        if let Some(cached) = self.search_cache.get(&self.query).cloned() {
-            self.results = cached;
+        // Check cache first for instant results (LRU cache)
+        if let Some(cached) = self.search_cache.get(&self.query) {
+            self.results = cached.clone();
             self.selected = 0;
             self.status_message = format!("{} matches (cached)", self.results.len());
             self.update_preview();
@@ -404,6 +401,11 @@ impl App {
     }
 
     pub fn update_preview(&mut self) {
+        self.update_preview_with_viewport(50); // Default viewport height
+    }
+
+    /// Update preview with specific viewport height for viewport-optimized highlighting
+    pub fn update_preview_with_viewport(&mut self, viewport_height: usize) {
         if let Some(result) = self.results.get(self.selected) {
             let full_path = self.root_path.join(&result.path);
 
@@ -416,11 +418,14 @@ impl App {
                 // Scroll to show the match
                 self.preview_scroll = result.line_number.saturating_sub(5) as usize;
 
-                // Cache highlighted content if not already cached
-                if !self.highlight_cache.contains_key(&full_path) {
-                    let highlighted = self.highlighter.highlight_content(&content, &full_path);
-                    self.highlight_cache.insert(full_path, highlighted);
-                }
+                // Use viewport-optimized highlighting (only highlight visible region + buffer)
+                let (highlighted, offset) = self.highlighter.highlight_viewport(
+                    &content,
+                    &full_path,
+                    self.preview_scroll,
+                    viewport_height,
+                );
+                self.highlight_cache.insert(full_path, (highlighted, offset));
             } else {
                 self.preview_content = None;
                 self.preview_path = None;
@@ -435,8 +440,37 @@ impl App {
     }
 
     /// Get cached highlighted content for the current preview
-    pub fn get_highlighted(&self) -> Option<&Vec<Vec<ratatui::text::Span<'static>>>> {
-        self.preview_path.as_ref().and_then(|p| self.highlight_cache.get(p))
+    /// Returns (highlighted_lines, start_offset) where start_offset is the 0-indexed line number
+    /// of the first highlighted line
+    pub fn get_highlighted(&self) -> Option<(&Vec<Vec<ratatui::text::Span<'static>>>, usize)> {
+        self.preview_path
+            .as_ref()
+            .and_then(|p| self.highlight_cache.get(p))
+            .map(|(lines, offset)| (lines, *offset))
+    }
+
+    /// Re-highlight if viewport has scrolled outside the cached range
+    pub fn ensure_highlight_coverage(&mut self, viewport_height: usize) {
+        if let (Some(content), Some(path)) = (&self.preview_content, &self.preview_path) {
+            let path = path.clone();
+            if let Some((cached_lines, cached_offset)) = self.highlight_cache.get(&path) {
+                let cached_end: usize = *cached_offset + cached_lines.len();
+                let viewport_end = self.preview_scroll + viewport_height;
+
+                // Re-highlight if viewport is outside cached range (with some margin)
+                if self.preview_scroll < cached_offset.saturating_sub(10)
+                    || viewport_end > cached_end + 10
+                {
+                    let (highlighted, offset) = self.highlighter.highlight_viewport(
+                        content,
+                        &path,
+                        self.preview_scroll,
+                        viewport_height,
+                    );
+                    self.highlight_cache.insert(path, (highlighted, offset));
+                }
+            }
+        }
     }
 
     pub fn scroll_preview_down(&mut self) {
@@ -611,7 +645,7 @@ impl App {
     fn get_preview_content(&self, path: &PathBuf) -> Option<String> {
         // Check prefetch cache first
         if let Some(content) = self.prefetch_cache.get(path) {
-            return Some(content.clone());
+            return Some(content.to_string());
         }
         // Fall back to disk read
         std::fs::read_to_string(path).ok()
