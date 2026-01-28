@@ -345,7 +345,7 @@ All benchmarks run on Apple M2 Max.
 
 Times are averages of 3 runs. File counts shown for validation.
 
-#### Linux Kenal
+#### Linux Kernal
 
 | Pattern | fxi (ms) | rg (ms) | grep (ms) | fxi files | rg files | Speedup vs rg |
 |---------|----------|---------|-----------|-----------|----------|---------------|
