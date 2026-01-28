@@ -9,18 +9,11 @@ readme = "README.md"
 [dependencies]
 # Core
 memmap2 = "0.9.9"
-byteorder = "1.5"
-varint-rs = "2.2"
-
-# FST for path store
-fst = "0.4"
 
 # Async and parallel processing
 rayon = "1.11"
-crossbeam-channel = "0.5.15"
 
 # File system
-walkdir = "2.5"
 ignore = "0.4.21"
 globset = "0.4.18"
 
@@ -52,8 +45,6 @@ indicatif = "0.17"
 
 # Utilities
 anyhow = "1.0.100"
-thiserror = "2.0"
-unicode-segmentation = "1.12"
 dirs = "5.0.1"
 
 [profile.release]
