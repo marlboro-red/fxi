@@ -34,6 +34,8 @@ pub enum QueryNode {
 pub struct QueryFilters {
     /// Path glob pattern (path:src/*.rs)
     pub path: Option<String>,
+    /// Filename pattern (file:foo or file:*.rs)
+    pub filename: Option<String>,
     /// File extension filter (ext:rs)
     pub ext: Option<String>,
     /// Language filter (lang:rust)
@@ -302,6 +304,10 @@ impl<'a> QueryParser<'a> {
         match field.to_lowercase().as_str() {
             "path" => {
                 self.filters.path = Some(value);
+                QueryNode::Empty
+            }
+            "file" | "name" => {
+                self.filters.filename = Some(value);
                 QueryNode::Empty
             }
             "ext" => {

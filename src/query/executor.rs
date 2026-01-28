@@ -244,6 +244,20 @@ impl<'a> QueryExecutor<'a> {
                 .compile_matcher()
         });
 
+        let filename_matcher = filter.filename.as_ref().map(|f| {
+            // Support both glob patterns and substring matching
+            if f.contains('*') || f.contains('?') {
+                Glob::new(f)
+                    .unwrap_or_else(|_| Glob::new("*").unwrap())
+                    .compile_matcher()
+            } else {
+                // For plain strings, create a glob that matches anywhere in filename
+                Glob::new(&format!("*{}*", f))
+                    .unwrap_or_else(|_| Glob::new("*").unwrap())
+                    .compile_matcher()
+            }
+        });
+
         let mut result = RoaringBitmap::new();
 
         for doc_id in doc_ids {
@@ -259,6 +273,18 @@ impl<'a> QueryExecutor<'a> {
                         if !matcher.is_match(path) {
                             continue;
                         }
+                    }
+                }
+
+                // Filename filter
+                if let Some(ref matcher) = filename_matcher {
+                    if let Some(path) = self.reader.get_path(doc) {
+                        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        if !matcher.is_match(filename) {
+                            continue;
+                        }
+                    } else {
+                        continue;
                     }
                 }
 
@@ -316,6 +342,30 @@ impl<'a> QueryExecutor<'a> {
         Ok(result)
     }
 
+    /// Create matches for file-only queries (no content search term)
+    fn create_file_matches(
+        &self,
+        candidates: &RoaringBitmap,
+        limit: usize,
+    ) -> Result<Vec<SearchMatch>> {
+        let mut matches = Vec::with_capacity(limit.min(candidates.len() as usize));
+
+        for doc_id in candidates.iter().take(limit) {
+            if let Some(doc) = self.reader.get_document(doc_id) {
+                if let Some(path) = self.reader.get_path(doc) {
+                    matches.push(SearchMatch {
+                        doc_id,
+                        path: path.clone(),
+                        line_number: 1,
+                        score: 1.0,
+                    });
+                }
+            }
+        }
+
+        Ok(matches)
+    }
+
     /// Verify candidates against actual file content using parallel processing
     /// with early termination once limit is reached
     fn verify_candidates(
@@ -326,7 +376,11 @@ impl<'a> QueryExecutor<'a> {
     ) -> Result<Vec<SearchMatch>> {
         let verification = match &plan.verification {
             Some(v) => v,
-            None => return Ok(Vec::new()),
+            None => {
+                // No content verification needed - return file-only matches
+                // This happens when using filters without a search term (e.g., "file:foo")
+                return self.create_file_matches(candidates, limit);
+            }
         };
 
         // Extract search terms for filename matching

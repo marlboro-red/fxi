@@ -117,9 +117,20 @@ near:foo,bar,abc           # Default distance (10 lines) if not numeric
 re:/foo.*bar/              # Regex pattern
 ```
 
+### File Search
+
+Find files by name without content matching:
+
+```
+file:config                # Files with "config" in the name
+file:*.json                # Files matching glob pattern
+ext:rs                     # All .rs files
+path:src/utils/*           # All files in src/utils/
+```
+
 ### Field Filters
 
-Filters narrow results but must be combined with a search term:
+Combine filters with a search term:
 
 ```
 ext:rs foo                 # Search "foo" in .rs files only

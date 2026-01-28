@@ -31,6 +31,7 @@ pub enum PlanStep {
 #[derive(Debug)]
 pub struct FilterStep {
     pub path_glob: Option<String>,
+    pub filename: Option<String>,
     pub extension: Option<String>,
     pub language: Option<String>,
     pub size_min: Option<u64>,
@@ -81,6 +82,7 @@ impl QueryPlanner {
     fn plan(&mut self, query: &Query) -> QueryPlan {
         // Add filter step if we have any filters
         if query.filters.path.is_some()
+            || query.filters.filename.is_some()
             || query.filters.ext.is_some()
             || query.filters.lang.is_some()
             || query.filters.size_min.is_some()
@@ -92,6 +94,7 @@ impl QueryPlanner {
         {
             self.steps.push(PlanStep::Filter(FilterStep {
                 path_glob: query.filters.path.clone(),
+                filename: query.filters.filename.clone(),
                 extension: query.filters.ext.clone(),
                 language: query.filters.lang.clone(),
                 size_min: query.filters.size_min,
