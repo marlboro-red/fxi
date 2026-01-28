@@ -1,7 +1,7 @@
 use crate::index::types::{DocFlags, IndexConfig, Language, SegmentId};
 use crate::index::writer::ChunkedIndexWriter;
 use crate::utils::{
-    extract_tokens, extract_trigrams_vec, find_codebase_root, get_index_dir, is_binary,
+    extract_tokens, extract_trigrams, find_codebase_root, get_index_dir, is_binary,
     is_minified, remove_index,
 };
 use anyhow::{Context, Result};
@@ -48,7 +48,7 @@ fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option
     }
 
     // Extract trigrams using optimized bitset-based extraction
-    let trigrams: Vec<u32> = extract_trigrams_vec(content);
+    let trigrams: Vec<u32> = extract_trigrams(content);
 
     // Extract tokens
     let tokens: Vec<String> = if let Ok(text) = std::str::from_utf8(content) {

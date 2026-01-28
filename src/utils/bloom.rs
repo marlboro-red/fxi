@@ -1,10 +1,31 @@
 //! High-performance bloom filter for fast document pre-filtering.
 //!
-//! Uses multiple hash functions derived from a single ahash computation
-//! for cache-friendly and SIMD-optimized membership testing.
+//! Uses multiple hash functions derived from fast bit-mixing operations
+//! for cache-friendly membership testing optimized for u32 trigrams.
 
 use ahash::RandomState;
 use std::hash::{BuildHasher, Hasher};
+use std::sync::OnceLock;
+
+/// Pre-computed random states for hashing - initialized once, reused forever.
+/// This avoids the overhead of creating new RandomState instances on every hash.
+static HASH_STATES: OnceLock<(RandomState, RandomState)> = OnceLock::new();
+
+/// Get or initialize the pre-computed hash states
+#[inline]
+fn get_hash_states() -> &'static (RandomState, RandomState) {
+    HASH_STATES.get_or_init(|| {
+        (
+            RandomState::with_seeds(0, 0, 0, 0),
+            RandomState::with_seeds(
+                0x517cc1b727220a95,
+                0x9e3779b97f4a7c15,
+                0xbf58476d1ce4e5b9,
+                0x94d049bb133111eb,
+            ),
+        )
+    })
+}
 
 /// A space-efficient probabilistic data structure for fast membership testing.
 ///
@@ -118,23 +139,18 @@ impl BloomFilter {
         true
     }
 
-    /// Compute two hash values for double hashing using ahash
+    /// Compute two hash values for double hashing using pre-computed ahash states.
+    /// This avoids the overhead of creating new RandomState instances on every call.
     #[inline]
     fn hash_pair(&self, item: u32) -> (u64, u64) {
-        // Use two independent hashers with different seeds for proper double hashing.
-        // Note: Reusing a hasher after finish() is undefined behavior and corrupts
-        // the hash distribution, leading to higher false positive rates.
-        let mut hasher1 = RandomState::with_seeds(0, 0, 0, 0).build_hasher();
+        let (state1, state2) = get_hash_states();
+
+        // Build hashers from pre-computed states - much faster than creating new RandomState
+        let mut hasher1 = state1.build_hasher();
         hasher1.write_u32(item);
         let h1 = hasher1.finish();
 
-        let mut hasher2 = RandomState::with_seeds(
-            0x517cc1b727220a95,
-            0x9e3779b97f4a7c15,
-            0xbf58476d1ce4e5b9,
-            0x94d049bb133111eb,
-        )
-        .build_hasher();
+        let mut hasher2 = state2.build_hasher();
         hasher2.write_u32(item);
         let h2 = hasher2.finish();
 
