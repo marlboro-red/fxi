@@ -3,8 +3,8 @@
 //! Uses multiple hash functions derived from a single ahash computation
 //! for cache-friendly and SIMD-optimized membership testing.
 
-use ahash::AHasher;
-use std::hash::Hasher;
+use ahash::RandomState;
+use std::hash::{BuildHasher, Hasher};
 
 /// A space-efficient probabilistic data structure for fast membership testing.
 ///
@@ -120,14 +120,22 @@ impl BloomFilter {
     /// Compute two hash values for double hashing using ahash
     #[inline]
     fn hash_pair(&self, item: u32) -> (u64, u64) {
-        // Use ahash for fast, high-quality hashing
-        let mut hasher = AHasher::default();
-        hasher.write_u32(item);
-        let h1 = hasher.finish();
+        // Use two independent hashers with different seeds for proper double hashing.
+        // Note: Reusing a hasher after finish() is undefined behavior and corrupts
+        // the hash distribution, leading to higher false positive rates.
+        let mut hasher1 = RandomState::with_seeds(0, 0, 0, 0).build_hasher();
+        hasher1.write_u32(item);
+        let h1 = hasher1.finish();
 
-        // Second hash with different seed
-        hasher.write_u64(0x517cc1b727220a95); // Random constant
-        let h2 = hasher.finish();
+        let mut hasher2 = RandomState::with_seeds(
+            0x517cc1b727220a95,
+            0x9e3779b97f4a7c15,
+            0xbf58476d1ce4e5b9,
+            0x94d049bb133111eb,
+        )
+        .build_hasher();
+        hasher2.write_u32(item);
+        let h2 = hasher2.finish();
 
         (h1, h2)
     }
@@ -234,5 +242,69 @@ mod tests {
         for i in 0..100 {
             assert!(bf1.might_contain(i));
         }
+    }
+
+    #[test]
+    fn test_bloom_filter_false_positive_rate() {
+        // Test that actual FPR is close to expected FPR
+        let expected_fpr = 0.01; // 1%
+        let num_elements = 10000;
+        let num_test_elements = 100000; // Large sample for statistical accuracy
+
+        let mut bf = BloomFilter::new(num_elements, expected_fpr);
+
+        // Insert elements
+        for i in 0..num_elements as u32 {
+            bf.insert(i);
+        }
+
+        // Test for false positives with elements that were never inserted
+        let mut false_positives = 0;
+        for i in (num_elements as u32 * 2)..(num_elements as u32 * 2 + num_test_elements as u32) {
+            if bf.might_contain(i) {
+                false_positives += 1;
+            }
+        }
+
+        let actual_fpr = false_positives as f64 / num_test_elements as f64;
+
+        // Allow 3x tolerance (FPR should be <= 3% for 1% target)
+        // This accounts for statistical variance while still catching broken hash functions
+        assert!(
+            actual_fpr <= expected_fpr * 3.0,
+            "False positive rate too high: {:.2}% (expected <= {:.2}%)",
+            actual_fpr * 100.0,
+            expected_fpr * 3.0 * 100.0
+        );
+
+        // Also ensure we're not way under (which would indicate broken insertions)
+        // A working bloom filter should have *some* false positives
+        assert!(
+            actual_fpr >= expected_fpr * 0.1,
+            "False positive rate suspiciously low: {:.4}% (may indicate broken hash function)",
+            actual_fpr * 100.0
+        );
+    }
+
+    #[test]
+    fn test_hash_pair_independence() {
+        // Verify that h1 and h2 are independent (different values)
+        let bf = BloomFilter::new(1000, 0.01);
+
+        let mut same_count = 0;
+        for i in 0..1000u32 {
+            let (h1, h2) = bf.hash_pair(i);
+            if h1 == h2 {
+                same_count += 1;
+            }
+        }
+
+        // With properly independent hash functions, it's astronomically unlikely
+        // for h1 and h2 to be the same (1 in 2^64 chance per item)
+        assert!(
+            same_count == 0,
+            "Hash values h1 and h2 are not independent: {} collisions out of 1000",
+            same_count
+        );
     }
 }
