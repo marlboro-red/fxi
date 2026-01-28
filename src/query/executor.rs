@@ -11,6 +11,7 @@ use roaring::RoaringBitmap;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Thread-safe regex cache for avoiding repeated compilation
@@ -93,14 +94,14 @@ impl<'a> QueryExecutor<'a> {
         let plan = QueryPlan::from_query(query);
         let candidates = self.execute_plan(&plan)?;
 
-        // Verify candidates
-        let verified = self.verify_candidates(&candidates, &plan)?;
+        // Verify candidates with limit for early termination
+        let verified = self.verify_candidates(&candidates, &plan, query.options.limit)?;
 
         // Sort results
         let mut results = verified;
         self.sort_results(&mut results, query.options.sort);
 
-        // Apply limit
+        // Apply final limit (may have collected slightly more for better ranking)
         results.truncate(query.options.limit);
 
         Ok(results)
@@ -289,10 +290,12 @@ impl<'a> QueryExecutor<'a> {
     }
 
     /// Verify candidates against actual file content using parallel processing
+    /// with early termination once limit is reached
     fn verify_candidates(
         &self,
         candidates: &RoaringBitmap,
         plan: &QueryPlan,
+        limit: usize,
     ) -> Result<Vec<SearchMatch>> {
         let verification = match &plan.verification {
             Some(v) => v,
@@ -325,39 +328,56 @@ impl<'a> QueryExecutor<'a> {
         let candidate_count = candidate_infos.len();
         let use_cache = candidate_count <= 16; // Use cache for small result sets
 
+        // Track match count for early termination (collect 2x limit for better ranking)
+        let target_matches = limit.saturating_mul(2);
+        let match_count = AtomicUsize::new(0);
+
         let all_matches: Vec<(DocId, PathBuf, u64, Vec<(u32, String, usize, usize)>)> = if use_cache {
             // Small result set: use cached reads (sequential to leverage cache)
-            candidate_infos
-                .into_iter()
-                .filter_map(|(doc_id, full_path, rel_path, mtime)| {
-                    // Use cached file reading
-                    let content = self.reader.read_file_cached(&full_path)?;
+            let mut results = Vec::new();
+            let mut total_matches = 0;
 
-                    // Find matches
-                    let mut file_matches =
-                        Self::verify_content_static(&content, verification, doc_id);
+            for (doc_id, full_path, rel_path, mtime) in candidate_infos {
+                // Early termination check
+                if total_matches >= target_matches {
+                    break;
+                }
 
-                    // Apply line filter if specified
-                    if line_start.is_some() || line_end.is_some() {
-                        file_matches.retain(|(line_num, _, _, _)| {
-                            let above_min = line_start.map(|min| *line_num >= min).unwrap_or(true);
-                            let below_max = line_end.map(|max| *line_num <= max).unwrap_or(true);
-                            above_min && below_max
-                        });
-                    }
+                // Use cached file reading
+                let content = match self.reader.read_file_cached(&full_path) {
+                    Some(c) => c,
+                    None => continue,
+                };
 
-                    if file_matches.is_empty() {
-                        None
-                    } else {
-                        Some((doc_id, rel_path, mtime, file_matches))
-                    }
-                })
-                .collect()
+                // Find matches
+                let mut file_matches =
+                    Self::verify_content_static(&content, verification, doc_id);
+
+                // Apply line filter if specified
+                if line_start.is_some() || line_end.is_some() {
+                    file_matches.retain(|(line_num, _, _, _)| {
+                        let above_min = line_start.map(|min| *line_num >= min).unwrap_or(true);
+                        let below_max = line_end.map(|max| *line_num <= max).unwrap_or(true);
+                        above_min && below_max
+                    });
+                }
+
+                if !file_matches.is_empty() {
+                    total_matches += file_matches.len();
+                    results.push((doc_id, rel_path, mtime, file_matches));
+                }
+            }
+            results
         } else {
-            // Large result set: use parallel uncached reads
+            // Large result set: use parallel uncached reads with early termination
             candidate_infos
                 .into_par_iter()
                 .filter_map(|(doc_id, full_path, rel_path, mtime)| {
+                    // Early termination check - skip if we have enough matches
+                    if match_count.load(Ordering::Relaxed) >= target_matches {
+                        return None;
+                    }
+
                     // Read file content (no cache to avoid lock contention)
                     let content = fs::read_to_string(&full_path).ok()?;
 
@@ -377,6 +397,8 @@ impl<'a> QueryExecutor<'a> {
                     if file_matches.is_empty() {
                         None
                     } else {
+                        // Update match count for early termination
+                        match_count.fetch_add(file_matches.len(), Ordering::Relaxed);
                         Some((doc_id, rel_path, mtime, file_matches))
                     }
                 })
