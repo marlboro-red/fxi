@@ -65,7 +65,7 @@ impl Default for QueryOptions {
     fn default() -> Self {
         Self {
             sort: SortOrder::Score,
-            limit: 1000,
+            limit: 100,
             case_sensitive: false,
         }
     }
