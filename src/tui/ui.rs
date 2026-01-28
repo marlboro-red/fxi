@@ -252,31 +252,57 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    // Show loading animation if index is loading in background
-    let status_text = if app.is_loading() {
-        // Simple animated dots for loading indicator
-        let dots = match (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() / 300) % 4 {
+    // Get current time for animations
+    let time_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    // Show animated indicators for loading/searching
+    let (status_text, style) = if app.is_loading() {
+        // Loading index animation
+        let spinner = match (time_ms / 100) % 4 {
+            0 => "⠋",
+            1 => "⠙",
+            2 => "⠹",
+            _ => "⠸",
+        };
+        let dots = match (time_ms / 300) % 4 {
             0 => "",
             1 => ".",
             2 => "..",
             _ => "...",
         };
-        format!("Loading index{}", dots)
+        (
+            format!("{} Loading index{}", spinner, dots),
+            Style::default().fg(Color::Yellow).bg(Color::Reset),
+        )
+    } else if app.is_searching() {
+        // Searching animation with elapsed time
+        let spinner = match (time_ms / 80) % 8 {
+            0 => "⣾",
+            1 => "⣽",
+            2 => "⣻",
+            3 => "⢿",
+            4 => "⡿",
+            5 => "⣟",
+            6 => "⣯",
+            _ => "⣷",
+        };
+        let elapsed = app.search_duration_ms().unwrap_or(0);
+        (
+            format!("{} Searching... ({:.0}ms)", spinner, elapsed),
+            Style::default().fg(Color::Magenta).bg(Color::Reset),
+        )
     } else {
-        app.status_message.clone()
+        (
+            app.status_message.clone(),
+            Style::default().fg(Color::Cyan).bg(Color::Reset),
+        )
     };
 
     // Pad the status message to fill the entire width to prevent artifacts
     let padded_message = format!("{:<width$}", status_text, width = area.width as usize);
-
-    let style = if app.is_loading() {
-        Style::default().fg(Color::Yellow).bg(Color::Reset)
-    } else {
-        Style::default().fg(Color::Cyan).bg(Color::Reset)
-    };
 
     let status = Paragraph::new(padded_message).style(style);
     f.render_widget(status, area);

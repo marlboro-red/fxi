@@ -57,10 +57,21 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
         // Check for background index load completion (non-blocking)
         app.poll_index_load();
 
+        // Check for background search completion (non-blocking)
+        app.poll_search();
+
         terminal.draw(|f| ui::draw(f, app))?;
 
+        // Use shorter timeout when searching for faster UI updates (animated indicator)
+        // Otherwise use 16ms for 60fps responsiveness
+        let timeout = if app.is_searching() || app.is_loading() {
+            Duration::from_millis(16) // Fast polling during active operations
+        } else {
+            Duration::from_millis(50) // Normal: balance responsiveness vs CPU
+        };
+
         // Poll for events with timeout for responsive UI
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(timeout)? {
             // Only handle key press events, not release or repeat
             // This fixes duplicate keypresses on Windows where both press and release are reported
             if let Event::Key(key) = event::read()? {

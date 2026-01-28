@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 use std::thread;
+use std::time::Instant;
 
 /// Application mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +33,24 @@ pub enum IndexLoadState {
     Failed,
 }
 
+/// Search execution state for non-blocking search
+pub enum SearchState {
+    /// No search in progress
+    Idle,
+    /// Search is running in background
+    Searching {
+        query: String,
+        receiver: Receiver<SearchResult>,
+        start_time: Instant,
+    },
+}
+
+/// Result from a background search
+pub struct SearchResult {
+    pub matches: Result<Vec<SearchMatch>, String>,
+    pub query: String,
+}
+
 /// Application state
 pub struct App {
     /// The codebase root (detected or specified)
@@ -38,7 +58,8 @@ pub struct App {
     /// Original path user started from (for relative path display)
     #[allow(dead_code)]
     pub start_path: PathBuf,
-    pub reader: Option<IndexReader>,
+    /// Shared reader for background search (Arc for thread safety)
+    reader: Option<Arc<IndexReader>>,
     pub query: String,
     pub results: Vec<SearchMatch>,
     pub selected: usize,
@@ -59,6 +80,14 @@ pub struct App {
     pub highlighter: SyntaxHighlighter,
     /// Background index loading state
     load_state: IndexLoadState,
+    /// Background search state
+    search_state: SearchState,
+    /// Cache of recent search results (query -> results)
+    search_cache: HashMap<String, Vec<SearchMatch>>,
+    /// Maximum number of cached searches
+    max_cache_size: usize,
+    /// Prefetched preview content for adjacent results
+    prefetch_cache: HashMap<PathBuf, String>,
 }
 
 impl App {
@@ -107,6 +136,10 @@ impl App {
             pending_key: None,
             highlighter: SyntaxHighlighter::new(),
             load_state,
+            search_state: SearchState::Idle,
+            search_cache: HashMap::new(),
+            max_cache_size: 32,
+            prefetch_cache: HashMap::new(),
         })
     }
 
@@ -130,7 +163,7 @@ impl App {
                         } else {
                             format!("{} files indexed", doc_count)
                         };
-                        self.reader = Some(reader);
+                        self.reader = Some(Arc::new(reader));
                         self.index_available = true;
                         self.status_message = msg;
                         self.load_state = IndexLoadState::Ready;
@@ -168,6 +201,83 @@ impl App {
         matches!(self.load_state, IndexLoadState::Loading(_))
     }
 
+    /// Check if search is in progress
+    pub fn is_searching(&self) -> bool {
+        matches!(self.search_state, SearchState::Searching { .. })
+    }
+
+    /// Get search duration in ms (for display)
+    pub fn search_duration_ms(&self) -> Option<u128> {
+        match &self.search_state {
+            SearchState::Searching { start_time, .. } => Some(start_time.elapsed().as_millis()),
+            SearchState::Idle => None,
+        }
+    }
+
+    /// Poll for background search completion (call this in event loop)
+    pub fn poll_search(&mut self) {
+        // Take ownership of the state temporarily
+        let current_state = std::mem::replace(&mut self.search_state, SearchState::Idle);
+
+        match current_state {
+            SearchState::Searching { query, receiver, start_time } => {
+                match receiver.try_recv() {
+                    Ok(result) => {
+                        // Search completed!
+                        let elapsed = start_time.elapsed();
+
+                        // Only apply results if query still matches (user might have typed more)
+                        if result.query == self.query {
+                            match result.matches {
+                                Ok(matches) => {
+                                    let count = matches.len();
+                                    self.status_message = format!(
+                                        "{} matches ({:.1}ms)",
+                                        count,
+                                        elapsed.as_secs_f64() * 1000.0
+                                    );
+
+                                    // Cache the results
+                                    if self.search_cache.len() >= self.max_cache_size {
+                                        // Remove oldest entry (simple strategy)
+                                        if let Some(key) = self.search_cache.keys().next().cloned() {
+                                            self.search_cache.remove(&key);
+                                        }
+                                    }
+                                    self.search_cache.insert(result.query.clone(), matches.clone());
+
+                                    self.results = matches;
+                                    self.selected = 0;
+                                    self.update_preview();
+
+                                    // Prefetch adjacent previews in background
+                                    self.prefetch_adjacent_previews();
+                                }
+                                Err(e) => {
+                                    self.status_message = format!("Error: {}", e);
+                                    self.results.clear();
+                                }
+                            }
+                        }
+                        // Search state is already Idle from the replace
+                    }
+                    Err(TryRecvError::Empty) => {
+                        // Still searching, put the state back
+                        self.search_state = SearchState::Searching { query, receiver, start_time };
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        // Thread crashed?
+                        self.status_message = "Search thread terminated unexpectedly".to_string();
+                        // State is already Idle
+                    }
+                }
+            }
+            SearchState::Idle => {
+                // Nothing to do
+            }
+        }
+    }
+
     pub fn set_query(&mut self, query: &str) {
         self.query = query.to_string();
     }
@@ -181,9 +291,11 @@ impl App {
     pub fn execute_search(&mut self) {
         // Clear highlight cache on new search
         self.highlight_cache.clear();
+        self.prefetch_cache.clear();
 
         if self.query.is_empty() {
             self.results.clear();
+            self.search_state = SearchState::Idle;
             self.status_message = if self.index_available {
                 format!(
                     "{} files indexed",
@@ -195,8 +307,18 @@ impl App {
             return;
         }
 
+        // Check cache first for instant results
+        if let Some(cached) = self.search_cache.get(&self.query).cloned() {
+            self.results = cached;
+            self.selected = 0;
+            self.status_message = format!("{} matches (cached)", self.results.len());
+            self.update_preview();
+            self.prefetch_adjacent_previews();
+            return;
+        }
+
         let reader = match &self.reader {
-            Some(r) => r,
+            Some(r) => Arc::clone(r),
             None => {
                 self.status_message = "No index available".to_string();
                 return;
@@ -210,20 +332,27 @@ impl App {
             return;
         }
 
-        let executor = QueryExecutor::new(reader);
+        // Start background search
+        let (tx, rx) = mpsc::channel();
+        let query = self.query.clone();
+        let query_for_thread = query.clone();
 
-        match executor.execute(&parsed) {
-            Ok(matches) => {
-                self.status_message = format!("{} matches", matches.len());
-                self.results = matches;
-                self.selected = 0;
-                self.update_preview();
-            }
-            Err(e) => {
-                self.status_message = format!("Error: {}", e);
-                self.results.clear();
-            }
-        }
+        self.status_message = "Searching...".to_string();
+        self.search_state = SearchState::Searching {
+            query: query.clone(),
+            receiver: rx,
+            start_time: Instant::now(),
+        };
+
+        thread::spawn(move || {
+            let executor = QueryExecutor::new(&reader);
+            let result = executor.execute(&parsed).map_err(|e| e.to_string());
+
+            let _ = tx.send(SearchResult {
+                matches: result,
+                query: query_for_thread,
+            });
+        });
     }
 
     pub fn select_next(&mut self) {
@@ -277,7 +406,11 @@ impl App {
     pub fn update_preview(&mut self) {
         if let Some(result) = self.results.get(self.selected) {
             let full_path = self.root_path.join(&result.path);
-            if let Ok(content) = std::fs::read_to_string(&full_path) {
+
+            // Use prefetch cache if available, otherwise read from disk
+            let content = self.get_preview_content(&full_path);
+
+            if let Some(content) = content {
                 self.preview_content = Some(content.clone());
                 self.preview_path = Some(full_path.clone());
                 // Scroll to show the match
@@ -296,6 +429,9 @@ impl App {
             self.preview_content = None;
             self.preview_path = None;
         }
+
+        // Prefetch adjacent results for faster navigation
+        self.prefetch_adjacent_previews();
     }
 
     /// Get cached highlighted content for the current preview
@@ -338,6 +474,9 @@ impl App {
 
     pub fn reindex(&mut self) {
         self.status_message = "Building index...".to_string();
+        // Clear caches on reindex
+        self.search_cache.clear();
+        self.prefetch_cache.clear();
 
         match build_index_with_progress(&self.root_path, true, true) {
             Ok(()) => {
@@ -345,7 +484,7 @@ impl App {
                 match IndexReader::open(&self.root_path) {
                     Ok(r) => {
                         let doc_count = r.meta.doc_count;
-                        self.reader = Some(r);
+                        self.reader = Some(Arc::new(r));
                         self.index_available = true;
                         self.load_state = IndexLoadState::Ready;
                         self.status_message = format!("Index rebuilt: {} files", doc_count);
@@ -428,5 +567,53 @@ impl App {
     /// Clear pending key state
     pub fn clear_pending_key(&mut self) {
         self.pending_key = None;
+    }
+
+    /// Prefetch preview content for adjacent results (next/prev)
+    /// This runs in background to make navigation feel instant
+    fn prefetch_adjacent_previews(&mut self) {
+        let indices_to_prefetch: Vec<usize> = [
+            self.selected.checked_sub(1),
+            Some(self.selected),
+            self.selected.checked_add(1),
+            self.selected.checked_add(2),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|&i| i < self.results.len())
+        .collect();
+
+        for idx in indices_to_prefetch {
+            if let Some(result) = self.results.get(idx) {
+                let full_path = self.root_path.join(&result.path);
+                if !self.prefetch_cache.contains_key(&full_path) {
+                    // Read and cache synchronously for now (files are usually small)
+                    // Could be made async for very large files
+                    if let Ok(content) = std::fs::read_to_string(&full_path) {
+                        // Only cache files under 1MB
+                        if content.len() < 1024 * 1024 {
+                            self.prefetch_cache.insert(full_path, content);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Limit cache size to prevent memory bloat
+        while self.prefetch_cache.len() > 20 {
+            if let Some(key) = self.prefetch_cache.keys().next().cloned() {
+                self.prefetch_cache.remove(&key);
+            }
+        }
+    }
+
+    /// Get preview content - uses prefetch cache if available
+    fn get_preview_content(&self, path: &PathBuf) -> Option<String> {
+        // Check prefetch cache first
+        if let Some(content) = self.prefetch_cache.get(path) {
+            return Some(content.clone());
+        }
+        // Fall back to disk read
+        std::fs::read_to_string(path).ok()
     }
 }
