@@ -218,6 +218,30 @@ Press `F1` or `?` to show help in the TUI.
 | Delta update (100 files) | <1s |
 | RAM usage | <500MB |
 
+## Benchmarks
+
+All benchmarks run on Apple M2 Max.
+
+### Linux Kernel
+
+| Metric | Value |
+|--------|-------|
+| Files discovered | 92,041 |
+| Files indexed | 91,995 |
+| Total time | 18.5 seconds |
+| CPU utilization | 247% |
+| Throughput | ~4,970 files/sec |
+
+### Chromium
+
+| Metric | Value |
+|--------|-------|
+| Files discovered | 480,647 |
+| Files indexed | 439,380 |
+| Total time | 2 min 40 sec |
+| CPU utilization | 151% |
+| Throughput | ~2,740 files/sec |
+
 ## License
 
 MIT

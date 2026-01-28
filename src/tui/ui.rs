@@ -178,7 +178,11 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 
                 // Truncate line content to fit panel width (prevents horizontal overflow)
                 let truncated_line = if plain_line.len() > content_width {
-                    let truncate_at = plain_line.floor_char_boundary(content_width);
+                    // Find the largest valid char boundary <= content_width
+                    let mut truncate_at = content_width;
+                    while truncate_at > 0 && !plain_line.is_char_boundary(truncate_at) {
+                        truncate_at -= 1;
+                    }
                     &plain_line[..truncate_at]
                 } else {
                     plain_line

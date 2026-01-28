@@ -8,9 +8,6 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Connection timeout for client
-const CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
-
 /// Read/write timeout
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -21,9 +18,8 @@ pub type ClientResult<T> = Result<T, ClientError>;
 #[derive(Debug)]
 pub enum ClientError {
     /// Server is not running
+    #[allow(dead_code)]
     NotRunning,
-    /// Connection failed
-    ConnectionFailed(std::io::Error),
     /// Communication error
     IoError(std::io::Error),
     /// Server returned an error
@@ -36,7 +32,6 @@ impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ClientError::NotRunning => write!(f, "Index server is not running"),
-            ClientError::ConnectionFailed(e) => write!(f, "Connection failed: {}", e),
             ClientError::IoError(e) => write!(f, "I/O error: {}", e),
             ClientError::ServerError(msg) => write!(f, "Server error: {}", msg),
             ClientError::InvalidResponse => write!(f, "Invalid response from server"),
@@ -86,6 +81,7 @@ impl IndexClient {
     }
 
     /// Connect or return an error (for when daemon is required)
+    #[allow(dead_code)]
     pub fn connect_required() -> ClientResult<Self> {
         Self::connect().ok_or(ClientError::NotRunning)
     }
@@ -187,37 +183,10 @@ impl IndexClient {
 /// Search result from the server
 pub struct SearchResult {
     pub matches: Vec<SearchMatch>,
+    #[allow(dead_code)]
     pub duration_ms: f64,
+    #[allow(dead_code)]
     pub cached: bool,
-}
-
-/// Quick check if server is available (non-blocking)
-pub fn is_server_available() -> bool {
-    let socket_path = get_socket_path();
-
-    if !socket_path.exists() {
-        return false;
-    }
-
-    // Try a quick connect
-    if let Ok(stream) = UnixStream::connect(&socket_path) {
-        let _ = stream.set_write_timeout(Some(CONNECT_TIMEOUT));
-        let _ = stream.set_read_timeout(Some(CONNECT_TIMEOUT));
-
-        let mut writer = BufWriter::new(stream.try_clone().unwrap_or_else(|_| {
-            UnixStream::connect(&socket_path).unwrap()
-        }));
-        let mut reader = BufReader::new(stream);
-
-        // Send ping
-        if write_message(&mut writer, &Request::Ping).is_ok() {
-            if let Ok(Response::Pong) = read_message::<_, Response>(&mut reader) {
-                return true;
-            }
-        }
-    }
-
-    false
 }
 
 #[cfg(test)]
