@@ -95,7 +95,8 @@ Document count: 1234
 ```
 foo bar                    # AND: both terms must match
 "exact phrase"             # Exact phrase match
-foo^2                      # Boosted term (higher priority)
+^foo                       # Boosted term (default 2x priority)
+^3:foo                     # Boosted term with custom weight
 ```
 
 ### Boolean Operators
@@ -107,8 +108,8 @@ foo | bar                  # OR: either term matches
 
 ### Proximity Search
 ```
-near/5:foo,bar             # Terms within 5 lines of each other
-near:foo,bar               # Terms within 3 lines (default)
+near:foo,bar,5             # Terms within 5 lines of each other
+near:foo,bar,abc           # Default distance (10 lines) if not numeric
 ```
 
 ### Regex
@@ -117,15 +118,17 @@ re:/foo.*bar/              # Regex pattern
 ```
 
 ### Field Filters
+
+Filters narrow results but must be combined with a search term:
+
 ```
-path:src/*.rs              # Path glob
-ext:rs                     # File extension
-lang:rust                  # Language filter
-size:>1000                 # Minimum file size
-size:<10000                # Maximum file size
-line:100-200               # Line range filter
-mtime:>2024-01-01          # Modified after date
-mtime:<2024-06-01          # Modified before date
+ext:rs foo                 # Search "foo" in .rs files only
+path:src/*.rs bar          # Search "bar" in files matching glob
+lang:rust baz              # Search "baz" in Rust files
+size:>1000 test            # Search in files larger than 1KB
+size:<10000 test           # Search in files smaller than 10KB
+line:100-200 TODO          # Search within line range
+mtime:>2024-01-01 fix      # Search in recently modified files
 ```
 
 ### Options
