@@ -52,6 +52,7 @@ impl BloomFilter {
     }
 
     /// Create a bloom filter with specific parameters (for loading from disk)
+    #[allow(dead_code)]
     pub fn with_params(num_bits: usize, num_hashes: u8) -> Self {
         let num_words = (num_bits + 63) / 64;
         Self {
@@ -151,16 +152,19 @@ impl BloomFilter {
     }
 
     /// Get the number of bits
+    #[allow(dead_code)]
     pub fn num_bits(&self) -> usize {
         self.num_bits
     }
 
     /// Get approximate memory usage in bytes
+    #[allow(dead_code)]
     pub fn memory_usage(&self) -> usize {
         self.bits.len() * 8 + std::mem::size_of::<Self>()
     }
 
     /// Merge another bloom filter into this one (union)
+    #[allow(dead_code)]
     pub fn merge(&mut self, other: &BloomFilter) {
         debug_assert_eq!(self.bits.len(), other.bits.len());
         for (a, b) in self.bits.iter_mut().zip(other.bits.iter()) {
