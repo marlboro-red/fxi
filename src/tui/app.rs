@@ -381,7 +381,7 @@ impl App {
 
                 thread::spawn(move || {
                     let result = if let Ok(mut client) = client.lock() {
-                        match client.search(&query_for_thread, &root_path, 500) {
+                        match client.search(&query_for_thread, &root_path, 0) {
                             Ok(sr) => Ok(sr.matches),
                             Err(e) => Err(e.to_string()),
                         }

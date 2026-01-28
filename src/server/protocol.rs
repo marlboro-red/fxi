@@ -17,6 +17,9 @@ pub struct ContentSearchOptions {
     pub context_after: u32,
     /// Case insensitive search (-i flag)
     pub case_insensitive: bool,
+    /// Only return first match per file (for -l mode optimization)
+    #[serde(default)]
+    pub files_only: bool,
 }
 
 /// Request from client to server

@@ -63,7 +63,7 @@ struct Cli {
     word_regexp: bool,
 
     /// Maximum number of results (-m), 0 for unlimited
-    #[arg(short = 'm', long, default_value = "10000")]
+    #[arg(short = 'm', long, default_value = "0")]
     max_count: usize,
 
     /// Only print filenames (-l)
@@ -365,6 +365,7 @@ fn handle_grep_command(
         context_before: ctx_before,
         context_after: ctx_after,
         case_insensitive: ignore_case,
+        files_only: files_with_matches,  // Optimize for -l mode
     };
 
     // Try to use daemon for warm search

@@ -29,8 +29,9 @@ const CACHE_SIZE: usize = 128;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Maximum results to return to avoid exceeding message size limits
-/// This caps unbounded (limit=0) requests to prevent >100MB responses
-const MAX_RESULTS_CAP: usize = 50_000;
+/// This caps unbounded (limit=0) requests to prevent excessive memory/transfer
+/// Set very high since the protocol already has a 100MB message limit
+const MAX_RESULTS_CAP: usize = 10_000_000;
 
 /// Cached index with its query cache
 struct CachedIndex {
@@ -276,7 +277,10 @@ impl IndexServer {
                 self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
                 let mut matches = cached_matches.clone();
-                matches.truncate(limit);
+                // Only truncate if limit is non-zero (0 means use query's top:N limit)
+                if limit > 0 {
+                    matches.truncate(limit);
+                }
 
                 return Response::Search(SearchResponse {
                     matches,
@@ -327,7 +331,10 @@ impl IndexServer {
         self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
         let mut result_matches = match_data;
-        result_matches.truncate(limit);
+        // Only truncate if limit is non-zero (0 means use query's top:N limit)
+        if limit > 0 {
+            result_matches.truncate(limit);
+        }
 
         Response::Search(SearchResponse {
             matches: result_matches,
@@ -396,6 +403,44 @@ impl IndexServer {
         }
 
         let executor = QueryExecutor::new(&cached.reader);
+
+        // Use optimized files-only path when requested
+        if options.files_only {
+            let effective_limit = if limit == 0 { MAX_RESULTS_CAP } else { limit.min(MAX_RESULTS_CAP) };
+            let matching_files = match executor.execute_files_only(&parsed, effective_limit) {
+                Ok(files) => files,
+                Err(e) => {
+                    return Response::Error {
+                        message: format!("Search failed: {}", e),
+                    }
+                }
+            };
+
+            // Convert to minimal ContentMatch (just path, no content)
+            let file_count = matching_files.len();
+            let match_data: Vec<ContentMatch> = matching_files
+                .into_iter()
+                .map(|path| ContentMatch {
+                    path,
+                    line_number: 1,
+                    line_content: String::new(),
+                    match_start: 0,
+                    match_end: 0,
+                    context_before: vec![],
+                    context_after: vec![],
+                })
+                .collect();
+
+            self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
+
+            return Response::ContentSearch(ContentSearchResponse {
+                matches: match_data,
+                duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+                files_with_matches: file_count,
+            });
+        }
+
+        // Full content search path
         let matches = match executor.execute_with_content(
             &parsed,
             options.context_before,

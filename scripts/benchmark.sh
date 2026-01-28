@@ -123,16 +123,16 @@ for pattern_spec in "${PATTERNS[@]}"; do
 
     echo -e "Testing: ${YELLOW}$pattern${NC}"
 
-    # Build commands based on type (all limited to MAX_RESULTS for fair comparison)
+    # Build commands based on type (all limited to MAX_RESULTS files for fair comparison)
     case "$type" in
         simple)
-            fxi_cmd="fxi '$pattern' -l -m $MAX_RESULTS --color=never"
+            fxi_cmd="fxi '$pattern' -l --color=never | head -n $MAX_RESULTS"
             rg_cmd="rg -l '$pattern' --no-ignore --color=never . | head -n $MAX_RESULTS"
             grep_cmd="grep -rl '$pattern' . | head -n $MAX_RESULTS"
             display_pattern="\`$pattern\`"
             ;;
         phrase)
-            fxi_cmd="fxi '\"$pattern\"' -l -m $MAX_RESULTS --color=never"
+            fxi_cmd="fxi '\"$pattern\"' -l --color=never | head -n $MAX_RESULTS"
             rg_cmd="rg -l '$pattern' --no-ignore --color=never . | head -n $MAX_RESULTS"
             grep_cmd="grep -rl '$pattern' . | head -n $MAX_RESULTS"
             display_pattern="\`\"$pattern\"\`"
@@ -140,7 +140,7 @@ for pattern_spec in "${PATTERNS[@]}"; do
         case)
             flag="${pattern%% *}"
             term="${pattern#* }"
-            fxi_cmd="fxi $flag '$term' -l -m $MAX_RESULTS --color=never"
+            fxi_cmd="fxi $flag '$term' -l --color=never | head -n $MAX_RESULTS"
             rg_cmd="rg $flag -l '$term' --no-ignore --color=never . | head -n $MAX_RESULTS"
             grep_cmd="grep $flag -rl '$term' . | head -n $MAX_RESULTS"
             display_pattern="\`$flag $term\`"
@@ -202,7 +202,7 @@ cat >> "$OUTPUT" << NOTES
 Each fxi and ripgrep benchmark was run 3 times and averaged. grep was run once due to longer execution times.
 
 Commands used:
-- fxi: \`fxi [pattern] -l -m $MAX_RESULTS --color=never\`
+- fxi: \`fxi [pattern] -l --color=never | head -n $MAX_RESULTS\`
 - ripgrep: \`rg -l [pattern] --no-ignore --color=never . | head -n $MAX_RESULTS\`
 - grep: \`grep -rl [pattern] . | head -n $MAX_RESULTS\`
 NOTES

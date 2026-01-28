@@ -299,6 +299,166 @@ impl<'a> QueryExecutor<'a> {
         Ok(all_results)
     }
 
+    /// Execute query returning only unique files that match (optimized for -l mode)
+    /// This is much faster than execute_with_content for common patterns because it:
+    /// 1. Stops scanning each file after finding the first match
+    /// 2. Skips context extraction
+    /// 3. Returns minimal data per file
+    pub fn execute_files_only(&self, query: &Query, file_limit: usize) -> Result<Vec<PathBuf>> {
+        let plan = QueryPlan::from_query(query);
+        let candidates = self.execute_plan(&plan)?;
+
+        let verification = match &plan.verification {
+            Some(v) => v,
+            None => {
+                // No content verification - just return file paths up to limit
+                let paths: Vec<PathBuf> = candidates
+                    .iter()
+                    .filter_map(|doc_id| {
+                        self.reader.get_document(doc_id).and_then(|doc| {
+                            self.reader.get_path(doc).cloned()
+                        })
+                    })
+                    .take(if file_limit == 0 { usize::MAX } else { file_limit })
+                    .collect();
+                return Ok(paths);
+            }
+        };
+
+        // Collect candidate doc_ids with their paths for processing
+        let candidate_infos: Vec<(DocId, PathBuf, PathBuf)> = candidates
+            .iter()
+            .filter_map(|doc_id| {
+                self.reader.get_document(doc_id).and_then(|doc| {
+                    self.reader.get_full_path(doc).map(|full_path| {
+                        let rel_path = self.reader.get_path(doc).cloned().unwrap_or_default();
+                        (doc_id, full_path, rel_path)
+                    })
+                })
+            })
+            .collect();
+
+        let candidate_count = candidate_infos.len();
+        let effective_limit = if file_limit == 0 { usize::MAX } else { file_limit };
+
+        // For files-only, we use parallel processing with early termination
+        // Each file only needs to find ONE match to be included
+        let match_count = AtomicUsize::new(0);
+
+        let matching_files: Vec<PathBuf> = if !should_use_parallel(candidate_count) {
+            // Sequential for small result sets
+            let mut results = Vec::new();
+            for (_doc_id, full_path, rel_path) in candidate_infos {
+                if results.len() >= effective_limit {
+                    break;
+                }
+
+                let content = match self.reader.read_file_cached(&full_path) {
+                    Some(c) => c,
+                    None => continue,
+                };
+
+                // Check if file has ANY match (fast path)
+                if Self::has_match(&content, verification) {
+                    results.push(rel_path);
+                }
+            }
+            results
+        } else {
+            // Parallel processing with early termination
+            candidate_infos
+                .into_par_iter()
+                .filter_map(|(_doc_id, full_path, rel_path)| {
+                    // Early termination check
+                    if match_count.load(Ordering::Relaxed) >= effective_limit {
+                        return None;
+                    }
+
+                    // Read file content
+                    let content = fs::read_to_string(&full_path).ok()?;
+
+                    // Check if file has ANY match
+                    if Self::has_match(&content, verification) {
+                        match_count.fetch_add(1, Ordering::Relaxed);
+                        Some(rel_path)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        // Sort by path for consistent output
+        let mut sorted = matching_files;
+        sorted.sort();
+        if sorted.len() > effective_limit {
+            sorted.truncate(effective_limit);
+        }
+
+        Ok(sorted)
+    }
+
+    /// Fast check if content has ANY match (for files-only mode)
+    /// Returns immediately on first match found
+    fn has_match(content: &str, verification: &VerificationStep) -> bool {
+        match verification {
+            VerificationStep::Literal(text) => {
+                // Case-insensitive search using memchr
+                use memchr::memmem;
+                let needle_lower = text.to_lowercase();
+                let finder = memmem::Finder::new(needle_lower.as_bytes());
+
+                for line in content.lines() {
+                    if line.is_ascii() && text.is_ascii() {
+                        // Fast ASCII path
+                        if line.to_ascii_lowercase().contains(&needle_lower) {
+                            return true;
+                        }
+                    } else {
+                        let line_lower = line.to_lowercase();
+                        if finder.find(line_lower.as_bytes()).is_some() {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            VerificationStep::BoostedLiteral { text, .. } => {
+                Self::has_match(content, &VerificationStep::Literal(text.clone()))
+            }
+            VerificationStep::Phrase(text) => {
+                // Exact phrase match (case-sensitive)
+                content.contains(text)
+            }
+            VerificationStep::Regex(pattern) => {
+                if let Some(re) = get_regex_cache().get_or_compile(pattern) {
+                    re.is_match(content)
+                } else {
+                    false
+                }
+            }
+            VerificationStep::And(steps) => {
+                steps.iter().all(|step| Self::has_match(content, step))
+            }
+            VerificationStep::Or(steps) => {
+                steps.iter().any(|step| Self::has_match(content, step))
+            }
+            VerificationStep::Not(inner) => {
+                !Self::has_match(content, inner)
+            }
+            VerificationStep::Near { terms, distance } => {
+                // Simplified check for proximity - just verify all terms exist
+                let content_lower = content.to_lowercase();
+                let terms_exist = terms.iter().all(|t| content_lower.contains(&t.to_lowercase()));
+                if !terms_exist {
+                    return false;
+                }
+                // Full proximity check (reuse existing logic)
+                !Self::find_proximity_matches_static(content, terms, *distance, 0).is_empty()
+            }
+        }
+    }
+
     /// Extract context lines around a match
     fn extract_context_lines(
         content: &str,

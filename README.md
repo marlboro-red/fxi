@@ -61,6 +61,7 @@ Flags match ripgrep conventions for familiarity.
 | | `--color=WHEN` | When to use colors: `always`, `never`, `auto` (default: auto) |
 
 **Differences from ripgrep:**
+
 - `-v` (invert match) is not supported (indexed search only returns matching lines)
 - Token search is case-insensitive by default for better code search recall
 
@@ -206,6 +207,7 @@ Document count: 1234
 ## Query Syntax
 
 ### Literals and Phrases
+
 ```
 foo bar                    # AND: both terms must match
 "exact phrase"             # Exact phrase match
@@ -216,6 +218,7 @@ foo bar                    # AND: both terms must match
 Searches automatically match both file content AND filenames - typing `config` will find files containing "config" as well as files named `config.json`, `config.rs`, etc.
 
 ### Boolean Operators
+
 ```
 foo | bar                  # OR: either term matches
 -foo                       # NOT: exclude matches
@@ -223,12 +226,14 @@ foo | bar                  # OR: either term matches
 ```
 
 ### Proximity Search
+
 ```
 near:foo,bar,5             # Terms within 5 lines of each other
 near:foo,bar,abc           # Default distance (10 lines) if not numeric
 ```
 
 ### Regex
+
 ```
 re:/foo.*bar/              # Regex pattern
 ```
@@ -259,6 +264,7 @@ mtime:>2024-01-01 fix      # Search in recently modified files
 ```
 
 ### Options
+
 ```
 sort:recency               # Sort by modification time
 sort:path                  # Sort by path
@@ -334,24 +340,6 @@ Press `F1` or `?` to show help in the TUI.
 ## Benchmarks
 
 All benchmarks run on Apple M2 Max.
-
-### Search Performance: fxi vs ripgrep vs grep
-
-#### Chromium Codebase (439k files indexed)
-
-| Pattern | fxi (warm) | ripgrep | grep | fxi Speedup |
-|---------|-----------|---------|------|-------------|
-| `"class Browser"` | 55 ms | 8,600 ms | 26,000 ms | **156x vs rg** |
-| `"void OnError"` | 20 ms | 8,600 ms | 22,500 ms | **430x vs rg** |
-
-File counts validated: fxi and ripgrep return the same number of matches.
-
-**Cold start**: ~1.5 seconds (loads index from disk)
-
-The dramatic speedup comes from:
-1. **Trigram index pre-filtering**: Only files that could possibly match are checked
-2. **Warm daemon**: Index stays in memory between searches
-3. **ripgrep/grep must scan all files** on every search
 
 ### Indexing Performance
 
