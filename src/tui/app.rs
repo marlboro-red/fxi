@@ -8,6 +8,8 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 
 /// Application mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +17,18 @@ pub enum Mode {
     Search,
     Preview,
     Help,
+}
+
+/// Index loading state for background loading
+pub enum IndexLoadState {
+    /// Index is loading in background
+    Loading(Receiver<Result<IndexReader, String>>),
+    /// Index loaded successfully
+    Ready,
+    /// No index found
+    NotFound,
+    /// Index loading failed (error message stored in status_message)
+    Failed,
 }
 
 /// Application state
@@ -43,41 +57,42 @@ pub struct App {
     pub pending_key: Option<char>,
     /// Syntax highlighter for code preview
     pub highlighter: SyntaxHighlighter,
+    /// Background index loading state
+    load_state: IndexLoadState,
 }
 
 impl App {
+    /// Create new app with INSTANT startup - index loads in background
     pub fn new(path: PathBuf) -> Result<Self> {
         let start_path = path.canonicalize().unwrap_or(path);
 
-        // Auto-detect codebase root
+        // Auto-detect codebase root (fast operation)
         let root_path = find_codebase_root(&start_path)?;
 
-        // Try to open existing index
-        let (reader, index_available, status) = match IndexReader::open(&root_path) {
-            Ok(r) => {
-                let doc_count = r.meta.doc_count;
-                let msg = if root_path != start_path {
-                    format!(
-                        "{} files indexed (root: {})",
-                        doc_count,
-                        root_path.file_name().unwrap_or_default().to_string_lossy()
-                    )
-                } else {
-                    format!("{} files indexed", doc_count)
-                };
-                (Some(r), true, msg)
-            }
-            Err(_) => (
-                None,
-                false,
-                "No index found. Press F5 to build index.".to_string(),
-            ),
+        // Check if index exists (fast - just check file existence)
+        let index_dir = crate::utils::get_index_dir(&root_path)?;
+        let meta_path = index_dir.join("meta.json");
+
+        let (load_state, status) = if meta_path.exists() {
+            // Start loading index in background thread for instant TUI display
+            let (tx, rx) = mpsc::channel();
+            let root_for_thread = root_path.clone();
+
+            thread::spawn(move || {
+                let result = IndexReader::open(&root_for_thread)
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(result);
+            });
+
+            (IndexLoadState::Loading(rx), "Loading index...".to_string())
+        } else {
+            (IndexLoadState::NotFound, "No index found. Press F5 to build index.".to_string())
         };
 
         Ok(Self {
             root_path,
             start_path,
-            reader,
+            reader: None,
             query: String::new(),
             results: Vec::new(),
             selected: 0,
@@ -88,10 +103,69 @@ impl App {
             preview_path: None,
             highlight_cache: HashMap::new(),
             status_message: status,
-            index_available,
+            index_available: false,
             pending_key: None,
             highlighter: SyntaxHighlighter::new(),
+            load_state,
         })
+    }
+
+    /// Check for background index load completion (call this in event loop)
+    pub fn poll_index_load(&mut self) {
+        // Take ownership of the state temporarily
+        let current_state = std::mem::replace(&mut self.load_state, IndexLoadState::Ready);
+
+        match current_state {
+            IndexLoadState::Loading(rx) => {
+                match rx.try_recv() {
+                    Ok(Ok(reader)) => {
+                        // Index loaded successfully!
+                        let doc_count = reader.meta.doc_count;
+                        let msg = if self.root_path != self.start_path {
+                            format!(
+                                "{} files indexed (root: {})",
+                                doc_count,
+                                self.root_path.file_name().unwrap_or_default().to_string_lossy()
+                            )
+                        } else {
+                            format!("{} files indexed", doc_count)
+                        };
+                        self.reader = Some(reader);
+                        self.index_available = true;
+                        self.status_message = msg;
+                        self.load_state = IndexLoadState::Ready;
+
+                        // Auto-execute pending search query if any
+                        if !self.query.is_empty() {
+                            self.execute_search();
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        // Loading failed
+                        self.status_message = format!("Index load failed: {}", e);
+                        self.load_state = IndexLoadState::Failed;
+                    }
+                    Err(TryRecvError::Empty) => {
+                        // Still loading, put the receiver back
+                        self.load_state = IndexLoadState::Loading(rx);
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        // Thread crashed?
+                        self.status_message = "Index load thread terminated unexpectedly".to_string();
+                        self.load_state = IndexLoadState::Failed;
+                    }
+                }
+            }
+            other => {
+                // Put the state back if it wasn't Loading
+                self.load_state = other;
+            }
+        }
+    }
+
+    /// Check if index is still loading
+    pub fn is_loading(&self) -> bool {
+        matches!(self.load_state, IndexLoadState::Loading(_))
     }
 
     pub fn set_query(&mut self, query: &str) {
@@ -273,6 +347,7 @@ impl App {
                         let doc_count = r.meta.doc_count;
                         self.reader = Some(r);
                         self.index_available = true;
+                        self.load_state = IndexLoadState::Ready;
                         self.status_message = format!("Index rebuilt: {} files", doc_count);
 
                         // Re-run query if any
@@ -282,11 +357,13 @@ impl App {
                     }
                     Err(e) => {
                         self.status_message = format!("Error loading index: {}", e);
+                        self.load_state = IndexLoadState::Failed;
                     }
                 }
             }
             Err(e) => {
                 self.status_message = format!("Index build failed: {}", e);
+                self.load_state = IndexLoadState::Failed;
             }
         }
     }

@@ -27,12 +27,14 @@ pub fn run(path: PathBuf, initial_query: Option<String>) -> Result<()> {
     // Clear the terminal to prevent any artifacts from previous content
     terminal.clear()?;
 
-    // Create app state
+    // Create app state (instant - index loads in background)
     let mut app = App::new(path)?;
 
+    // Set initial query if provided (search will execute when index is ready)
     if let Some(query) = initial_query {
         app.set_query(&query);
-        app.execute_search();
+        // Don't execute search here - index may not be loaded yet
+        // The query will be auto-executed when index load completes
     }
 
     // Main loop
@@ -52,6 +54,9 @@ pub fn run(path: PathBuf, initial_query: Option<String>) -> Result<()> {
 
 fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
     loop {
+        // Check for background index load completion (non-blocking)
+        app.poll_index_load();
+
         terminal.draw(|f| ui::draw(f, app))?;
 
         // Poll for events with timeout for responsive UI
