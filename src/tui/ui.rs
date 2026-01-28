@@ -75,7 +75,11 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
     // Clear the area first to prevent artifacts
     f.render_widget(Clear, area);
 
-    let items: Vec<ListItem> = app
+    // Calculate inner dimensions (accounting for borders)
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
+
+    let mut items: Vec<ListItem> = app
         .results
         .iter()
         .enumerate()
@@ -118,6 +122,10 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
                 }
             };
 
+            // Calculate prefix length for padding calculation
+            let prefix = format!("{}:{}  ", path_str, line_num);
+            let prefix_len = prefix.len();
+
             let mut spans = vec![
                 Span::styled(format!("{}:", path_str), apply_bg(path_style)),
                 Span::styled(format!("{}", line_num), apply_bg(line_style)),
@@ -129,7 +137,7 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
             let adj_end = result.match_end.saturating_sub(trim_offset);
 
             // Only highlight if match is within the displayed content
-            if adj_start < content.len() && adj_end > adj_start {
+            let content_spans = if adj_start < content.len() && adj_end > adj_start {
                 let end = adj_end.min(content.len());
                 // Account for "..." if truncated and match extends past it
                 let effective_end = if truncated && end > max_content_len.saturating_sub(3) {
@@ -137,12 +145,21 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
                 } else {
                     end
                 };
-                spans.extend(highlight_match(&content, adj_start, effective_end, selection_bg));
+                highlight_match(&content, adj_start, effective_end, selection_bg)
             } else {
-                spans.push(Span::styled(
-                    content,
+                vec![Span::styled(
+                    content.clone(),
                     apply_bg(Style::default().fg(Color::White)),
-                ));
+                )]
+            };
+
+            spans.extend(content_spans);
+
+            // Pad the line to fill the full inner width so selection background extends to edge
+            let current_len = prefix_len + content.len();
+            if current_len < inner_width {
+                let padding = " ".repeat(inner_width - current_len);
+                spans.push(Span::styled(padding, apply_bg(Style::default())));
             }
 
             let line = Line::from(spans);
@@ -150,6 +167,12 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
             ListItem::new(line)
         })
         .collect();
+
+    // Pad with empty items to fill the visible area
+    // This ensures old content is fully overwritten when switching to fewer results
+    while items.len() < inner_height {
+        items.push(ListItem::new(Line::from("")));
+    }
 
     let list = List::new(items).block(
         Block::default()
@@ -170,8 +193,11 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     // Clear the preview area first to prevent artifacts from previous content
     f.render_widget(Clear, area);
 
-    // Calculate inner height (accounting for borders)
+    // Calculate inner dimensions (accounting for borders)
+    let inner_width = area.width.saturating_sub(2) as usize;
     let inner_height = area.height.saturating_sub(2) as usize;
+    // Line number gutter is 5 chars ("1234 "), content gets the rest
+    let content_width = inner_width.saturating_sub(5);
 
     let title = if let Some(result) = app.get_selected_result() {
         format!(" {} ", result.path.display())
@@ -199,6 +225,14 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
                 let actual_line = line_num + 1;
                 let is_match = actual_line == match_line;
 
+                // Truncate line content to fit panel width (prevents horizontal overflow)
+                let truncated_line = if plain_line.len() > content_width {
+                    let truncate_at = plain_line.floor_char_boundary(content_width);
+                    &plain_line[..truncate_at]
+                } else {
+                    plain_line
+                };
+
                 let line_num_style = Style::default().fg(Color::DarkGray);
                 let mut spans = vec![
                     Span::styled(format!("{:4} ", actual_line), line_num_style),
@@ -211,17 +245,58 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
                     let relative_idx = line_num.checked_sub(start_offset);
                     if let Some(idx) = relative_idx {
                         if let Some(line_spans) = highlighted.get(idx) {
+                            // Calculate total content length for padding
+                            let mut content_len = 0usize;
                             if is_match {
                                 // For matched line, add bold modifier to all spans
                                 for span in line_spans {
+                                    // Truncate span content if needed
+                                    let span_content = if content_len + span.content.len() > content_width {
+                                        let remaining = content_width.saturating_sub(content_len);
+                                        let truncate_at = span.content.floor_char_boundary(remaining);
+                                        &span.content[..truncate_at]
+                                    } else {
+                                        &span.content
+                                    };
+                                    content_len += span_content.len();
+
                                     let mut style = span.style;
                                     style = style.add_modifier(Modifier::BOLD);
                                     // Also add a subtle background to indicate match
                                     style = style.bg(Color::Rgb(60, 60, 40));
-                                    spans.push(Span::styled(span.content.clone(), style));
+                                    spans.push(Span::styled(span_content.to_string(), style));
+
+                                    if content_len >= content_width {
+                                        break;
+                                    }
+                                }
+                                // Pad match line to extend background to edge
+                                if content_len < content_width {
+                                    let padding = " ".repeat(content_width - content_len);
+                                    spans.push(Span::styled(
+                                        padding,
+                                        Style::default()
+                                            .bg(Color::Rgb(60, 60, 40))
+                                            .add_modifier(Modifier::BOLD),
+                                    ));
                                 }
                             } else {
-                                spans.extend(line_spans.clone());
+                                for span in line_spans {
+                                    // Truncate span content if needed
+                                    let span_content = if content_len + span.content.len() > content_width {
+                                        let remaining = content_width.saturating_sub(content_len);
+                                        let truncate_at = span.content.floor_char_boundary(remaining);
+                                        &span.content[..truncate_at]
+                                    } else {
+                                        &span.content
+                                    };
+                                    content_len += span_content.len();
+                                    spans.push(Span::styled(span_content.to_string(), span.style));
+
+                                    if content_len >= content_width {
+                                        break;
+                                    }
+                                }
                             }
                             return Line::from(spans);
                         }
@@ -229,14 +304,20 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
                 }
 
                 // Fallback for lines outside highlighted range or no highlighting available
-                let content_style = if is_match {
-                    Style::default()
+                if is_match {
+                    let content_style = Style::default()
                         .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
+                        .bg(Color::Rgb(60, 60, 40))
+                        .add_modifier(Modifier::BOLD);
+                    spans.push(Span::styled(truncated_line.to_string(), content_style));
+                    // Pad match line to extend background to edge
+                    if truncated_line.len() < content_width {
+                        let padding = " ".repeat(content_width - truncated_line.len());
+                        spans.push(Span::styled(padding, content_style));
+                    }
                 } else {
-                    Style::default()
-                };
-                spans.push(Span::styled(plain_line.to_string(), content_style));
+                    spans.push(Span::styled(truncated_line.to_string(), Style::default()));
+                }
                 Line::from(spans)
             })
             .collect();
