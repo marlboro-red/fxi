@@ -273,4 +273,58 @@ mod tests {
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, hash3);
     }
+
+    #[test]
+    fn test_app_config_default() {
+        let config = AppConfig::default();
+        assert!(!config.parallel_chunk_indexing);
+        assert_eq!(config.parallel_chunk_count, 0);
+    }
+
+    #[test]
+    fn test_app_config_effective_parallel_count() {
+        let mut config = AppConfig::default();
+
+        // 0 should resolve to CPU count
+        let cpu_count = config.effective_parallel_chunk_count();
+        assert!(cpu_count >= 1);
+
+        // Explicit value should be used as-is
+        config.parallel_chunk_count = 4;
+        assert_eq!(config.effective_parallel_chunk_count(), 4);
+    }
+
+    #[test]
+    fn test_app_config_serialization() {
+        let config = AppConfig {
+            parallel_chunk_indexing: true,
+            parallel_chunk_count: 8,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.parallel_chunk_indexing, true);
+        assert_eq!(parsed.parallel_chunk_count, 8);
+    }
+
+    #[test]
+    fn test_app_config_partial_json() {
+        // Should use defaults for missing fields
+        let json = r#"{"parallel_chunk_indexing": true}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+
+        assert!(config.parallel_chunk_indexing);
+        assert_eq!(config.parallel_chunk_count, 0); // default
+    }
+
+    #[test]
+    fn test_app_config_empty_json() {
+        // Empty object should use all defaults
+        let json = "{}";
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+
+        assert!(!config.parallel_chunk_indexing);
+        assert_eq!(config.parallel_chunk_count, 0);
+    }
 }

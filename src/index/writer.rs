@@ -1080,11 +1080,149 @@ fn build_line_map(content: &[u8]) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::build::ProcessedFile;
 
     #[test]
     fn test_build_line_map() {
         let content = b"line1\nline2\nline3";
         let offsets = build_line_map(content);
         assert_eq!(offsets, vec![0, 6, 12]);
+    }
+
+    #[test]
+    fn test_parallel_chunk_result_empty() {
+        let result = ParallelChunkResult::process(1, 1, vec![]);
+        assert_eq!(result.segment_id, 1);
+        assert_eq!(result.doc_id_start, 1);
+        assert!(result.documents.is_empty());
+        assert!(result.paths.is_empty());
+        assert!(result.trigram_postings.is_empty());
+        assert!(result.token_postings.is_empty());
+        assert!(result.line_maps.is_empty());
+    }
+
+    #[test]
+    fn test_parallel_chunk_result_single_file() {
+        let processed = ProcessedFile {
+            rel_path: PathBuf::from("test.rs"),
+            mtime: 12345,
+            size: 100,
+            language: Language::Rust,
+            flags: DocFlags::new(),
+            trigrams: vec![0x616263, 0x626364], // "abc", "bcd"
+            tokens: vec!["test".to_string(), "func".to_string()],
+            line_offsets: vec![0, 10, 20],
+        };
+
+        let result = ParallelChunkResult::process(1, 100, vec![processed]);
+
+        assert_eq!(result.segment_id, 1);
+        assert_eq!(result.doc_id_start, 100);
+        assert_eq!(result.documents.len(), 1);
+        assert_eq!(result.documents[0].doc_id, 100);
+        assert_eq!(result.paths.len(), 1);
+        assert_eq!(result.paths[0], PathBuf::from("test.rs"));
+        assert_eq!(result.trigram_postings.len(), 2);
+        assert_eq!(result.token_postings.len(), 2);
+        assert_eq!(result.line_maps.len(), 1);
+        assert_eq!(result.line_maps.get(&100).unwrap(), &vec![0, 10, 20]);
+    }
+
+    #[test]
+    fn test_parallel_chunk_result_doc_id_assignment() {
+        let files: Vec<ProcessedFile> = (0..3)
+            .map(|i| ProcessedFile {
+                rel_path: PathBuf::from(format!("file{}.rs", i)),
+                mtime: 12345,
+                size: 100,
+                language: Language::Rust,
+                flags: DocFlags::new(),
+                trigrams: vec![],
+                tokens: vec![],
+                line_offsets: vec![0],
+            })
+            .collect();
+
+        let result = ParallelChunkResult::process(2, 50, files);
+
+        assert_eq!(result.documents.len(), 3);
+        assert_eq!(result.documents[0].doc_id, 50);
+        assert_eq!(result.documents[1].doc_id, 51);
+        assert_eq!(result.documents[2].doc_id, 52);
+        assert_eq!(result.paths.len(), 3);
+    }
+
+    #[test]
+    fn test_parallel_chunk_result_deduplicates_paths() {
+        // Two files with the same path should share path_id
+        let files = vec![
+            ProcessedFile {
+                rel_path: PathBuf::from("same.rs"),
+                mtime: 12345,
+                size: 100,
+                language: Language::Rust,
+                flags: DocFlags::new(),
+                trigrams: vec![],
+                tokens: vec![],
+                line_offsets: vec![0],
+            },
+            ProcessedFile {
+                rel_path: PathBuf::from("same.rs"),
+                mtime: 12346,
+                size: 101,
+                language: Language::Rust,
+                flags: DocFlags::new(),
+                trigrams: vec![],
+                tokens: vec![],
+                line_offsets: vec![0],
+            },
+        ];
+
+        let result = ParallelChunkResult::process(1, 1, files);
+
+        assert_eq!(result.documents.len(), 2);
+        assert_eq!(result.paths.len(), 1); // Only one unique path
+        assert_eq!(result.documents[0].path_id, result.documents[1].path_id);
+    }
+
+    #[test]
+    fn test_parallel_chunk_result_trigram_aggregation() {
+        let files = vec![
+            ProcessedFile {
+                rel_path: PathBuf::from("a.rs"),
+                mtime: 12345,
+                size: 100,
+                language: Language::Rust,
+                flags: DocFlags::new(),
+                trigrams: vec![0x616263, 0x626364], // shared trigram
+                tokens: vec![],
+                line_offsets: vec![0],
+            },
+            ProcessedFile {
+                rel_path: PathBuf::from("b.rs"),
+                mtime: 12345,
+                size: 100,
+                language: Language::Rust,
+                flags: DocFlags::new(),
+                trigrams: vec![0x616263, 0x636465], // shared + unique trigram
+                tokens: vec![],
+                line_offsets: vec![0],
+            },
+        ];
+
+        let result = ParallelChunkResult::process(1, 1, files);
+
+        // Should have 3 unique trigrams
+        assert_eq!(result.trigram_postings.len(), 3);
+
+        // Shared trigram should have both doc_ids
+        let shared_posting = result.trigram_postings.get(&0x616263).unwrap();
+        assert_eq!(shared_posting.len(), 2);
+        assert!(shared_posting.contains(&1));
+        assert!(shared_posting.contains(&2));
+
+        // Frequency tracking
+        assert_eq!(*result.trigram_frequencies.get(&0x616263).unwrap(), 2);
+        assert_eq!(*result.trigram_frequencies.get(&0x626364).unwrap(), 1);
     }
 }
