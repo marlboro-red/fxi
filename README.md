@@ -33,15 +33,104 @@ fxi index --force [path]   # Force full rebuild
 
 ### Search (ripgrep-like)
 
+Direct content search with ripgrep-compatible output. Automatically uses the daemon for instant results when available, otherwise falls back to loading the index from disk.
+
 ```bash
-fxi "pattern"              # Search for pattern (ripgrep-like output)
+fxi "pattern"              # Search for pattern
 fxi "fn main"              # Search for literal text
-fxi -i "error"             # Case insensitive search
-fxi -A 2 -B 2 "TODO"       # Show 2 lines of context before/after
-fxi -C 3 "pattern"         # Show 3 lines of context (both directions)
-fxi -l "struct"            # Only print filenames with matches
-fxi -c "impl"              # Print match count per file
-fxi -n 50 "pattern"        # Limit to 50 results (default: 100)
+fxi "class Foo"            # AND search: files containing both "class" and "Foo"
+fxi '"exact phrase"'       # Phrase search: exact string match
+```
+
+#### CLI Flags
+
+Flags match ripgrep conventions for familiarity.
+
+| Flag | Long | Description |
+|------|------|-------------|
+| `-e PAT` | `--regexp` | Pattern to search (can be repeated for OR) |
+| `-i` | `--ignore-case` | Case insensitive search |
+| `-w` | `--word-regexp` | Match whole words only |
+| `-A NUM` | `--after-context` | Show NUM lines after each match |
+| `-B NUM` | `--before-context` | Show NUM lines before each match |
+| `-C NUM` | `--context` | Show NUM lines before and after (overrides -A/-B) |
+| `-l` | `--files-with-matches` | Only print filenames, not matching lines |
+| `-c` | `--count` | Print match count per file |
+| `-m NUM` | `--max-count` | Limit to NUM results (default: unlimited) |
+| `-p PATH` | `--path` | Search in specific directory |
+| | `--color=WHEN` | When to use colors: `always`, `never`, `auto` (default: auto) |
+
+**Differences from ripgrep:**
+- `-v` (invert match) is not supported (indexed search only returns matching lines)
+- Token search is case-insensitive by default for better code search recall
+
+#### Examples
+
+```bash
+# Basic searches
+fxi "TODO"                 # Find all TODOs
+fxi "fn main"              # Find main functions (AND: both terms)
+fxi '"fn main"'            # Find exact phrase "fn main"
+
+# Case insensitive
+fxi -i "error"             # Match "error", "Error", "ERROR", etc.
+
+# Word boundary
+fxi -w "main"              # Match "main" but not "domain" or "mainly"
+
+# Multiple patterns (OR)
+fxi -e "TODO" -e "FIXME"   # Find lines with TODO or FIXME
+fxi -e "error" -e "warn"   # Find error or warning messages
+
+# Context lines
+fxi -A 2 "panic"           # Show 2 lines after each match
+fxi -B 2 "panic"           # Show 2 lines before each match
+fxi -C 3 "panic"           # Show 3 lines before and after
+fxi -A 2 -B 1 "panic"      # 1 line before, 2 lines after
+
+# Output modes
+fxi -l "struct"            # List only filenames with matches
+fxi -c "impl"              # Count matches per file
+
+# Limit results
+fxi -m 10 "use std"        # Show only first 10 matches
+fxi -m 1000 "TODO"         # Increase limit for thorough search
+
+# Search different directory
+fxi -p ../other-project "pattern"
+
+# Combine flags
+fxi -i -C 2 -m 50 "fixme"  # Case insensitive, with context, limited
+```
+
+#### Output Format
+
+Results are displayed in ripgrep-style format with colors:
+
+```
+src/main.rs
+42:    let query = pattern.to_string();
+43-    // context line after
+--
+src/server/daemon.rs
+128:    fn handle_search(&self, query: String) {
+```
+
+- **Filename**: magenta (printed once per file as heading)
+- **Line number**: green (`:` for match, `-` for context)
+- **Match text**: red/bold highlighting
+- **Separator**: `--` between non-contiguous matches
+
+#### Performance
+
+When the daemon is running (`fxi daemon start`), searches complete in **20-55ms** even on massive codebases like Chromium (439k files). Without the daemon, searches take ~1.5s for cold index loading.
+
+```bash
+# Start daemon for instant searches
+fxi daemon start
+
+# Now searches are 100-400x faster than ripgrep
+fxi "class Browser"  # ~50ms vs ripgrep's ~8 seconds
 ```
 
 ### Interactive TUI

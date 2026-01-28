@@ -6,8 +6,19 @@ mod tui;
 mod utils;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum ColorChoice {
+    /// Always use colors
+    Always,
+    /// Never use colors
+    Never,
+    /// Auto-detect based on terminal
+    #[default]
+    Auto,
+}
 
 #[derive(Parser)]
 #[command(name = "fxi")]
@@ -18,6 +29,10 @@ struct Cli {
 
     /// Search pattern (when no subcommand is given)
     pattern: Option<String>,
+
+    /// Additional patterns to search for (-e, can be repeated)
+    #[arg(short = 'e', long = "regexp", action = clap::ArgAction::Append)]
+    patterns: Vec<String>,
 
     /// Path to search in
     #[arg(short, long, default_value = ".")]
@@ -39,8 +54,16 @@ struct Cli {
     #[arg(short = 'i', long)]
     ignore_case: bool,
 
-    /// Maximum results
-    #[arg(short = 'n', long, default_value = "100")]
+    /// Invert match: show non-matching lines (-v)
+    #[arg(short = 'v', long)]
+    invert_match: bool,
+
+    /// Match whole words only (-w)
+    #[arg(short = 'w', long)]
+    word_regexp: bool,
+
+    /// Maximum number of results (-m), 0 for unlimited
+    #[arg(short = 'm', long, default_value = "10000")]
     max_count: usize,
 
     /// Only print filenames (-l)
@@ -51,9 +74,9 @@ struct Cli {
     #[arg(short = 'c', long)]
     count: bool,
 
-    /// Disable colored output
-    #[arg(long)]
-    no_color: bool,
+    /// When to use colors: always, never, auto
+    #[arg(long, default_value = "auto", value_enum)]
+    color: ColorChoice,
 }
 
 #[derive(Subcommand)]
@@ -147,19 +170,27 @@ fn main() -> Result<()> {
             handle_daemon_command(action)?;
         }
         None => {
-            if let Some(pattern) = cli.pattern {
+            // Collect all patterns: positional + -e flags
+            let mut all_patterns = cli.patterns;
+            if let Some(p) = cli.pattern {
+                all_patterns.insert(0, p);
+            }
+
+            if !all_patterns.is_empty() {
                 // Direct content search (ripgrep-like)
                 handle_grep_command(
-                    pattern,
+                    all_patterns,
                     cli.path,
                     cli.after_context,
                     cli.before_context,
                     cli.context,
                     cli.ignore_case,
+                    cli.invert_match,
+                    cli.word_regexp,
                     cli.max_count,
                     cli.files_with_matches,
                     cli.count,
-                    cli.no_color,
+                    cli.color,
                 )?;
             } else {
                 // Interactive TUI mode
@@ -296,21 +327,32 @@ fn handle_daemon_command(action: DaemonAction) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 fn handle_grep_command(
-    pattern: String,
+    patterns: Vec<String>,
     path: PathBuf,
     after_context: u32,
     before_context: u32,
     context: Option<u32>,
     ignore_case: bool,
+    invert_match: bool,
+    word_regexp: bool,
     max_count: usize,
     files_with_matches: bool,
     count: bool,
-    no_color: bool,
+    color_choice: ColorChoice,
 ) -> Result<()> {
     use server::protocol::ContentSearchOptions;
+    use std::io::IsTerminal;
+
+    // -v (invert match) is not supported with indexed search
+    if invert_match {
+        anyhow::bail!("--invert-match (-v) is not supported: indexed search only returns matching lines");
+    }
 
     // Find codebase root
     let root = utils::find_codebase_root(&path)?;
+
+    // Build combined pattern for multiple -e flags (OR them together)
+    let combined_pattern = build_pattern(&patterns, ignore_case, word_regexp);
 
     // Resolve context flags (-C overrides -A and -B)
     let (ctx_before, ctx_after) = if let Some(c) = context {
@@ -327,32 +369,79 @@ fn handle_grep_command(
 
     // Try to use daemon for warm search
     let matches = if let Some(mut client) = server::IndexClient::connect() {
-        match client.content_search(&pattern, &root, max_count, options) {
+        match client.content_search(&combined_pattern, &root, max_count, options) {
             Ok(response) => response.matches,
             Err(e) => {
                 eprintln!("Daemon search failed, falling back to direct search: {}", e);
-                do_direct_content_search(&pattern, &root, max_count, ctx_before, ctx_after, ignore_case)?
+                do_direct_content_search(&combined_pattern, &root, max_count, ctx_before, ctx_after, ignore_case, word_regexp)?
             }
         }
     } else {
         // Fall back to direct search without daemon
-        do_direct_content_search(&pattern, &root, max_count, ctx_before, ctx_after, ignore_case)?
+        do_direct_content_search(&combined_pattern, &root, max_count, ctx_before, ctx_after, ignore_case, word_regexp)?
     };
 
     // Output results
-    let color = !no_color;
+    let color = match color_choice {
+        ColorChoice::Always => true,
+        ColorChoice::Never => false,
+        ColorChoice::Auto => std::io::stdout().is_terminal(),
+    };
     // Use heading style when results span multiple files
     let use_heading = matches.iter().map(|m| &m.path).collect::<std::collections::HashSet<_>>().len() > 1;
 
     if files_with_matches {
-        output::print_files_only(&matches)?;
+        output::print_files_only(&matches, color)?;
     } else if count {
-        output::print_match_counts(&matches)?;
+        output::print_match_counts(&matches, color)?;
     } else {
         output::print_content_matches(&matches, color, use_heading)?;
     }
 
     Ok(())
+}
+
+/// Build combined search pattern from multiple patterns
+fn build_pattern(patterns: &[String], ignore_case: bool, word_regexp: bool) -> String {
+    if patterns.is_empty() {
+        return String::new();
+    }
+
+    // For single pattern without special flags, return as-is
+    if patterns.len() == 1 && !ignore_case && !word_regexp {
+        return patterns[0].clone();
+    }
+
+    // Build regex pattern for -w (word boundary) and/or multiple patterns
+    let escaped: Vec<String> = patterns
+        .iter()
+        .map(|p| {
+            let escaped = regex::escape(p);
+            if word_regexp {
+                format!(r"\b{}\b", escaped)
+            } else {
+                escaped
+            }
+        })
+        .collect();
+
+    // Join multiple patterns with OR
+    let combined = if escaped.len() > 1 {
+        escaped.join("|")
+    } else {
+        escaped.into_iter().next().unwrap_or_default()
+    };
+
+    // Wrap in regex syntax with case flag if needed
+    if ignore_case || word_regexp || patterns.len() > 1 {
+        if ignore_case {
+            format!("re:/(?i){}/", combined)
+        } else {
+            format!("re:/{}/", combined)
+        }
+    } else {
+        combined
+    }
 }
 
 /// Direct content search without daemon
@@ -363,6 +452,7 @@ fn do_direct_content_search(
     context_before: u32,
     context_after: u32,
     case_insensitive: bool,
+    word_regexp: bool,
 ) -> Result<Vec<server::protocol::ContentMatch>> {
     use crate::index::reader::IndexReader;
     use crate::query::{parse_query, QueryExecutor};
@@ -370,8 +460,9 @@ fn do_direct_content_search(
     // Load index
     let reader = IndexReader::open(root)?;
 
-    // Build query - handle case insensitivity
-    let query_str = if case_insensitive {
+    // Pattern is already built with appropriate regex wrapping
+    // Only add case-insensitive wrapper if not already a regex pattern
+    let query_str = if case_insensitive && !pattern.starts_with("re:/") && !word_regexp {
         format!("re:/(?i){}/", regex::escape(pattern))
     } else {
         pattern.to_string()
@@ -385,10 +476,14 @@ fn do_direct_content_search(
     let executor = QueryExecutor::new(&reader);
     let matches = executor.execute_with_content(&parsed, context_before, context_after)?;
 
-    // Convert to protocol type and apply limit
-    let result: Vec<server::protocol::ContentMatch> = matches
-        .into_iter()
-        .take(limit)
+    // Convert to protocol type and apply limit (0 = unlimited)
+    let iter = matches.into_iter();
+    let limited: Box<dyn Iterator<Item = _>> = if limit == 0 {
+        Box::new(iter)
+    } else {
+        Box::new(iter.take(limit))
+    };
+    let result: Vec<server::protocol::ContentMatch> = limited
         .map(|m| server::protocol::ContentMatch {
             path: m.path,
             line_number: m.line_number,

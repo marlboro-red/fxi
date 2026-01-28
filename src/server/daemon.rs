@@ -28,6 +28,10 @@ const CACHE_SIZE: usize = 128;
 /// Connection timeout
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Maximum results to return to avoid exceeding message size limits
+/// This caps unbounded (limit=0) requests to prevent >100MB responses
+const MAX_RESULTS_CAP: usize = 50_000;
+
 /// Cached index with its query cache
 struct CachedIndex {
     reader: Arc<IndexReader>,
@@ -373,7 +377,8 @@ impl IndexServer {
         cached.touch();
 
         // Build query - handle case insensitivity by wrapping pattern
-        let query_str = if options.case_insensitive {
+        // Skip wrapping if pattern is already a regex (starts with "re:/")
+        let query_str = if options.case_insensitive && !pattern.starts_with("re:/") {
             // Use regex for case-insensitive search
             format!("re:/(?i){}/", regex::escape(&pattern))
         } else {
@@ -411,9 +416,10 @@ impl IndexServer {
         }
 
         // Convert to protocol type and apply limit
-        let match_data: Vec<ContentMatch> = matches
-            .into_iter()
-            .take(limit)
+        // Cap unlimited requests to prevent exceeding message size limits
+        let effective_limit = if limit == 0 { MAX_RESULTS_CAP } else { limit.min(MAX_RESULTS_CAP) };
+        let iter = matches.into_iter().take(effective_limit);
+        let match_data: Vec<ContentMatch> = iter
             .map(|m| ContentMatch {
                 path: m.path,
                 line_number: m.line_number,

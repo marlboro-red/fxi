@@ -173,8 +173,12 @@ fn print_match_line(
 }
 
 /// Print only filenames (for -l flag)
-pub fn print_files_only(matches: &[ContentMatch]) -> io::Result<()> {
-    let choice = ColorChoice::Auto;
+pub fn print_files_only(matches: &[ContentMatch], color: bool) -> io::Result<()> {
+    let choice = if color {
+        ColorChoice::Auto
+    } else {
+        ColorChoice::Never
+    };
     let mut stdout = StandardStream::stdout(choice);
 
     let mut seen_files = std::collections::HashSet::new();
@@ -191,8 +195,12 @@ pub fn print_files_only(matches: &[ContentMatch]) -> io::Result<()> {
 }
 
 /// Print match count per file (for -c flag)
-pub fn print_match_counts(matches: &[ContentMatch]) -> io::Result<()> {
-    let choice = ColorChoice::Auto;
+pub fn print_match_counts(matches: &[ContentMatch], color: bool) -> io::Result<()> {
+    let choice = if color {
+        ColorChoice::Auto
+    } else {
+        ColorChoice::Never
+    };
     let mut stdout = StandardStream::stdout(choice);
 
     let mut counts: std::collections::HashMap<&std::path::Path, usize> =
