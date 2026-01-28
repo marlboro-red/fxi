@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -72,6 +72,9 @@ fn draw_main_area(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
+    // Clear the area first to prevent artifacts
+    f.render_widget(Clear, area);
+
     let items: Vec<ListItem> = app
         .results
         .iter()
@@ -152,6 +155,9 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
+    // Clear the preview area first to prevent artifacts from previous content
+    f.render_widget(Clear, area);
+
     let title = if let Some(result) = app.get_selected_result() {
         format!(" {} ", result.path.display())
     } else {
@@ -230,8 +236,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let preview = Paragraph::new(content)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(Wrap { trim: false });
+        .block(Block::default().borders(Borders::ALL).title(title));
 
     f.render_widget(preview, area);
 }
