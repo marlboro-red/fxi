@@ -159,6 +159,9 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
     // Clear the preview area first to prevent artifacts from previous content
     f.render_widget(Clear, area);
 
+    // Calculate inner height (accounting for borders)
+    let inner_height = area.height.saturating_sub(2) as usize;
+
     let title = if let Some(result) = app.get_selected_result() {
         format!(" {} ", result.path.display())
     } else {
@@ -175,11 +178,11 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         // Use cached highlighted content (computed in update_preview, cached per file)
         let highlighted_lines = app.get_highlighted();
 
-        let lines: Vec<Line> = preview
+        let mut lines: Vec<Line> = preview
             .lines()
             .enumerate()
             .skip(app.preview_scroll)
-            .take(area.height.saturating_sub(2) as usize)
+            .take(inner_height)
             .map(|(line_num, plain_line)| {
                 let actual_line = line_num + 1;
                 let is_match = actual_line == match_line;
@@ -230,6 +233,12 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
                 Line::from(spans)
             })
             .collect();
+
+        // Pad with empty lines to fill the entire visible area
+        // This ensures old content is fully overwritten when switching to shorter files
+        while lines.len() < inner_height {
+            lines.push(Line::from(""));
+        }
 
         Text::from(lines)
     } else {
