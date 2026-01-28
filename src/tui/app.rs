@@ -453,30 +453,6 @@ impl App {
             .map(|(lines, offset)| (lines, *offset))
     }
 
-    /// Re-highlight if viewport has scrolled outside the cached range
-    pub fn ensure_highlight_coverage(&mut self, viewport_height: usize) {
-        if let (Some(content), Some(path)) = (&self.preview_content, &self.preview_path) {
-            let path = path.clone();
-            if let Some((cached_lines, cached_offset)) = self.highlight_cache.get(&path) {
-                let cached_end: usize = *cached_offset + cached_lines.len();
-                let viewport_end = self.preview_scroll + viewport_height;
-
-                // Re-highlight if viewport is outside cached range (with some margin)
-                if self.preview_scroll < cached_offset.saturating_sub(10)
-                    || viewport_end > cached_end + 10
-                {
-                    let (highlighted, offset) = self.highlighter.highlight_viewport(
-                        content,
-                        &path,
-                        self.preview_scroll,
-                        viewport_height,
-                    );
-                    self.highlight_cache.insert(path, (highlighted, offset));
-                }
-            }
-        }
-    }
-
     pub fn scroll_preview_down(&mut self) {
         self.preview_scroll += 1;
     }

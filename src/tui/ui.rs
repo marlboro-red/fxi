@@ -85,7 +85,6 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
         .enumerate()
         .map(|(idx, result)| {
             let is_selected = idx == app.selected;
-            // Apply selection background to individual spans to prevent overflow onto preview panel
             let selection_bg = if is_selected {
                 Some(Color::DarkGray)
             } else {
@@ -94,26 +93,10 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
             let path_style = Style::default().fg(Color::Blue);
             let line_style = Style::default().fg(Color::Yellow);
 
-            // Format: path:line  content
+            // Format: path:line
             let path_str = truncate_path(&result.path.to_string_lossy());
             let line_num = result.line_number;
 
-            // Trim leading whitespace and track offset adjustment
-            let trimmed = result.line_content.trim_start();
-            let trim_offset = result.line_content.len() - trimmed.len();
-            let trimmed = trimmed.trim_end();
-
-            // Truncate content if needed (using floor_char_boundary for UTF-8 safety)
-            let max_content_len = area.width.saturating_sub(path_str.len() as u16 + 10) as usize;
-            let (content, truncated) = if trimmed.len() > max_content_len {
-                let truncate_at = trimmed.floor_char_boundary(max_content_len.saturating_sub(3));
-                (format!("{}...", &trimmed[..truncate_at]), true)
-            } else {
-                (trimmed.to_string(), false)
-            };
-
-            // Build line with highlighted match
-            // Apply selection background to each span to prevent overflow
             let apply_bg = |style: Style| -> Style {
                 if let Some(bg) = selection_bg {
                     style.bg(bg)
@@ -122,49 +105,21 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
                 }
             };
 
-            // Calculate prefix length for padding calculation
-            let prefix = format!("{}:{}  ", path_str, line_num);
-            let prefix_len = prefix.len();
+            let display_str = format!("{}:{}", path_str, line_num);
+            let display_len = display_str.len();
 
             let mut spans = vec![
                 Span::styled(format!("{}:", path_str), apply_bg(path_style)),
                 Span::styled(format!("{}", line_num), apply_bg(line_style)),
-                Span::styled("  ", apply_bg(Style::default())),
             ];
 
-            // Adjust match positions for trimming
-            let adj_start = result.match_start.saturating_sub(trim_offset);
-            let adj_end = result.match_end.saturating_sub(trim_offset);
-
-            // Only highlight if match is within the displayed content
-            let content_spans = if adj_start < content.len() && adj_end > adj_start {
-                let end = adj_end.min(content.len());
-                // Account for "..." if truncated and match extends past it
-                let effective_end = if truncated && end > max_content_len.saturating_sub(3) {
-                    max_content_len.saturating_sub(3)
-                } else {
-                    end
-                };
-                highlight_match(&content, adj_start, effective_end, selection_bg)
-            } else {
-                vec![Span::styled(
-                    content.clone(),
-                    apply_bg(Style::default().fg(Color::White)),
-                )]
-            };
-
-            spans.extend(content_spans);
-
             // Pad the line to fill the full inner width so selection background extends to edge
-            let current_len = prefix_len + content.len();
-            if current_len < inner_width {
-                let padding = " ".repeat(inner_width - current_len);
+            if display_len < inner_width {
+                let padding = " ".repeat(inner_width - display_len);
                 spans.push(Span::styled(padding, apply_bg(Style::default())));
             }
 
-            let line = Line::from(spans);
-
-            ListItem::new(line)
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -527,44 +482,3 @@ fn truncate_path(path_str: &str) -> String {
     }
 }
 
-/// Highlight matches in text, returning owned spans
-/// selection_bg is applied to non-match portions when the item is selected
-fn highlight_match(
-    text: &str,
-    start: usize,
-    end: usize,
-    selection_bg: Option<Color>,
-) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-
-    // Clamp positions to valid char boundaries for UTF-8 safety
-    let start = text.floor_char_boundary(start.min(text.len()));
-    let end = text.floor_char_boundary(end.min(text.len())).max(start);
-
-    // Base style for non-match text, with optional selection background
-    let base_style = if let Some(bg) = selection_bg {
-        Style::default().fg(Color::White).bg(bg)
-    } else {
-        Style::default().fg(Color::White)
-    };
-
-    if start > 0 {
-        spans.push(Span::styled(text[..start].to_string(), base_style));
-    }
-
-    if end > start {
-        spans.push(Span::styled(
-            text[start..end].to_string(),
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-
-    if end < text.len() {
-        spans.push(Span::styled(text[end..].to_string(), base_style));
-    }
-
-    spans
-}

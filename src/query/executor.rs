@@ -459,14 +459,11 @@ impl<'a> QueryExecutor<'a> {
             let score = self.scorer.calculate_score(&score_ctx);
 
             // Create matches with calculated score
-            for (line_num, line_content, start, end) in file_matches {
+            for (line_num, _line_content, _start, _end) in file_matches {
                 matches.push(SearchMatch {
                     doc_id,
                     path: path.clone(),
                     line_number: line_num,
-                    line_content,
-                    match_start: start,
-                    match_end: end,
                     score,
                 });
             }

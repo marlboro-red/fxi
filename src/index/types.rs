@@ -215,9 +215,6 @@ pub struct SearchMatch {
     pub doc_id: DocId,
     pub path: PathBuf,
     pub line_number: u32,
-    pub line_content: String,
-    pub match_start: usize,
-    pub match_end: usize,
     pub score: f32,
 }
 
