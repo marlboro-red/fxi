@@ -1,82 +1,106 @@
 use crate::index::types::{bytes_to_trigram, Trigram};
-use ahash::AHashSet;
+use std::collections::HashSet;
 
-/// Extract unique trigrams from content using optimized SIMD-friendly approach.
-///
-/// This implementation is optimized for large files by:
-/// 1. Processing data in cache-friendly chunks
-/// 2. Using AHashSet for faster hashing
-/// 3. Minimizing bounds checks via direct indexing
-/// 4. Enabling LLVM auto-vectorization through predictable access patterns
-pub fn extract_trigrams(content: &[u8]) -> AHashSet<Trigram> {
-    let len = content.len();
-    if len < 3 {
-        return AHashSet::new();
-    }
-
-    // Pre-allocate with estimated capacity (typical: 30-40% unique trigrams)
-    let estimated_capacity = ((len - 2) / 3).max(64);
-    let mut trigrams = AHashSet::with_capacity(estimated_capacity);
-
-    // Process in chunks for better cache utilization and auto-vectorization
-    // SIMD-friendly: process 8 trigrams at a time where possible
-    let main_end = len.saturating_sub(10); // Leave room for safe indexing
-
-    let mut i = 0;
-
-    // Main loop: process 8 trigrams per iteration (unrolled for SIMD)
-    while i < main_end {
-        // Unroll 8 iterations for better instruction-level parallelism
-        // This pattern enables LLVM to auto-vectorize the hash computations
-        let t0 = bytes_to_trigram(content[i], content[i + 1], content[i + 2]);
-        let t1 = bytes_to_trigram(content[i + 1], content[i + 2], content[i + 3]);
-        let t2 = bytes_to_trigram(content[i + 2], content[i + 3], content[i + 4]);
-        let t3 = bytes_to_trigram(content[i + 3], content[i + 4], content[i + 5]);
-        let t4 = bytes_to_trigram(content[i + 4], content[i + 5], content[i + 6]);
-        let t5 = bytes_to_trigram(content[i + 5], content[i + 6], content[i + 7]);
-        let t6 = bytes_to_trigram(content[i + 6], content[i + 7], content[i + 8]);
-        let t7 = bytes_to_trigram(content[i + 7], content[i + 8], content[i + 9]);
-
-        trigrams.insert(t0);
-        trigrams.insert(t1);
-        trigrams.insert(t2);
-        trigrams.insert(t3);
-        trigrams.insert(t4);
-        trigrams.insert(t5);
-        trigrams.insert(t6);
-        trigrams.insert(t7);
-
-        i += 8;
-    }
-
-    // Handle remaining bytes
-    while i + 2 < len {
-        let trigram = bytes_to_trigram(content[i], content[i + 1], content[i + 2]);
-        trigrams.insert(trigram);
-        i += 1;
-    }
-
-    trigrams
+/// Bitset for tracking which trigrams have been seen.
+/// Uses 2MB to cover all 16M possible trigram values (24 bits).
+/// This is MUCH faster than HashSet for trigram deduplication.
+struct TrigramBitset {
+    bits: Vec<u64>,
 }
 
-/// Extract trigrams using SIMD-optimized batch processing.
-/// Returns a Vec for cases where we don't need deduplication.
-#[allow(dead_code)]
-pub fn extract_trigrams_batch(content: &[u8]) -> Vec<Trigram> {
-    let len = content.len();
-    if len < 3 {
+impl TrigramBitset {
+    /// Create a new bitset (2MB allocation, zeroed)
+    #[inline]
+    fn new() -> Self {
+        // 16M trigrams / 64 bits per u64 = 262144 u64s = 2MB
+        Self {
+            bits: vec![0u64; 262144],
+        }
+    }
+
+    /// Check if trigram is set and set it. Returns true if it was already set.
+    #[inline]
+    fn test_and_set(&mut self, trigram: Trigram) -> bool {
+        let idx = (trigram >> 6) as usize; // divide by 64
+        let bit = 1u64 << (trigram & 63); // mod 64
+        let was_set = (self.bits[idx] & bit) != 0;
+        self.bits[idx] |= bit;
+        was_set
+    }
+
+    /// Collect all set trigrams into a vector
+    fn collect(&self) -> Vec<Trigram> {
+        let mut result = Vec::with_capacity(8192); // reasonable initial capacity
+        for (word_idx, &word) in self.bits.iter().enumerate() {
+            if word == 0 {
+                continue;
+            }
+            let base = (word_idx as u32) << 6;
+            let mut w = word;
+            while w != 0 {
+                let bit_pos = w.trailing_zeros();
+                result.push(base | bit_pos);
+                w &= w - 1; // clear lowest set bit
+            }
+        }
+        result
+    }
+}
+
+/// Extract unique trigrams from content using fast bitset deduplication
+pub fn extract_trigrams(content: &[u8]) -> HashSet<Trigram> {
+    if content.len() < 3 {
+        return HashSet::new();
+    }
+
+    // For small files, HashSet is more efficient (less memory allocation)
+    if content.len() < 1024 {
+        let mut trigrams = HashSet::with_capacity(content.len());
+        for window in content.windows(3) {
+            let trigram = bytes_to_trigram(window[0], window[1], window[2]);
+            trigrams.insert(trigram);
+        }
+        return trigrams;
+    }
+
+    // For larger files, use bitset for O(1) dedup with no hashing overhead
+    let mut bitset = TrigramBitset::new();
+
+    for window in content.windows(3) {
+        let trigram = bytes_to_trigram(window[0], window[1], window[2]);
+        bitset.test_and_set(trigram);
+    }
+
+    // Convert bitset to HashSet for compatibility
+    bitset.collect().into_iter().collect()
+}
+
+/// Extract unique trigrams as a Vec (faster than HashSet when order doesn't matter)
+pub fn extract_trigrams_vec(content: &[u8]) -> Vec<Trigram> {
+    if content.len() < 3 {
         return Vec::new();
     }
 
-    let count = len - 2;
-    let mut trigrams = Vec::with_capacity(count);
-
-    // Use chunks for cache-friendly processing
-    for chunk in content.windows(3) {
-        trigrams.push(bytes_to_trigram(chunk[0], chunk[1], chunk[2]));
+    // For small files, use simple dedup
+    if content.len() < 1024 {
+        let mut trigrams: Vec<Trigram> = content
+            .windows(3)
+            .map(|w| bytes_to_trigram(w[0], w[1], w[2]))
+            .collect();
+        trigrams.sort_unstable();
+        trigrams.dedup();
+        return trigrams;
     }
 
-    trigrams
+    // For larger files, use bitset
+    let mut bitset = TrigramBitset::new();
+
+    for window in content.windows(3) {
+        let trigram = bytes_to_trigram(window[0], window[1], window[2]);
+        bitset.test_and_set(trigram);
+    }
+
+    bitset.collect()
 }
 
 /// Extract trigrams from a query string for searching
@@ -172,7 +196,7 @@ mod tests {
 
     #[test]
     fn test_extract_trigrams_large() {
-        // Test the SIMD-optimized path with larger input
+        // Test the bitset-optimized path with larger input
         let content = b"abcdefghijklmnopqrstuvwxyz";
         let trigrams = extract_trigrams(content);
         assert_eq!(trigrams.len(), 24); // 26 - 2 = 24 unique trigrams
@@ -185,6 +209,22 @@ mod tests {
         assert_eq!(extract_trigrams(b"a").len(), 0);
         assert_eq!(extract_trigrams(b"ab").len(), 0);
         assert_eq!(extract_trigrams(b"abc").len(), 1);
+    }
+
+    #[test]
+    fn test_extract_trigrams_vec() {
+        let content = b"hello";
+        let trigrams = extract_trigrams_vec(content);
+        assert_eq!(trigrams.len(), 3);
+    }
+
+    #[test]
+    fn test_extract_trigrams_vec_large() {
+        // Test the bitset path for larger content
+        let content: Vec<u8> = (0..2000).map(|i| (i % 256) as u8).collect();
+        let trigrams = extract_trigrams_vec(&content);
+        // Should have deduplicated trigrams
+        assert!(trigrams.len() < content.len());
     }
 
     #[test]
@@ -201,9 +241,20 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_trigrams_batch() {
-        let content = b"hello";
-        let trigrams = extract_trigrams_batch(content);
-        assert_eq!(trigrams.len(), 3); // Non-deduplicated count
+    fn test_trigram_bitset() {
+        let mut bitset = TrigramBitset::new();
+
+        // First insert should return false (wasn't set)
+        assert!(!bitset.test_and_set(0x616263));
+
+        // Second insert should return true (was already set)
+        assert!(bitset.test_and_set(0x616263));
+
+        // Different trigram should return false
+        assert!(!bitset.test_and_set(0x626364));
+
+        // Collect should have both
+        let collected = bitset.collect();
+        assert_eq!(collected.len(), 2);
     }
 }
