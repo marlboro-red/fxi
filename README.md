@@ -341,6 +341,33 @@ Press `F1` or `?` to show help in the TUI.
 
 All benchmarks run on Apple M2 Max.
 
+### Searching
+
+Times are averages of 3 runs. File counts shown for validation.
+
+#### Linux Kenal
+
+| Pattern | fxi (ms) | rg (ms) | grep (ms) | fxi files | rg files | Speedup vs rg |
+|---------|----------|---------|-----------|-----------|----------|---------------|
+| `NULL` | 443 | 2623 | 7483 | 27713 | 27780 | **5.9x** |
+| `struct` | 2450 | 2750 | 5013 | 56713 | 56517 | **1.1x** |
+| `return` | 2233 | 2743 | 6443 | 46440 | 45918 | **1.2x** |
+| `"static void"` | 460 | 2660 | 7180 | 24036 | 24089 | **5.7x** |
+| `"unsigned long"` | 403 | 2650 | 9593 | 20535 | 20573 | **6.5x** |
+| `"struct device"` | 2210 | 2140 | 12010 | 13119 | 13129 | **.9x** |
+| `-i error` | 2503 | 2353 | 13610 | 22898 | 22952 | **.9x** |
+| `-i warning` | 2083 | 2056 | 23453 | 4110 | 4113 | **.9x** |
+
+#### Chromium
+
+| Pattern | fxi (ms) | rg (ms) | grep (ms) | fxi files | rg files | Speedup vs rg |
+|---------|----------|---------|-----------|-----------|----------|---------------|
+| `"class Browser"` | 63 | 8700 | 95473 | 2795 | 2795 | **138.0x** |
+| `"void OnError"` | 16 | 8756 | 90623 | 457 | 457 | **547.2x** |
+| `"namespace content"` | 7400 | 9023 | 96140 | 9017 | 9017 | **1.2x** |
+| `"std::string"` | 1123 | 9346 | 78576 | 48085 | 48089 | **8.3x** |
+| `"std::unique_ptr"` | 1160 | 8946 | 82506 | 42791 | 42791 | **7.7x** |
+
 ### Indexing Performance
 
 #### Linux Kernel

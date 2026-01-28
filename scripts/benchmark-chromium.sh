@@ -1,6 +1,6 @@
 #!/bin/bash
-# Benchmark script for fxi vs ripgrep vs grep
-# Run from the root of a codebase (e.g., Linux kernel)
+# Benchmark script for fxi vs ripgrep vs grep on Chromium
+# Run from the root of the Chromium codebase
 # Outputs results to benchmark_results.md
 
 set -e
@@ -14,7 +14,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${GREEN}=== fxi Benchmark Suite ===${NC}"
+echo -e "${GREEN}=== fxi Benchmark Suite (Chromium) ===${NC}"
 echo ""
 
 # Check dependencies
@@ -46,14 +46,16 @@ sleep 2
 # Warm up the index with all test patterns
 echo -e "${GREEN}Warming up fxi index...${NC}"
 fxi "test" -l --color=never >/dev/null 2>&1 || true
-fxi "NULL" -l --color=never >/dev/null 2>&1 || true
-fxi "struct" -l --color=never >/dev/null 2>&1 || true
-fxi "return" -l --color=never >/dev/null 2>&1 || true
-fxi '"static void"' -l --color=never >/dev/null 2>&1 || true
-fxi '"unsigned long"' -l --color=never >/dev/null 2>&1 || true
-fxi '"struct device"' -l --color=never >/dev/null 2>&1 || true
+fxi '"class Browser"' -l --color=never >/dev/null 2>&1 || true
+fxi '"void OnError"' -l --color=never >/dev/null 2>&1 || true
+fxi '"namespace content"' -l --color=never >/dev/null 2>&1 || true
+fxi '"std::string"' -l --color=never >/dev/null 2>&1 || true
+fxi '"virtual void"' -l --color=never >/dev/null 2>&1 || true
+fxi '"DCHECK("' -l --color=never >/dev/null 2>&1 || true
+fxi "nullptr" -l --color=never >/dev/null 2>&1 || true
+fxi "override" -l --color=never >/dev/null 2>&1 || true
 fxi -i "error" -l --color=never >/dev/null 2>&1 || true
-fxi -i "warning" -l --color=never >/dev/null 2>&1 || true
+fxi -i "TODO" -l --color=never >/dev/null 2>&1 || true
 echo "Warmup complete."
 
 # Function to run benchmark and capture time
@@ -77,23 +79,32 @@ run_benchmark() {
     echo "$avg_time $count"
 }
 
-# Define test patterns
+# Define test patterns - Chromium-specific (C++ codebase)
 declare -a PATTERNS=(
-    "simple:NULL"
-    "simple:struct"
-    "simple:return"
-    "phrase:static void"
-    "phrase:unsigned long"
-    "phrase:struct device"
+    # Rare/specific phrases - should show biggest speedup
+    "phrase:class Browser"
+    "phrase:void OnError"
+    "phrase:namespace content"
+    # Common C++ patterns
+    "phrase:std::string"
+    "phrase:std::unique_ptr"
+    "phrase:virtual void"
+    # Chromium-specific
+    "phrase:DCHECK("
+    "phrase:base::Bind"
+    # Common tokens
+    "simple:nullptr"
+    "simple:override"
+    # Case insensitive
+    "case:-i TODO"
     "case:-i error"
-    "case:-i warning"
 )
 
 # Start markdown output
 cat > "$OUTPUT" << 'HEADER'
-# fxi Benchmark Results
+# fxi Benchmark Results (Chromium)
 
-Automated benchmark comparing fxi, ripgrep, and grep.
+Automated benchmark comparing fxi, ripgrep, and grep on Chromium codebase.
 
 ## Environment
 
@@ -167,7 +178,7 @@ for pattern_spec in "${PATTERNS[@]}"; do
     rg_count=$(echo "$rg_result" | awk '{print $2}')
     rg_ms=$(echo "scale=0; $rg_time * 1000 / 1" | bc)
 
-    # Run grep benchmark (single run for slow searches)
+    # Run grep benchmark
     echo -n "  grep..."
     grep_result=$(run_benchmark "grep" "$grep_cmd")
     grep_time=$(echo "$grep_result" | awk '{print $1}')
@@ -194,12 +205,12 @@ for pattern_spec in "${PATTERNS[@]}"; do
 done
 
 # Add notes section
-cat >> "$OUTPUT" << NOTES
+cat >> "$OUTPUT" << 'NOTES'
 
 ## Notes
 
 - **fxi (warm)**: Using daemon with pre-loaded index
-- **ripgrep**: Using \`--no-ignore\` to search all files (matching fxi's indexed files)
+- **ripgrep**: Using `--no-ignore` to search all files (matching fxi's indexed files)
 - **grep**: Standard recursive grep
 - All results are unlimited (full search)
 - Times include I/O for writing results
@@ -210,9 +221,9 @@ cat >> "$OUTPUT" << NOTES
 Each benchmark was run 3 times and averaged.
 
 Commands used:
-- fxi: \`fxi [pattern] -l --color=never\`
-- ripgrep: \`rg -l [pattern] --no-ignore --color=never .\`
-- grep: \`grep -rl [pattern] .\`
+- fxi: `fxi [pattern] -l --color=never`
+- ripgrep: `rg -l [pattern] --no-ignore --color=never .`
+- grep: `grep -rl [pattern] .`
 NOTES
 
 echo -e "${GREEN}Benchmark complete!${NC}"

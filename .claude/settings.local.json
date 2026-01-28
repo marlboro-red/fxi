@@ -78,7 +78,10 @@
       "Bash(/Users/cjpark/Desktop/Projects/fxi/target/release/fxi:*)",
       "Bash(python3 -c \"\nimport struct\n\n# NULL trigrams: ''NUL'' and ''ULL''\ntrigrams = [''NUL'', ''ULL'']\nfor t in trigrams:\n    val = \\(ord\\(t[0]\\) << 16\\) | \\(ord\\(t[1]\\) << 8\\) | ord\\(t[2]\\)\n    print\\(f''{t}: {val}''\\)\")",
       "Bash(python3:*)",
-      "Bash(cargo install:*)"
+      "Bash(cargo install:*)",
+      "Bash(fxi daemon:*)",
+      "Bash(time fxi:*)",
+      "Bash(fxi:*)"
     ]
   }
 }
