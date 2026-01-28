@@ -237,11 +237,33 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    // Pad the status message to fill the entire width to prevent artifacts
-    let padded_message = format!("{:<width$}", app.status_message, width = area.width as usize);
-    let status = Paragraph::new(padded_message)
-        .style(Style::default().fg(Color::Cyan).bg(Color::Reset));
+    // Show loading animation if index is loading in background
+    let status_text = if app.is_loading() {
+        // Simple animated dots for loading indicator
+        let dots = match (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() / 300) % 4 {
+            0 => "",
+            1 => ".",
+            2 => "..",
+            _ => "...",
+        };
+        format!("Loading index{}", dots)
+    } else {
+        app.status_message.clone()
+    };
 
+    // Pad the status message to fill the entire width to prevent artifacts
+    let padded_message = format!("{:<width$}", status_text, width = area.width as usize);
+
+    let style = if app.is_loading() {
+        Style::default().fg(Color::Yellow).bg(Color::Reset)
+    } else {
+        Style::default().fg(Color::Cyan).bg(Color::Reset)
+    };
+
+    let status = Paragraph::new(padded_message).style(style);
     f.render_widget(status, area);
 }
 
