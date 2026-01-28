@@ -1,7 +1,7 @@
 use crate::index::build::ProcessedFile;
 use crate::index::types::*;
 #[allow(unused_imports)]
-use crate::utils::{delta_encode, extract_tokens, extract_trigrams, get_index_dir, is_binary, is_minified};
+use crate::utils::{delta_encode, extract_tokens, extract_trigrams, get_index_dir, is_binary, is_minified, BloomFilter};
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
@@ -76,6 +76,10 @@ impl ChunkedIndexWriter {
         let mut token_postings: BTreeMap<String, Vec<DocId>> = BTreeMap::new();
         let mut line_maps: HashMap<DocId, Vec<u32>> = HashMap::with_capacity(file_count);
 
+        // Create bloom filter for this segment for fast pre-filtering
+        let estimated_trigrams = processed_files.len() * 500;
+        let mut bloom_filter = BloomFilter::new(estimated_trigrams.max(10000), 0.01);
+
         // Process each file
         for processed in processed_files {
             let doc_id = self.next_doc_id;
@@ -95,10 +99,11 @@ impl ChunkedIndexWriter {
             };
             self.all_documents.push(doc);
 
-            // Add trigrams to segment postings and track global frequencies
+            // Add trigrams to segment postings, bloom filter, and track global frequencies
             for trigram in processed.trigrams {
                 trigram_postings.entry(trigram).or_default().push(doc_id);
                 *self.trigram_frequencies.entry(trigram).or_insert(0) += 1;
+                bloom_filter.insert(trigram);
             }
 
             // Add tokens to segment postings
@@ -123,6 +128,9 @@ impl ChunkedIndexWriter {
 
         // Write line maps
         self.write_line_maps(&segment_path, &line_maps)?;
+
+        // Write bloom filter for fast pre-filtering
+        Self::write_bloom_filter(&segment_path, &bloom_filter)?;
 
         Ok(())
     }
@@ -233,6 +241,27 @@ impl ChunkedIndexWriter {
             delta_encode(offsets, &mut encoded);
             file.write_all(&(encoded.len() as u32).to_le_bytes())?;
             file.write_all(&encoded)?;
+        }
+
+        file.flush()?;
+        Ok(())
+    }
+
+    /// Write bloom filter to segment for fast pre-filtering
+    fn write_bloom_filter(segment_path: &Path, bloom_filter: &BloomFilter) -> Result<()> {
+        let bloom_path = segment_path.join("bloom.bin");
+        let mut file = BufWriter::with_capacity(65536, File::create(&bloom_path)?);
+
+        // Write num_hashes (u8)
+        file.write_all(&[bloom_filter.num_hashes()])?;
+
+        // Write number of u64 words
+        let bits = bloom_filter.bits();
+        file.write_all(&(bits.len() as u32).to_le_bytes())?;
+
+        // Write bit data
+        for &word in bits {
+            file.write_all(&word.to_le_bytes())?;
         }
 
         file.flush()?;
@@ -351,7 +380,6 @@ impl ChunkedIndexWriter {
     pub fn index_path(&self) -> &Path {
         &self.index_path
     }
-
 }
 
 /// Index writer for building and updating the search index (used for incremental updates)

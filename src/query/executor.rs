@@ -61,27 +61,17 @@ impl<'a> QueryExecutor<'a> {
         for step in &plan.steps {
             match step {
                 PlanStep::TrigramIntersect(trigrams) => {
-                    // Filter out stop-grams and get (trigram, doc_freq) pairs
-                    let mut trigram_freqs: Vec<_> = trigrams
+                    // Filter out stop-grams
+                    let filtered_trigrams: Vec<_> = trigrams
                         .iter()
                         .filter(|&&t| !self.reader.is_stop_gram(t))
-                        .map(|&t| (t, self.reader.get_trigram_doc_freq(t)))
+                        .copied()
                         .collect();
 
-                    // Sort by ascending frequency for optimal intersection order
-                    trigram_freqs.sort_by_key(|&(_, freq)| freq);
-
-                    if let Some(&(first_trigram, _)) = trigram_freqs.first() {
-                        // Start with smallest posting list
-                        let mut result = self.reader.get_trigram_docs(first_trigram);
-
-                        // Intersect with remaining trigrams (already sorted by frequency)
-                        for &(trigram, _) in trigram_freqs.iter().skip(1) {
-                            if result.is_empty() {
-                                break; // Early termination
-                            }
-                            result &= self.reader.get_trigram_docs(trigram);
-                        }
+                    if !filtered_trigrams.is_empty() {
+                        // Use bloom filter optimized path for multi-trigram queries
+                        // This skips segments that definitely don't contain all trigrams
+                        let result = self.reader.get_trigram_docs_with_bloom(&filtered_trigrams);
 
                         candidates = Some(match candidates {
                             Some(existing) => existing & result,
@@ -278,12 +268,44 @@ impl<'a> QueryExecutor<'a> {
             })
             .collect();
 
-        // Process files in parallel using Rayon
-        let all_matches: Vec<(DocId, PathBuf, u64, Vec<(u32, String, usize, usize)>)> =
+        // Process files - use cache for small result sets, parallel for large
+        let candidate_count = candidate_infos.len();
+        let use_cache = candidate_count <= 16; // Use cache for small result sets
+
+        let all_matches: Vec<(DocId, PathBuf, u64, Vec<(u32, String, usize, usize)>)> = if use_cache {
+            // Small result set: use cached reads (sequential to leverage cache)
+            candidate_infos
+                .into_iter()
+                .filter_map(|(doc_id, full_path, rel_path, mtime)| {
+                    // Use cached file reading
+                    let content = self.reader.read_file_cached(&full_path)?;
+
+                    // Find matches
+                    let mut file_matches =
+                        Self::verify_content_static(&content, verification, doc_id);
+
+                    // Apply line filter if specified
+                    if line_start.is_some() || line_end.is_some() {
+                        file_matches.retain(|(line_num, _, _, _)| {
+                            let above_min = line_start.map(|min| *line_num >= min).unwrap_or(true);
+                            let below_max = line_end.map(|max| *line_num <= max).unwrap_or(true);
+                            above_min && below_max
+                        });
+                    }
+
+                    if file_matches.is_empty() {
+                        None
+                    } else {
+                        Some((doc_id, rel_path, mtime, file_matches))
+                    }
+                })
+                .collect()
+        } else {
+            // Large result set: use parallel uncached reads
             candidate_infos
                 .into_par_iter()
                 .filter_map(|(doc_id, full_path, rel_path, mtime)| {
-                    // Read file content
+                    // Read file content (no cache to avoid lock contention)
                     let content = fs::read_to_string(&full_path).ok()?;
 
                     // Find matches
@@ -305,7 +327,8 @@ impl<'a> QueryExecutor<'a> {
                         Some((doc_id, rel_path, mtime, file_matches))
                     }
                 })
-                .collect();
+                .collect()
+        };
 
         // Build final results with scoring
         let mut matches = Vec::new();

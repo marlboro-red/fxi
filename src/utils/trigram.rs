@@ -195,6 +195,39 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_trigrams_large() {
+        // Test the bitset-optimized path with larger input
+        let content = b"abcdefghijklmnopqrstuvwxyz";
+        let trigrams = extract_trigrams(content);
+        assert_eq!(trigrams.len(), 24); // 26 - 2 = 24 unique trigrams
+    }
+
+    #[test]
+    fn test_extract_trigrams_small() {
+        // Edge cases
+        assert_eq!(extract_trigrams(b"").len(), 0);
+        assert_eq!(extract_trigrams(b"a").len(), 0);
+        assert_eq!(extract_trigrams(b"ab").len(), 0);
+        assert_eq!(extract_trigrams(b"abc").len(), 1);
+    }
+
+    #[test]
+    fn test_extract_trigrams_vec() {
+        let content = b"hello";
+        let trigrams = extract_trigrams_vec(content);
+        assert_eq!(trigrams.len(), 3);
+    }
+
+    #[test]
+    fn test_extract_trigrams_vec_large() {
+        // Test the bitset path for larger content
+        let content: Vec<u8> = (0..2000).map(|i| (i % 256) as u8).collect();
+        let trigrams = extract_trigrams_vec(&content);
+        // Should have deduplicated trigrams
+        assert!(trigrams.len() < content.len());
+    }
+
+    #[test]
     fn test_query_trigrams() {
         let query = "hello";
         let trigrams = query_trigrams(query);
@@ -205,5 +238,23 @@ mod tests {
     fn test_is_binary() {
         assert!(!is_binary(b"hello world\n"));
         assert!(is_binary(b"\x00\x00\x00\x00\x00\x00\x00\x00"));
+    }
+
+    #[test]
+    fn test_trigram_bitset() {
+        let mut bitset = TrigramBitset::new();
+
+        // First insert should return false (wasn't set)
+        assert!(!bitset.test_and_set(0x616263));
+
+        // Second insert should return true (was already set)
+        assert!(bitset.test_and_set(0x616263));
+
+        // Different trigram should return false
+        assert!(!bitset.test_and_set(0x626364));
+
+        // Collect should have both
+        let collected = bitset.collect();
+        assert_eq!(collected.len(), 2);
     }
 }

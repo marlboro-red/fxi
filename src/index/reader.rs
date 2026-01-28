@@ -1,14 +1,17 @@
 use crate::index::types::*;
-use crate::utils::{delta_decode, get_index_dir};
+use crate::utils::{delta_decode, get_index_dir, BloomFilter};
+use ahash::AHashSet;
 use anyhow::{Context, Result};
+use lru::LruCache;
 use memmap2::Mmap;
 use rayon::prelude::*;
 use roaring::RoaringBitmap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 /// Trigram dictionary entry
 struct TrigramDictEntry {
@@ -68,6 +71,8 @@ struct SegmentReader {
     line_maps: OnceLock<HashMap<DocId, Vec<u32>>>,
     /// Path to segment directory for lazy loading
     segment_path: PathBuf,
+    /// Bloom filter for fast trigram pre-filtering (optional for backwards compat)
+    bloom_filter: Option<BloomFilter>,
 }
 
 impl SegmentReader {
@@ -100,6 +105,9 @@ impl SegmentReader {
 
         // Line maps are NOT loaded here - loaded lazily on first access
 
+        // Load bloom filter if it exists (optional for backwards compat)
+        let bloom_filter = read_bloom_filter(segment_path).ok();
+
         Ok(Self {
             segment_id,
             trigram_dict,
@@ -108,6 +116,7 @@ impl SegmentReader {
             token_postings,
             line_maps: OnceLock::new(),
             segment_path: segment_path.to_path_buf(),
+            bloom_filter,
         })
     }
 
@@ -155,7 +164,23 @@ impl SegmentReader {
         });
         line_maps.get(&doc_id)
     }
+
+    /// Check if trigrams might exist in this segment using bloom filter.
+    /// Returns true if bloom filter is not present (conservative).
+    #[inline]
+    fn might_contain_trigrams(&self, trigrams: &[Trigram]) -> bool {
+        match &self.bloom_filter {
+            Some(bf) => bf.might_contain_all(trigrams),
+            None => true, // No bloom filter = assume might contain
+        }
+    }
 }
+
+/// Default file cache size (number of files to cache)
+const DEFAULT_FILE_CACHE_SIZE: usize = 256;
+
+/// Maximum file size to cache (files larger than this are not cached)
+const MAX_CACHEABLE_FILE_SIZE: usize = 512 * 1024; // 512KB
 
 /// Memory-mapped index reader for fast queries
 pub struct IndexReader {
@@ -169,6 +194,10 @@ pub struct IndexReader {
     doc_id_to_index: HashMap<DocId, usize>,
     paths: Vec<PathBuf>,
     segments: Vec<SegmentReader>,
+    /// O(1) stop-gram lookup (converted from Vec on load)
+    stop_grams: AHashSet<Trigram>,
+    /// LRU cache for file contents (speeds up repeated queries on same files)
+    file_cache: Mutex<LruCache<PathBuf, String>>,
 }
 
 impl IndexReader {
@@ -234,6 +263,14 @@ impl IndexReader {
             .map(|(idx, doc)| (doc.doc_id, idx))
             .collect();
 
+        // Convert stop-grams Vec to HashSet for O(1) lookup (was O(512) per check)
+        let stop_grams: AHashSet<Trigram> = meta.stop_grams.iter().copied().collect();
+
+        // Initialize file content cache
+        let file_cache = Mutex::new(LruCache::new(
+            NonZeroUsize::new(DEFAULT_FILE_CACHE_SIZE).unwrap(),
+        ));
+
         Ok(Self {
             root_path,
             index_path,
@@ -242,6 +279,8 @@ impl IndexReader {
             doc_id_to_index,
             paths,
             segments,
+            stop_grams,
+            file_cache,
         })
     }
 
@@ -267,30 +306,57 @@ impl IndexReader {
         &self.documents
     }
 
-    /// Get documents matching a trigram (queries all segments) as a RoaringBitmap
+    /// Get documents matching a trigram (queries all segments in parallel) as a RoaringBitmap
     pub fn get_trigram_docs(&self, trigram: Trigram) -> RoaringBitmap {
-        let mut results = RoaringBitmap::new();
-        for segment in &self.segments {
-            results |= segment.get_trigram_docs(trigram);
+        if self.segments.len() <= 1 {
+            // Single segment - no parallelization overhead
+            self.segments
+                .first()
+                .map(|s| s.get_trigram_docs(trigram))
+                .unwrap_or_default()
+        } else {
+            // Multiple segments - parallel query with reduction
+            self.segments
+                .par_iter()
+                .map(|segment| segment.get_trigram_docs(trigram))
+                .reduce(RoaringBitmap::new, |mut a, b| {
+                    a |= b;
+                    a
+                })
         }
-        results
     }
 
-    /// Get the total doc frequency for a trigram across all segments
+    /// Get the total doc frequency for a trigram across all segments (parallel)
     pub fn get_trigram_doc_freq(&self, trigram: Trigram) -> u32 {
-        self.segments
-            .iter()
-            .map(|s| s.get_trigram_doc_freq(trigram))
-            .sum()
+        if self.segments.len() <= 1 {
+            self.segments
+                .first()
+                .map(|s| s.get_trigram_doc_freq(trigram))
+                .unwrap_or(0)
+        } else {
+            self.segments
+                .par_iter()
+                .map(|s| s.get_trigram_doc_freq(trigram))
+                .sum()
+        }
     }
 
-    /// Get documents matching a token (queries all segments) as a RoaringBitmap
+    /// Get documents matching a token (queries all segments in parallel) as a RoaringBitmap
     pub fn get_token_docs(&self, token: &str) -> RoaringBitmap {
-        let mut results = RoaringBitmap::new();
-        for segment in &self.segments {
-            results |= segment.get_token_docs(token);
+        if self.segments.len() <= 1 {
+            self.segments
+                .first()
+                .map(|s| s.get_token_docs(token))
+                .unwrap_or_default()
+        } else {
+            self.segments
+                .par_iter()
+                .map(|segment| segment.get_token_docs(token))
+                .reduce(RoaringBitmap::new, |mut a, b| {
+                    a |= b;
+                    a
+                })
         }
-        results
     }
 
     /// Get line offsets for a document (searches all segments)
@@ -318,9 +384,68 @@ impl IndexReader {
         }
     }
 
-    /// Check if a trigram is a stop-gram
+    /// Check if a trigram is a stop-gram - O(1) via HashSet
+    #[inline]
     pub fn is_stop_gram(&self, trigram: Trigram) -> bool {
-        self.meta.stop_grams.contains(&trigram)
+        self.stop_grams.contains(&trigram)
+    }
+
+    /// Check if any segment might contain all the given trigrams using bloom filters.
+    /// This is a fast pre-filter before doing expensive posting list operations.
+    /// Returns true if at least one segment might contain all trigrams.
+    #[inline]
+    pub fn might_contain_trigrams(&self, trigrams: &[Trigram]) -> bool {
+        if trigrams.is_empty() {
+            return true;
+        }
+        // If any segment might contain all trigrams, return true
+        self.segments.iter().any(|s| s.might_contain_trigrams(trigrams))
+    }
+
+    /// Get documents matching trigrams, but only from segments that pass bloom filter.
+    /// This is more efficient than get_trigram_docs for multi-trigram queries.
+    pub fn get_trigram_docs_with_bloom(&self, trigrams: &[Trigram]) -> RoaringBitmap {
+        if trigrams.is_empty() {
+            return self.valid_doc_ids();
+        }
+
+        if self.segments.len() <= 1 {
+            // Single segment - just check bloom and proceed
+            if let Some(segment) = self.segments.first() {
+                if !segment.might_contain_trigrams(trigrams) {
+                    return RoaringBitmap::new();
+                }
+                // Get first trigram's docs, then intersect
+                let mut result = segment.get_trigram_docs(trigrams[0]);
+                for &t in &trigrams[1..] {
+                    if result.is_empty() {
+                        break;
+                    }
+                    result &= segment.get_trigram_docs(t);
+                }
+                return result;
+            }
+            return RoaringBitmap::new();
+        }
+
+        // Multiple segments - parallel with bloom filter
+        self.segments
+            .par_iter()
+            .filter(|s| s.might_contain_trigrams(trigrams))
+            .map(|segment| {
+                let mut result = segment.get_trigram_docs(trigrams[0]);
+                for &t in &trigrams[1..] {
+                    if result.is_empty() {
+                        break;
+                    }
+                    result &= segment.get_trigram_docs(t);
+                }
+                result
+            })
+            .reduce(RoaringBitmap::new, |mut a, b| {
+                a |= b;
+                a
+            })
     }
 
     /// Get all valid (non-stale, non-tombstone) doc IDs as a RoaringBitmap
@@ -335,6 +460,46 @@ impl IndexReader {
     /// Get the root path
     pub fn root_path(&self) -> &Path {
         &self.root_path
+    }
+
+    /// Read file content with LRU caching.
+    /// This speeds up repeated queries that access the same files.
+    /// Returns None if the file cannot be read.
+    pub fn read_file_cached(&self, path: &Path) -> Option<String> {
+        // Check cache first
+        {
+            let mut cache = self.file_cache.lock().ok()?;
+            if let Some(content) = cache.get(path) {
+                return Some(content.clone());
+            }
+        }
+
+        // Read from disk
+        let content = std::fs::read_to_string(path).ok()?;
+
+        // Only cache if file is small enough
+        if content.len() <= MAX_CACHEABLE_FILE_SIZE {
+            if let Ok(mut cache) = self.file_cache.lock() {
+                cache.put(path.to_path_buf(), content.clone());
+            }
+        }
+
+        Some(content)
+    }
+
+    /// Read file content without caching (for parallel access).
+    /// Use this when reading many files in parallel to avoid lock contention.
+    #[inline]
+    pub fn read_file_uncached(path: &Path) -> Option<String> {
+        std::fs::read_to_string(path).ok()
+    }
+
+    /// Clear the file content cache.
+    /// Call this after index updates to ensure stale content isn't served.
+    pub fn clear_file_cache(&self) {
+        if let Ok(mut cache) = self.file_cache.lock() {
+            cache.clear();
+        }
     }
 }
 
@@ -570,4 +735,36 @@ fn read_line_maps(segment_path: &Path) -> Result<HashMap<DocId, Vec<u32>>> {
     }
 
     Ok(line_maps)
+}
+
+/// Read bloom filter from segment
+fn read_bloom_filter(segment_path: &Path) -> Result<BloomFilter> {
+    let bloom_path = segment_path.join("bloom.bin");
+
+    if !bloom_path.exists() {
+        anyhow::bail!("Bloom filter not found");
+    }
+
+    let mut file = BufReader::new(File::open(&bloom_path)?);
+
+    let mut buf1 = [0u8; 1];
+    let mut buf4 = [0u8; 4];
+    let mut buf8 = [0u8; 8];
+
+    // Read num_hashes (u8)
+    file.read_exact(&mut buf1)?;
+    let num_hashes = buf1[0];
+
+    // Read number of u64 words
+    file.read_exact(&mut buf4)?;
+    let num_words = u32::from_le_bytes(buf4) as usize;
+
+    // Read bit data
+    let mut bits = Vec::with_capacity(num_words);
+    for _ in 0..num_words {
+        file.read_exact(&mut buf8)?;
+        bits.push(u64::from_le_bytes(buf8));
+    }
+
+    Ok(BloomFilter::from_raw(bits, num_hashes))
 }
