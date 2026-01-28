@@ -101,8 +101,8 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                         }
                     }
                     app::Mode::Search => {
-                        // Handle pending 'g' key for gg command
-                        if app.pending_key == Some('g') {
+                        // Handle pending 'g' key for gg command (only when not editing)
+                        if !app.editing && app.pending_key == Some('g') {
                             app.clear_pending_key();
                             if key.code == KeyCode::Char('g') {
                                 app.select_first();
@@ -113,25 +113,29 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
 
                         // Check for Ctrl+key combinations first
                         match (key.modifiers, key.code) {
-                            // Vim: Ctrl+j/Ctrl+n - select next result
+                            // Vim: Ctrl+j/Ctrl+n - select next result (only when not editing)
                             (KeyModifiers::CONTROL, KeyCode::Char('j'))
-                            | (KeyModifiers::CONTROL, KeyCode::Char('n')) => app.select_next(),
-                            // Vim: Ctrl+k - select previous result (Ctrl+p reserved for toggle preview)
-                            (KeyModifiers::CONTROL, KeyCode::Char('k')) => app.select_prev(),
-                            // Vim: Ctrl+d - page down
-                            (KeyModifiers::CONTROL, KeyCode::Char('d')) => app.select_page_down(),
-                            // Vim: Ctrl+u - page up
-                            (KeyModifiers::CONTROL, KeyCode::Char('u')) => app.select_page_up(),
-                            // Vim: Ctrl+w - delete word backward
-                            (KeyModifiers::CONTROL, KeyCode::Char('w')) => app.delete_word(),
-                            // Vim: Ctrl+h - backspace (terminal standard)
+                            | (KeyModifiers::CONTROL, KeyCode::Char('n')) if !app.editing => app.select_next(),
+                            // Vim: Ctrl+k - select previous result (only when not editing)
+                            (KeyModifiers::CONTROL, KeyCode::Char('k')) if !app.editing => app.select_prev(),
+                            // Vim: Ctrl+d - page down (only when not editing)
+                            (KeyModifiers::CONTROL, KeyCode::Char('d')) if !app.editing => app.select_page_down(),
+                            // Vim: Ctrl+u - page up (only when not editing)
+                            (KeyModifiers::CONTROL, KeyCode::Char('u')) if !app.editing => app.select_page_up(),
+                            // Vim: Ctrl+w - delete word backward (always available for editing)
+                            (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
+                                app.delete_word();
+                                app.editing = true;
+                            }
+                            // Vim: Ctrl+h - backspace (always available for editing)
                             (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
                                 app.query.pop();
+                                app.editing = true;
                             }
-                            // Vim: Ctrl+a - go to first result
-                            (KeyModifiers::CONTROL, KeyCode::Char('a')) => app.select_first(),
-                            // Vim: Ctrl+e - go to last result
-                            (KeyModifiers::CONTROL, KeyCode::Char('e')) => app.select_last(),
+                            // Vim: Ctrl+a - go to first result (only when not editing)
+                            (KeyModifiers::CONTROL, KeyCode::Char('a')) if !app.editing => app.select_first(),
+                            // Vim: Ctrl+e - go to last result (only when not editing)
+                            (KeyModifiers::CONTROL, KeyCode::Char('e')) if !app.editing => app.select_last(),
                             // Toggle preview mode
                             (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
                                 app.toggle_preview();
@@ -146,28 +150,31 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                                 }
                                 KeyCode::Enter => {
                                     app.execute_search();
+                                    app.editing = false;
                                 }
                                 KeyCode::Down | KeyCode::Tab => app.select_next(),
                                 KeyCode::Up | KeyCode::BackTab => app.select_prev(),
                                 KeyCode::PageDown => app.select_page_down(),
                                 KeyCode::PageUp => app.select_page_up(),
-                                KeyCode::Char('g') => {
+                                KeyCode::Char('g') if !app.editing => {
                                     // Start 'gg' sequence for vim-style go to top
                                     app.pending_key = Some('g');
                                 }
-                                KeyCode::Char('G') => {
+                                KeyCode::Char('G') if !app.editing => {
                                     // Vim: G - go to last result
                                     app.select_last();
                                 }
-                                KeyCode::Char('?') => {
+                                KeyCode::Char('?') if !app.editing => {
                                     // Show help panel
                                     app.show_help();
                                 }
                                 KeyCode::Char(c) => {
                                     app.query.push(c);
+                                    app.editing = true;
                                 }
                                 KeyCode::Backspace => {
                                     app.query.pop();
+                                    app.editing = true;
                                 }
                                 KeyCode::F(1) => app.show_help(),
                                 KeyCode::F(5) => app.reindex(),

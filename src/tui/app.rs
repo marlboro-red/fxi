@@ -82,6 +82,8 @@ pub struct App {
     pub index_available: bool,
     /// Pending key for vim multi-key commands (e.g., 'g' for 'gg')
     pub pending_key: Option<char>,
+    /// Whether user is actively editing the query (vim bindings disabled until Enter)
+    pub editing: bool,
     /// Syntax highlighter for code preview
     pub highlighter: SyntaxHighlighter,
     /// Background index loading state
@@ -138,6 +140,7 @@ impl App {
             status_message: status,
             index_available: false,
             pending_key: None,
+            editing: true,
             highlighter: SyntaxHighlighter::new(),
             load_state,
             search_state: SearchState::Idle,
@@ -283,6 +286,7 @@ impl App {
         self.query.clear();
         self.results.clear();
         self.selected = 0;
+        self.editing = true;
     }
 
     pub fn execute_search(&mut self) {
