@@ -143,6 +143,16 @@ impl<'a> QueryExecutor<'a> {
                     });
                 }
 
+                PlanStep::SuffixArraySearch { pattern, fallback_trigrams } => {
+                    // Use suffix array search with automatic fallback to trigrams
+                    let result = self.reader.search_suffix_array_or_trigrams(pattern, fallback_trigrams);
+
+                    candidates = Some(match candidates {
+                        Some(existing) => existing & result,
+                        None => result,
+                    });
+                }
+
                 PlanStep::Union(sub_plans) => {
                     let mut union = RoaringBitmap::new();
                     for sub_plan in sub_plans {

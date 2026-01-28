@@ -175,6 +175,9 @@ pub struct IndexMeta {
     pub stop_grams: Vec<Trigram>,
     pub created_at: u64,
     pub updated_at: u64,
+    /// Suffix array metadata (optional for backwards compatibility)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suffix_array: Option<crate::index::suffix_array::SuffixArrayMeta>,
 }
 
 impl Default for IndexMeta {
@@ -189,6 +192,7 @@ impl Default for IndexMeta {
             stop_grams: Vec::new(),
             created_at: 0,
             updated_at: 0,
+            suffix_array: None,
         }
     }
 }

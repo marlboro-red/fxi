@@ -25,6 +25,8 @@ pub struct ProcessedFile {
     pub trigrams: Vec<u32>,
     pub tokens: Vec<String>,
     pub line_offsets: Vec<u32>,
+    /// Raw content for suffix array building (optional, only included when SA is enabled)
+    pub content: Option<Vec<u8>>,
 }
 
 /// Process a single file's content (can run in parallel)
@@ -69,6 +71,8 @@ fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option
         trigrams,
         tokens,
         line_offsets,
+        // Include content for suffix array building
+        content: Some(content.to_vec()),
     })
 }
 

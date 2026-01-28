@@ -2,6 +2,7 @@ pub mod build;
 pub mod compact;
 pub mod reader;
 pub mod stats;
+pub mod suffix_array;
 pub mod types;
 pub mod writer;
 

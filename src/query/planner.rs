@@ -25,6 +25,13 @@ pub enum PlanStep {
     Exclude(Box<QueryPlan>),
     /// Apply document filters
     Filter(FilterStep),
+    /// Suffix array search for exact substring matching (fastest for literals)
+    SuffixArraySearch {
+        /// Pattern to search for
+        pattern: String,
+        /// Whether to fall back to trigram if SA is not available
+        fallback_trigrams: Vec<Trigram>,
+    },
 }
 
 /// Filter step for post-narrowing
@@ -139,9 +146,13 @@ impl QueryPlanner {
 
                     (steps, Some(VerificationStep::Literal(text.clone())))
                 } else {
-                    // Use trigram narrowing
+                    // Use suffix array search with trigram fallback
+                    // The executor will use SA if available, otherwise fall back to trigrams
                     (
-                        vec![PlanStep::TrigramIntersect(trigrams)],
+                        vec![PlanStep::SuffixArraySearch {
+                            pattern: text.clone(),
+                            fallback_trigrams: trigrams,
+                        }],
                         Some(VerificationStep::Literal(text.clone())),
                     )
                 }
@@ -180,8 +191,12 @@ impl QueryPlanner {
                         }),
                     )
                 } else {
+                    // Use suffix array search with trigram fallback
                     (
-                        vec![PlanStep::TrigramIntersect(trigrams)],
+                        vec![PlanStep::SuffixArraySearch {
+                            pattern: text.clone(),
+                            fallback_trigrams: trigrams,
+                        }],
                         Some(VerificationStep::BoostedLiteral {
                             text: text.clone(),
                             boost: *boost,
@@ -223,8 +238,12 @@ impl QueryPlanner {
                 if trigrams.is_empty() {
                     (Vec::new(), Some(VerificationStep::Phrase(text.clone())))
                 } else {
+                    // Use suffix array search with trigram fallback for phrases
                     (
-                        vec![PlanStep::TrigramIntersect(trigrams)],
+                        vec![PlanStep::SuffixArraySearch {
+                            pattern: text.clone(),
+                            fallback_trigrams: trigrams,
+                        }],
                         Some(VerificationStep::Phrase(text.clone())),
                     )
                 }

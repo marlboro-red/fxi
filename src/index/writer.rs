@@ -1,4 +1,5 @@
 use crate::index::build::ProcessedFile;
+use crate::index::suffix_array::{SuffixArrayBuilder, SuffixArrayConfig, SuffixArrayMeta, SuffixArrayWriter};
 use crate::index::types::*;
 #[allow(unused_imports)]
 use crate::utils::{delta_encode, extract_tokens, extract_trigrams, get_index_dir, is_binary, is_minified, BloomFilter};
@@ -23,6 +24,9 @@ pub struct ChunkedIndexWriter {
     segment_ids: Vec<SegmentId>,
     // Accumulated trigram frequencies for stop-gram computation
     trigram_frequencies: HashMap<Trigram, u32>,
+    // Suffix array configuration and metadata
+    sa_config: SuffixArrayConfig,
+    sa_meta: SuffixArrayMeta,
 }
 
 impl ChunkedIndexWriter {
@@ -46,6 +50,8 @@ impl ChunkedIndexWriter {
             next_doc_id: 1,
             segment_ids: Vec::new(),
             trigram_frequencies: HashMap::new(),
+            sa_config: SuffixArrayConfig::default(),
+            sa_meta: SuffixArrayMeta::default(),
         })
     }
 
@@ -80,6 +86,12 @@ impl ChunkedIndexWriter {
         let estimated_trigrams = processed_files.len() * 500;
         let mut bloom_filter = BloomFilter::new(estimated_trigrams.max(10000), 0.01);
 
+        // Create suffix array builder for this segment
+        let mut sa_builder = SuffixArrayBuilder::new(self.sa_config.clone());
+
+        // We need to collect doc_ids for SA after processing
+        let mut sa_doc_content: Vec<(DocId, Vec<u8>)> = Vec::with_capacity(file_count);
+
         // Process each file
         for processed in processed_files {
             let doc_id = self.next_doc_id;
@@ -100,10 +112,10 @@ impl ChunkedIndexWriter {
             self.all_documents.push(doc);
 
             // Add trigrams to segment postings, bloom filter, and track global frequencies
-            for trigram in processed.trigrams {
-                trigram_postings.entry(trigram).or_default().push(doc_id);
-                *self.trigram_frequencies.entry(trigram).or_insert(0) += 1;
-                bloom_filter.insert(trigram);
+            for trigram in &processed.trigrams {
+                trigram_postings.entry(*trigram).or_default().push(doc_id);
+                *self.trigram_frequencies.entry(*trigram).or_insert(0) += 1;
+                bloom_filter.insert(*trigram);
             }
 
             // Add tokens to segment postings
@@ -113,6 +125,16 @@ impl ChunkedIndexWriter {
 
             // Store line map
             line_maps.insert(doc_id, processed.line_offsets);
+
+            // Collect content for suffix array building
+            if let Some(content) = processed.content {
+                sa_doc_content.push((doc_id, content));
+            }
+        }
+
+        // Build suffix array for this segment
+        for (doc_id, content) in sa_doc_content {
+            sa_builder.add_document(doc_id, &content);
         }
 
         // Write segment files
@@ -131,6 +153,22 @@ impl ChunkedIndexWriter {
 
         // Write bloom filter for fast pre-filtering
         Self::write_bloom_filter(&segment_path, &bloom_filter)?;
+
+        // Build and write suffix array
+        if sa_builder.doc_count() > 0 {
+            let built_sa = sa_builder.build();
+            let segment_meta = built_sa.meta();
+
+            // Accumulate global SA metadata
+            self.sa_meta.enabled = true;
+            self.sa_meta.total_text_size += segment_meta.total_text_size;
+            self.sa_meta.suffix_count += segment_meta.suffix_count;
+            self.sa_meta.doc_count += segment_meta.doc_count;
+            self.sa_meta.excluded_count += segment_meta.excluded_count;
+            self.sa_meta.case_insensitive = segment_meta.case_insensitive;
+
+            SuffixArrayWriter::write(&segment_path, &built_sa)?;
+        }
 
         Ok(())
     }
@@ -356,8 +394,15 @@ impl ChunkedIndexWriter {
             (Some(self.segment_ids[0]), self.segment_ids[1..].to_vec())
         };
 
+        // Include suffix array metadata if enabled
+        let sa_meta = if self.sa_meta.enabled {
+            Some(self.sa_meta.clone())
+        } else {
+            None
+        };
+
         let meta = IndexMeta {
-            version: 1,
+            version: 2, // Bump version for SA support
             root_path: self.root_path.clone(),
             doc_count: self.all_documents.len() as u32,
             segment_count: self.segment_ids.len() as u16,
@@ -366,6 +411,7 @@ impl ChunkedIndexWriter {
             stop_grams: stop_grams.iter().copied().collect(),
             created_at: now,
             updated_at: now,
+            suffix_array: sa_meta,
         };
 
         let meta_path = self.index_path.join("meta.json");
@@ -771,6 +817,7 @@ impl IndexWriter {
             stop_grams: stop_grams.iter().copied().collect(),
             created_at: now,
             updated_at: now,
+            suffix_array: None, // Legacy writer doesn't use SA
         };
 
         let meta_path = self.index_path.join("meta.json");

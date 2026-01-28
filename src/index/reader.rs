@@ -1,3 +1,4 @@
+use crate::index::suffix_array::SuffixArrayReader;
 use crate::index::types::*;
 use crate::utils::{delta_decode, get_index_dir, BloomFilter};
 use ahash::AHashSet;
@@ -73,6 +74,8 @@ struct SegmentReader {
     segment_path: PathBuf,
     /// Bloom filter for fast trigram pre-filtering (optional for backwards compat)
     bloom_filter: Option<BloomFilter>,
+    /// Suffix array reader for fast substring search (optional for backwards compat)
+    suffix_array: Option<SuffixArrayReader>,
 }
 
 impl SegmentReader {
@@ -108,6 +111,9 @@ impl SegmentReader {
         // Load bloom filter if it exists (optional for backwards compat)
         let bloom_filter = read_bloom_filter(segment_path).ok();
 
+        // Load suffix array if it exists (optional for backwards compat)
+        let suffix_array = SuffixArrayReader::open(segment_path).ok().flatten();
+
         Ok(Self {
             segment_id,
             trigram_dict,
@@ -117,6 +123,7 @@ impl SegmentReader {
             line_maps: OnceLock::new(),
             segment_path: segment_path.to_path_buf(),
             bloom_filter,
+            suffix_array,
         })
     }
 
@@ -174,6 +181,18 @@ impl SegmentReader {
             Some(bf) => bf.might_contain_all(trigrams),
             None => true, // No bloom filter = assume might contain
         }
+    }
+
+    /// Check if this segment has a suffix array
+    #[inline]
+    fn has_suffix_array(&self) -> bool {
+        self.suffix_array.is_some()
+    }
+
+    /// Search using suffix array (returns doc_ids as bitmap)
+    /// Returns None if suffix array is not available
+    fn search_suffix_array(&self, pattern: &[u8]) -> Option<RoaringBitmap> {
+        self.suffix_array.as_ref().map(|sa| sa.search_doc_ids(pattern))
     }
 }
 
@@ -459,6 +478,62 @@ impl IndexReader {
             .filter(|d| d.is_valid())
             .map(|d| d.doc_id)
             .collect()
+    }
+
+    /// Check if suffix array is available in any segment
+    pub fn has_suffix_array(&self) -> bool {
+        self.segments.iter().any(|s| s.has_suffix_array())
+    }
+
+    /// Search using suffix array across all segments
+    ///
+    /// Returns the matching doc_ids as a bitmap. If suffix array is not available
+    /// in any segment, returns None (caller should fall back to trigram search).
+    pub fn search_suffix_array(&self, pattern: &str) -> Option<RoaringBitmap> {
+        // Check if any segment has suffix array
+        if !self.has_suffix_array() {
+            return None;
+        }
+
+        let pattern_bytes = pattern.as_bytes();
+
+        if self.segments.len() <= 1 {
+            // Single segment
+            self.segments.first().and_then(|s| s.search_suffix_array(pattern_bytes))
+        } else {
+            // Multiple segments - parallel search
+            let results: Vec<RoaringBitmap> = self.segments
+                .par_iter()
+                .filter_map(|s| s.search_suffix_array(pattern_bytes))
+                .collect();
+
+            if results.is_empty() {
+                // No segment had SA, return None
+                None
+            } else {
+                // Union all results
+                Some(results.into_iter().reduce(|mut a, b| { a |= b; a }).unwrap_or_default())
+            }
+        }
+    }
+
+    /// Search using suffix array with fallback to trigram search
+    ///
+    /// This is the preferred method for literal searches. It will use suffix array
+    /// if available, otherwise fall back to trigram search.
+    pub fn search_suffix_array_or_trigrams(&self, pattern: &str, fallback_trigrams: &[Trigram]) -> RoaringBitmap {
+        // Try suffix array first (fastest)
+        if let Some(result) = self.search_suffix_array(pattern) {
+            return result;
+        }
+
+        // Fall back to trigram search
+        if fallback_trigrams.is_empty() {
+            // No trigrams available, return all valid docs
+            self.valid_doc_ids()
+        } else {
+            self.get_trigram_docs_with_bloom(fallback_trigrams)
+        }
     }
 
     /// Get the root path

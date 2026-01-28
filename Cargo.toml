@@ -47,6 +47,9 @@ indicatif = "0.17"
 anyhow = "1.0.100"
 dirs = "5.0.1"
 
+[dev-dependencies]
+tempfile = "3.17"
+
 [profile.release]
 lto = true
 codegen-units = 1
