@@ -3,6 +3,7 @@ use crate::index::types::{DocId, Language, SearchMatch};
 use crate::query::parser::{Query, SortOrder};
 use crate::query::planner::{FilterStep, PlanStep, QueryPlan, VerificationStep};
 use crate::query::scorer::{ScoreContext, Scorer, ScoringWeights};
+use crate::query::wand::{TopKEntry, WandCandidate, WandProcessor};
 use anyhow::Result;
 use globset::Glob;
 use rayon::prelude::*;
@@ -316,8 +317,14 @@ impl<'a> QueryExecutor<'a> {
         Ok(result)
     }
 
-    /// Verify candidates against actual file content using parallel processing
-    /// with early termination once limit is reached
+    /// Verify candidates against actual file content using Block-Max WAND / MaxScore
+    /// algorithm for efficient top-k retrieval with early termination.
+    ///
+    /// This implementation:
+    /// 1. Computes upper bound scores for all candidates based on metadata
+    /// 2. Processes candidates in descending upper bound order (most promising first)
+    /// 3. Maintains a top-k heap with threshold-based pruning
+    /// 4. Terminates early when remaining candidates can't beat the threshold
     fn verify_candidates(
         &self,
         candidates: &RoaringBitmap,
@@ -338,26 +345,63 @@ impl<'a> QueryExecutor<'a> {
         // Extract line filter from plan (if present)
         let (line_start, line_end) = Self::extract_line_filter(&plan.steps);
 
-        // Collect candidate doc_ids with their paths for parallel processing
-        let candidate_infos: Vec<(DocId, PathBuf, PathBuf, u64)> = candidates
+        // Collect candidate doc_ids with their metadata for WAND processing
+        let candidate_infos: Vec<(DocId, PathBuf, PathBuf, u64, usize)> = candidates
             .iter()
             .filter_map(|doc_id| {
                 self.reader.get_document(doc_id).and_then(|doc| {
                     self.reader.get_full_path(doc).map(|full_path| {
                         let rel_path = self.reader.get_path(doc).cloned().unwrap_or_default();
-                        (doc_id, full_path, rel_path, doc.mtime)
+                        let depth = Scorer::path_depth(&rel_path);
+                        (doc_id, full_path, rel_path, doc.mtime, depth)
                     })
                 })
             })
             .collect();
 
-        // Process files - use cache for small result sets, parallel for large
-        // Adaptive threshold based on CPU cores
+        let candidate_count = candidate_infos.len();
+
+        // For small result sets or when we want all results, use simple processing
+        // WAND overhead isn't worth it for tiny sets
+        if candidate_count <= limit * 2 || limit >= candidate_count {
+            return self.verify_candidates_simple(
+                candidate_infos,
+                verification,
+                &search_terms,
+                boost,
+                line_start,
+                line_end,
+                limit,
+            );
+        }
+
+        // Use Block-Max WAND / MaxScore for larger candidate sets
+        self.verify_candidates_wand(
+            candidate_infos,
+            verification,
+            &search_terms,
+            boost,
+            line_start,
+            line_end,
+            limit,
+        )
+    }
+
+    /// Simple verification without WAND (for small candidate sets)
+    fn verify_candidates_simple(
+        &self,
+        candidate_infos: Vec<(DocId, PathBuf, PathBuf, u64, usize)>,
+        verification: &VerificationStep,
+        search_terms: &[String],
+        boost: f32,
+        line_start: Option<u32>,
+        line_end: Option<u32>,
+        limit: usize,
+    ) -> Result<Vec<SearchMatch>> {
         let candidate_count = candidate_infos.len();
         let use_cache = !should_use_parallel(candidate_count);
 
         // Track match count for early termination
-        // Collect 1.5x limit for better ranking (was 2x, reduced for faster termination)
         let target_matches = limit + (limit / 2);
         let match_count = AtomicUsize::new(0);
 
@@ -366,19 +410,16 @@ impl<'a> QueryExecutor<'a> {
             let mut results = Vec::with_capacity(candidate_count.min(target_matches));
             let mut total_matches = 0;
 
-            for (doc_id, full_path, rel_path, mtime) in candidate_infos {
-                // Early termination check
+            for (doc_id, full_path, rel_path, mtime, _depth) in candidate_infos {
                 if total_matches >= target_matches {
                     break;
                 }
 
-                // Use cached file reading
                 let content = match self.reader.read_file_cached(&full_path) {
                     Some(c) => c,
                     None => continue,
                 };
 
-                // Find matches
                 let mut file_matches =
                     Self::verify_content_static(&content, verification, doc_id);
 
@@ -398,26 +439,19 @@ impl<'a> QueryExecutor<'a> {
             }
             results
         } else {
-            // Large result set: use parallel uncached reads with early termination
-            // Use with_min_len to ensure good work stealing granularity
+            // Large result set: use parallel uncached reads
             candidate_infos
                 .into_par_iter()
-                .with_min_len(4) // Ensure chunks aren't too small
-                .filter_map(|(doc_id, full_path, rel_path, mtime)| {
-                    // Early termination check - skip if we have enough matches
-                    // Use Relaxed ordering for maximum performance (occasional over-collection is OK)
+                .with_min_len(4)
+                .filter_map(|(doc_id, full_path, rel_path, mtime, _depth)| {
                     if match_count.load(Ordering::Relaxed) >= target_matches {
                         return None;
                     }
 
-                    // Read file content (no cache to avoid lock contention)
                     let content = fs::read_to_string(&full_path).ok()?;
-
-                    // Find matches
                     let mut file_matches =
                         Self::verify_content_static(&content, verification, doc_id);
 
-                    // Apply line filter if specified
                     if line_start.is_some() || line_end.is_some() {
                         file_matches.retain(|(line_num, _, _, _)| {
                             let above_min = line_start.map(|min| *line_num >= min).unwrap_or(true);
@@ -429,7 +463,6 @@ impl<'a> QueryExecutor<'a> {
                     if file_matches.is_empty() {
                         None
                     } else {
-                        // Update match count for early termination
                         match_count.fetch_add(file_matches.len(), Ordering::Relaxed);
                         Some((doc_id, rel_path, mtime, file_matches))
                     }
@@ -438,12 +471,10 @@ impl<'a> QueryExecutor<'a> {
         };
 
         // Build final results with scoring
-        // Pre-allocate based on expected match count (typically 1-3 matches per file)
         let estimated_total = all_matches.len() * 2;
         let mut matches = Vec::with_capacity(estimated_total.min(limit * 2));
 
         for (doc_id, path, mtime, file_matches) in all_matches {
-            // Build score context
             let filename_match = search_terms
                 .iter()
                 .any(|term| Scorer::term_in_filename(&path, term));
@@ -458,7 +489,6 @@ impl<'a> QueryExecutor<'a> {
 
             let score = self.scorer.calculate_score(&score_ctx);
 
-            // Create matches with calculated score
             for (line_num, line_content, start, end) in file_matches {
                 matches.push(SearchMatch {
                     doc_id,
@@ -468,6 +498,136 @@ impl<'a> QueryExecutor<'a> {
                     match_start: start,
                     match_end: end,
                     score,
+                });
+            }
+        }
+
+        Ok(matches)
+    }
+
+    /// Block-Max WAND / MaxScore based verification for efficient top-k retrieval.
+    ///
+    /// This method processes candidates in order of their upper bound scores,
+    /// enabling early termination once we have k results and remaining candidates
+    /// cannot beat the threshold.
+    fn verify_candidates_wand(
+        &self,
+        candidate_infos: Vec<(DocId, PathBuf, PathBuf, u64, usize)>,
+        verification: &VerificationStep,
+        search_terms: &[String],
+        boost: f32,
+        line_start: Option<u32>,
+        line_end: Option<u32>,
+        limit: usize,
+    ) -> Result<Vec<SearchMatch>> {
+        // Create WAND candidates with upper bound scores
+        let mut wand_candidates: Vec<WandCandidate> = candidate_infos
+            .into_iter()
+            .map(|(doc_id, full_path, rel_path, mtime, depth)| {
+                // Check if filename might match any search term
+                let filename_might_match = search_terms
+                    .iter()
+                    .any(|term| Scorer::term_in_filename(&rel_path, term));
+
+                // Compute upper bound score for this document
+                let upper_bound = self.scorer.quick_upper_bound(
+                    depth,
+                    mtime,
+                    if filename_might_match { boost } else { boost * 0.8 }, // Slight penalty if filename won't match
+                );
+
+                WandCandidate {
+                    doc_id,
+                    full_path,
+                    rel_path,
+                    mtime,
+                    upper_bound,
+                    depth,
+                }
+            })
+            .collect();
+
+        // Sort candidates by upper bound (descending) for WAND processing
+        // This ensures we process most promising candidates first
+        wand_candidates.sort_unstable_by(|a, b| {
+            b.upper_bound
+                .partial_cmp(&a.upper_bound)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Initialize WAND processor
+        let mut processor = WandProcessor::new(limit);
+        processor.add_candidates(wand_candidates);
+
+        // Process candidates using WAND algorithm
+        while let Some(candidate) = processor.next_candidate() {
+            // Read and verify file content
+            let content = match self.reader.read_file_cached(&candidate.full_path) {
+                Some(c) => c,
+                None => {
+                    processor.record_no_match();
+                    continue;
+                }
+            };
+
+            // Find matches in file
+            let mut file_matches =
+                Self::verify_content_static(&content, verification, candidate.doc_id);
+
+            // Apply line filter if specified
+            if line_start.is_some() || line_end.is_some() {
+                file_matches.retain(|(line_num, _, _, _)| {
+                    let above_min = line_start.map(|min| *line_num >= min).unwrap_or(true);
+                    let below_max = line_end.map(|max| *line_num <= max).unwrap_or(true);
+                    above_min && below_max
+                });
+            }
+
+            if file_matches.is_empty() {
+                processor.record_no_match();
+                continue;
+            }
+
+            // Calculate actual score for this document
+            let filename_match = search_terms
+                .iter()
+                .any(|term| Scorer::term_in_filename(&candidate.rel_path, term));
+
+            let score_ctx = ScoreContext {
+                match_count: file_matches.len(),
+                filename_match,
+                depth: candidate.depth,
+                mtime: candidate.mtime,
+                boost,
+            };
+
+            let score = self.scorer.calculate_score(&score_ctx);
+
+            // Submit result to WAND processor
+            processor.submit_result(TopKEntry {
+                score,
+                doc_id: candidate.doc_id,
+                path: candidate.rel_path,
+                mtime: candidate.mtime,
+                matches: file_matches,
+            });
+        }
+
+        // Get final results from WAND processor
+        let (top_k_entries, _stats) = processor.into_results();
+
+        // Convert TopKEntry to SearchMatch
+        let mut matches = Vec::with_capacity(top_k_entries.len() * 2);
+        for entry in top_k_entries {
+            for (line_num, line_content, start, end) in entry.matches {
+                matches.push(SearchMatch {
+                    doc_id: entry.doc_id,
+                    path: entry.path.clone(),
+                    line_number: line_num,
+                    line_content,
+                    match_start: start,
+                    match_end: end,
+                    score: entry.score,
                 });
             }
         }
