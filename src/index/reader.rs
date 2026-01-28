@@ -76,6 +76,15 @@ struct SegmentReader {
 }
 
 impl SegmentReader {
+    /// Get the document frequency for a trigram (for selectivity-based ordering)
+    #[inline]
+    fn get_trigram_doc_freq(&self, trigram: Trigram) -> u32 {
+        self.trigram_dict
+            .lookup(trigram)
+            .map(|e| e.doc_freq)
+            .unwrap_or(0)
+    }
+
     /// Open a segment from disk (lazy loading for line maps)
     fn open(segment_path: &Path, segment_id: SegmentId, index_path: &Path) -> Result<Self> {
         // Read trigram dictionary (already sorted from BTreeMap write)
@@ -132,15 +141,6 @@ impl SegmentReader {
             }
         }
         RoaringBitmap::new()
-    }
-
-    /// Get the doc frequency for a trigram (number of documents containing it)
-    #[allow(dead_code)]
-    fn get_trigram_doc_freq(&self, trigram: Trigram) -> u32 {
-        self.trigram_dict
-            .lookup(trigram)
-            .map(|e| e.doc_freq)
-            .unwrap_or(0)
     }
 
     /// Get documents matching a token in this segment as a RoaringBitmap
@@ -224,37 +224,39 @@ impl IndexReader {
         segment_ids.extend(&meta.delta_segments);
 
         // PARALLEL LOADING: Load documents, paths, and all segments concurrently
+        // Uses parallel tuple collection for true 3-way parallelism
         // This can reduce startup time by 50-70% on multi-core systems
-        let index_path_clone = index_path.clone();
-        let index_path_clone2 = index_path.clone();
-        let index_path_clone3 = index_path.clone();
+        let index_path_ref = &index_path;
 
-        // Use rayon's parallel iterator for concurrent loading
-        let (documents_result, paths_and_segments) = rayon::join(
-            || read_documents(&index_path_clone),
-            || rayon::join(
-                || read_paths(&index_path_clone2),
-                || {
-                    // Load all segments in parallel
-                    segment_ids
-                        .par_iter()
-                        .filter_map(|&seg_id| {
-                            let segment_path = index_path_clone3
-                                .join("segments")
-                                .join(format!("seg_{:04}", seg_id));
-                            if segment_path.exists() {
-                                SegmentReader::open(&segment_path, seg_id, &index_path_clone3).ok()
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                },
-            ),
+        // Use rayon's join for 3-way parallelism: (docs, (paths, segments))
+        // The inner join runs paths and segments loading in parallel
+        // The outer join runs docs loading in parallel with the inner join
+        let (documents_result, (paths_result, segments)) = rayon::join(
+            || read_documents(index_path_ref),
+            || {
+                rayon::join(
+                    || read_paths(index_path_ref),
+                    || {
+                        // Load all segments in parallel using par_iter
+                        segment_ids
+                            .par_iter()
+                            .filter_map(|&seg_id| {
+                                let segment_path = index_path_ref
+                                    .join("segments")
+                                    .join(format!("seg_{:04}", seg_id));
+                                if segment_path.exists() {
+                                    SegmentReader::open(&segment_path, seg_id, index_path_ref).ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                )
+            },
         );
 
         let documents = documents_result?;
-        let (paths_result, segments) = paths_and_segments;
         let paths = paths_result?;
 
         // Build O(1) lookup index (fast, ~100ms for 1M docs)
@@ -328,21 +330,6 @@ impl IndexReader {
         }
     }
 
-    /// Get the total doc frequency for a trigram across all segments (parallel)
-    #[allow(dead_code)]
-    pub fn get_trigram_doc_freq(&self, trigram: Trigram) -> u32 {
-        if self.segments.len() <= 1 {
-            self.segments
-                .first()
-                .map(|s| s.get_trigram_doc_freq(trigram))
-                .unwrap_or(0)
-        } else {
-            self.segments
-                .par_iter()
-                .map(|s| s.get_trigram_doc_freq(trigram))
-                .sum()
-        }
-    }
 
     /// Get documents matching a token (queries all segments in parallel) as a RoaringBitmap
     pub fn get_token_docs(&self, token: &str) -> RoaringBitmap {
@@ -408,6 +395,10 @@ impl IndexReader {
 
     /// Get documents matching trigrams, but only from segments that pass bloom filter.
     /// This is more efficient than get_trigram_docs for multi-trigram queries.
+    ///
+    /// OPTIMIZATION: Trigrams are sorted by document frequency (selectivity) before
+    /// intersection. Processing the rarest trigram first minimizes intermediate result
+    /// set sizes and reduces overall work.
     pub fn get_trigram_docs_with_bloom(&self, trigrams: &[Trigram]) -> RoaringBitmap {
         if trigrams.is_empty() {
             return self.valid_doc_ids();
@@ -419,9 +410,18 @@ impl IndexReader {
                 if !segment.might_contain_trigrams(trigrams) {
                     return RoaringBitmap::new();
                 }
-                // Get first trigram's docs, then intersect
-                let mut result = segment.get_trigram_docs(trigrams[0]);
-                for &t in &trigrams[1..] {
+
+                // Sort trigrams by document frequency (selectivity) - rarest first
+                // This minimizes intermediate result set sizes during intersection
+                let mut sorted_trigrams: Vec<(Trigram, u32)> = trigrams
+                    .iter()
+                    .map(|&t| (t, segment.get_trigram_doc_freq(t)))
+                    .collect();
+                sorted_trigrams.sort_by_key(|&(_, freq)| freq);
+
+                // Start with rarest trigram
+                let mut result = segment.get_trigram_docs(sorted_trigrams[0].0);
+                for &(t, _) in &sorted_trigrams[1..] {
                     if result.is_empty() {
                         break;
                     }
@@ -432,13 +432,21 @@ impl IndexReader {
             return RoaringBitmap::new();
         }
 
-        // Multiple segments - parallel with bloom filter
+        // Multiple segments - parallel with bloom filter and selectivity ordering
         self.segments
             .par_iter()
             .filter(|s| s.might_contain_trigrams(trigrams))
             .map(|segment| {
-                let mut result = segment.get_trigram_docs(trigrams[0]);
-                for &t in &trigrams[1..] {
+                // Sort trigrams by document frequency within this segment
+                let mut sorted_trigrams: Vec<(Trigram, u32)> = trigrams
+                    .iter()
+                    .map(|&t| (t, segment.get_trigram_doc_freq(t)))
+                    .collect();
+                sorted_trigrams.sort_by_key(|&(_, freq)| freq);
+
+                // Start with rarest trigram
+                let mut result = segment.get_trigram_docs(sorted_trigrams[0].0);
+                for &(t, _) in &sorted_trigrams[1..] {
                     if result.is_empty() {
                         break;
                     }

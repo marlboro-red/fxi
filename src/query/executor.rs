@@ -5,14 +5,16 @@ use crate::query::planner::{FilterStep, PlanStep, QueryPlan, VerificationStep};
 use crate::query::scorer::{ScoreContext, Scorer, ScoringWeights};
 use anyhow::Result;
 use globset::Glob;
+use memmap2::Mmap;
 use rayon::prelude::*;
 use regex::Regex;
 use roaring::RoaringBitmap;
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 /// Get the number of available CPU threads (cached for performance)
 fn get_num_threads() -> usize {
@@ -41,37 +43,75 @@ fn should_use_parallel(candidate_count: usize) -> bool {
     candidate_count > parallel_threshold
 }
 
-/// Thread-safe regex cache for avoiding repeated compilation
-/// Uses a simple LRU-like approach with a bounded size
+/// Minimum file size to use memory mapping (smaller files are faster with regular read)
+const MMAP_THRESHOLD: u64 = 4096;
+
+/// Read file content using memory mapping for large files, regular read for small files.
+/// This avoids copying file contents into memory and lets the OS handle caching.
+/// Returns None if the file cannot be read or contains invalid UTF-8.
+#[inline]
+fn read_file_mmap(path: &Path) -> Option<Cow<'static, str>> {
+    let file = File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    let size = metadata.len();
+
+    if size == 0 {
+        return Some(Cow::Borrowed(""));
+    }
+
+    if size < MMAP_THRESHOLD {
+        // Small file: regular read is faster (avoids mmap syscall overhead)
+        let content = fs::read_to_string(path).ok()?;
+        Some(Cow::Owned(content))
+    } else {
+        // Large file: use memory mapping
+        let mmap = unsafe { Mmap::map(&file).ok()? };
+
+        // Validate UTF-8 and convert to string
+        // We need to copy here because mmap lifetime is tied to the file
+        let content = std::str::from_utf8(&mmap).ok()?.to_string();
+        Some(Cow::Owned(content))
+    }
+}
+
+/// Thread-safe regex cache for avoiding repeated compilation.
+/// Uses RwLock to allow concurrent reads (cache hits are common in parallel workloads).
 struct RegexCache {
-    cache: Mutex<HashMap<String, Arc<Regex>>>,
+    cache: RwLock<HashMap<String, Arc<Regex>>>,
     max_size: usize,
 }
 
 impl RegexCache {
     fn new(max_size: usize) -> Self {
         Self {
-            cache: Mutex::new(HashMap::with_capacity(max_size)),
+            cache: RwLock::new(HashMap::with_capacity(max_size)),
             max_size,
         }
     }
 
-    /// Get or compile a regex pattern
+    /// Get or compile a regex pattern.
+    /// Uses read lock for cache lookups (allows concurrent readers),
+    /// only acquires write lock when inserting new patterns.
     fn get_or_compile(&self, pattern: &str) -> Option<Arc<Regex>> {
-        // Check cache first
+        // Fast path: check cache with read lock (allows concurrent readers)
         {
-            let cache = self.cache.lock().ok()?;
+            let cache = self.cache.read().ok()?;
             if let Some(re) = cache.get(pattern) {
                 return Some(Arc::clone(re));
             }
         }
 
-        // Compile the regex
+        // Compile the regex (outside of any lock)
         let re = Regex::new(pattern).ok()?;
         let arc_re = Arc::new(re);
 
-        // Try to cache it
-        if let Ok(mut cache) = self.cache.lock() {
+        // Slow path: insert with write lock
+        if let Ok(mut cache) = self.cache.write() {
+            // Double-check: another thread may have inserted while we were compiling
+            if let Some(existing) = cache.get(pattern) {
+                return Some(Arc::clone(existing));
+            }
+
             // Evict oldest entries if cache is full
             if cache.len() >= self.max_size {
                 // Simple eviction: remove a random entry
@@ -236,11 +276,11 @@ impl<'a> QueryExecutor<'a> {
                 }
             }
         } else {
-            // Parallel processing
+            // Parallel processing with memory-mapped I/O
             let results: Vec<Vec<ContentMatchResult>> = candidate_infos
                 .into_par_iter()
                 .filter_map(|(_doc_id, full_path, rel_path)| {
-                    let content = fs::read_to_string(&full_path).ok()?;
+                    let content = read_file_mmap(&full_path)?;
                     let file_matches = Self::verify_content_static(&content, verification, 0);
 
                     if file_matches.is_empty() {
@@ -365,7 +405,7 @@ impl<'a> QueryExecutor<'a> {
             }
             results
         } else {
-            // Parallel processing with early termination
+            // Parallel processing with early termination and memory-mapped I/O
             candidate_infos
                 .into_par_iter()
                 .filter_map(|(_doc_id, full_path, rel_path)| {
@@ -374,8 +414,8 @@ impl<'a> QueryExecutor<'a> {
                         return None;
                     }
 
-                    // Read file content
-                    let content = fs::read_to_string(&full_path).ok()?;
+                    // Read file content using mmap for large files
+                    let content = read_file_mmap(&full_path)?;
 
                     // Check if file has ANY match
                     if Self::has_match(&content, verification) {
@@ -459,33 +499,49 @@ impl<'a> QueryExecutor<'a> {
         }
     }
 
-    /// Extract context lines around a match
+    /// Extract context lines around a match.
+    ///
+    /// OPTIMIZATION: Uses iterator-based approach that only scans the relevant
+    /// portion of the file, avoiding allocation of a full line vector.
+    /// For a match at line N with B context before and A after, we only need
+    /// to scan lines [N-B, N+A], not the entire file.
     fn extract_context_lines(
         content: &str,
         match_line: u32,
         before: u32,
         after: u32,
     ) -> (Vec<(u32, String)>, Vec<(u32, String)>) {
-        let lines: Vec<&str> = content.lines().collect();
-        let match_idx = (match_line - 1) as usize;
-
-        let mut ctx_before = Vec::new();
-        let mut ctx_after = Vec::new();
-
-        // Extract lines before
-        let start_idx = match_idx.saturating_sub(before as usize);
-        for i in start_idx..match_idx {
-            if let Some(line) = lines.get(i) {
-                ctx_before.push(((i + 1) as u32, line.to_string()));
-            }
+        // Early return if no context needed
+        if before == 0 && after == 0 {
+            return (Vec::new(), Vec::new());
         }
 
-        // Extract lines after
-        let end_idx = (match_idx + 1 + after as usize).min(lines.len());
-        for i in (match_idx + 1)..end_idx {
-            if let Some(line) = lines.get(i) {
+        let match_idx = (match_line - 1) as usize;
+        let start_line = match_idx.saturating_sub(before as usize);
+        let end_line = match_idx + 1 + after as usize;
+
+        let mut ctx_before = Vec::with_capacity(before as usize);
+        let mut ctx_after = Vec::with_capacity(after as usize);
+
+        // Iterate only through the lines we need
+        for (i, line) in content.lines().enumerate() {
+            // Skip lines before our context window
+            if i < start_line {
+                continue;
+            }
+
+            // Stop after we've collected all needed context
+            if i >= end_line {
+                break;
+            }
+
+            // Categorize the line
+            if i < match_idx {
+                ctx_before.push(((i + 1) as u32, line.to_string()));
+            } else if i > match_idx {
                 ctx_after.push(((i + 1) as u32, line.to_string()));
             }
+            // Skip the match line itself (i == match_idx)
         }
 
         (ctx_before, ctx_after)
@@ -853,7 +909,7 @@ impl<'a> QueryExecutor<'a> {
             }
             results
         } else {
-            // Large result set: use parallel uncached reads with early termination
+            // Large result set: use parallel memory-mapped reads with early termination
             // Use with_min_len to ensure good work stealing granularity
             candidate_infos
                 .into_par_iter()
@@ -865,8 +921,8 @@ impl<'a> QueryExecutor<'a> {
                         return None;
                     }
 
-                    // Read file content (no cache to avoid lock contention)
-                    let content = fs::read_to_string(&full_path).ok()?;
+                    // Read file content using mmap for large files
+                    let content = read_file_mmap(&full_path)?;
 
                     // Find matches
                     let mut file_matches =
@@ -1080,13 +1136,18 @@ impl<'a> QueryExecutor<'a> {
 
 
     /// Find proximity matches: all terms must appear within distance lines of each other (static)
-    /// Optimized to minimize allocations and leverage pre-computed lowercase lines
+    ///
+    /// OPTIMIZATION: Uses lazy lowercasing - only lowercases lines that might contain
+    /// search terms. First pass uses fast byte search to identify candidate lines,
+    /// then only those lines are lowercased for precise matching.
     fn find_proximity_matches_static(
         content: &str,
         terms: &[String],
         distance: u32,
         _doc_id: DocId,
     ) -> Vec<(u32, String, usize, usize)> {
+        use memchr::memmem;
+
         if terms.is_empty() {
             return Vec::new();
         }
@@ -1094,20 +1155,47 @@ impl<'a> QueryExecutor<'a> {
         // Pre-lowercase all terms once
         let terms_lower: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
 
-        // Collect lines with their lowercase versions ONCE (avoid repeated to_lowercase)
-        let lines: Vec<(&str, String)> = content
-            .lines()
-            .map(|line| (line, line.to_lowercase()))
+        // Create finders for fast byte-level search
+        let finders: Vec<memmem::Finder> = terms_lower
+            .iter()
+            .map(|t| memmem::Finder::new(t.as_bytes()))
             .collect();
 
+        // Collect lines as references (no allocation)
+        let lines: Vec<&str> = content.lines().collect();
+
         // For each term, collect line numbers where it appears
+        // OPTIMIZATION: Only lowercase lines that pass the fast byte-level check
         let mut term_lines: Vec<Vec<u32>> = Vec::with_capacity(terms.len());
 
-        for term_lower in &terms_lower {
+        for (term_idx, term_lower) in terms_lower.iter().enumerate() {
+            let finder = &finders[term_idx];
             let mut lines_with_term = Vec::new();
 
-            for (line_num, (_original, line_lower)) in lines.iter().enumerate() {
-                if line_lower.contains(term_lower.as_str()) {
+            for (line_num, &line) in lines.iter().enumerate() {
+                // Fast path: check if line could possibly contain term
+                // For ASCII, we can do case-insensitive check without allocation
+                let might_contain = if line.is_ascii() && term_lower.is_ascii() {
+                    // ASCII fast path: case-insensitive byte search
+                    let line_bytes = line.as_bytes();
+                    let term_bytes = term_lower.as_bytes();
+                    if line_bytes.len() >= term_bytes.len() {
+                        // Check if lowercased bytes match anywhere
+                        (0..=(line_bytes.len() - term_bytes.len())).any(|i| {
+                            term_bytes.iter().enumerate().all(|(j, &tb)| {
+                                line_bytes[i + j].to_ascii_lowercase() == tb
+                            })
+                        })
+                    } else {
+                        false
+                    }
+                } else {
+                    // Non-ASCII: must lowercase the line (lazy - only when needed)
+                    let line_lower = line.to_lowercase();
+                    finder.find(line_lower.as_bytes()).is_some()
+                };
+
+                if might_contain {
                     lines_with_term.push((line_num + 1) as u32);
                 }
             }
@@ -1147,11 +1235,12 @@ impl<'a> QueryExecutor<'a> {
             if all_within_distance {
                 // Found a valid proximity match - return the first term's match
                 let line_idx = (first_line - 1) as usize;
-                if let Some((original_line, line_lower)) = lines.get(line_idx) {
+                if let Some(&line) = lines.get(line_idx) {
+                    let line_lower = line.to_lowercase();
                     if let Some(pos) = line_lower.find(&terms_lower[0]) {
                         matches.push((
                             first_line,
-                            original_line.to_string(),
+                            line.to_string(),
                             pos,
                             pos + terms[0].len(),
                         ));

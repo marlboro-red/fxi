@@ -81,9 +81,15 @@ pub fn delta_encode(values: &[u32], buf: &mut Vec<u8>) {
     }
 }
 
-/// Delta-decode a list of u32s
+/// Delta-decode a list of u32s.
+///
+/// OPTIMIZATION: Pre-allocates result vector based on estimated element count.
+/// Delta-encoded u32s average ~2-3 bytes each, so we estimate capacity as buf.len()/2.
 pub fn delta_decode(buf: &[u8]) -> Vec<u32> {
-    let mut result = Vec::new();
+    // Estimate capacity: delta-encoded u32s average ~2-3 bytes each
+    // Using buf.len()/2 provides a reasonable estimate that avoids most reallocations
+    let estimated_capacity = buf.len() / 2;
+    let mut result = Vec::with_capacity(estimated_capacity.max(8));
     let mut prev = 0u32;
     let mut pos = 0;
 
