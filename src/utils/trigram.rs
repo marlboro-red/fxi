@@ -1,20 +1,106 @@
 use crate::index::types::{bytes_to_trigram, Trigram};
 use std::collections::HashSet;
 
-/// Extract unique trigrams from content
-pub fn extract_trigrams(content: &[u8]) -> HashSet<Trigram> {
-    let mut trigrams = HashSet::new();
+/// Bitset for tracking which trigrams have been seen.
+/// Uses 2MB to cover all 16M possible trigram values (24 bits).
+/// This is MUCH faster than HashSet for trigram deduplication.
+struct TrigramBitset {
+    bits: Vec<u64>,
+}
 
+impl TrigramBitset {
+    /// Create a new bitset (2MB allocation, zeroed)
+    #[inline]
+    fn new() -> Self {
+        // 16M trigrams / 64 bits per u64 = 262144 u64s = 2MB
+        Self {
+            bits: vec![0u64; 262144],
+        }
+    }
+
+    /// Check if trigram is set and set it. Returns true if it was already set.
+    #[inline]
+    fn test_and_set(&mut self, trigram: Trigram) -> bool {
+        let idx = (trigram >> 6) as usize; // divide by 64
+        let bit = 1u64 << (trigram & 63); // mod 64
+        let was_set = (self.bits[idx] & bit) != 0;
+        self.bits[idx] |= bit;
+        was_set
+    }
+
+    /// Collect all set trigrams into a vector
+    fn collect(&self) -> Vec<Trigram> {
+        let mut result = Vec::with_capacity(8192); // reasonable initial capacity
+        for (word_idx, &word) in self.bits.iter().enumerate() {
+            if word == 0 {
+                continue;
+            }
+            let base = (word_idx as u32) << 6;
+            let mut w = word;
+            while w != 0 {
+                let bit_pos = w.trailing_zeros();
+                result.push(base | bit_pos);
+                w &= w - 1; // clear lowest set bit
+            }
+        }
+        result
+    }
+}
+
+/// Extract unique trigrams from content using fast bitset deduplication
+pub fn extract_trigrams(content: &[u8]) -> HashSet<Trigram> {
     if content.len() < 3 {
+        return HashSet::new();
+    }
+
+    // For small files, HashSet is more efficient (less memory allocation)
+    if content.len() < 1024 {
+        let mut trigrams = HashSet::with_capacity(content.len());
+        for window in content.windows(3) {
+            let trigram = bytes_to_trigram(window[0], window[1], window[2]);
+            trigrams.insert(trigram);
+        }
         return trigrams;
     }
 
+    // For larger files, use bitset for O(1) dedup with no hashing overhead
+    let mut bitset = TrigramBitset::new();
+
     for window in content.windows(3) {
         let trigram = bytes_to_trigram(window[0], window[1], window[2]);
-        trigrams.insert(trigram);
+        bitset.test_and_set(trigram);
     }
 
-    trigrams
+    // Convert bitset to HashSet for compatibility
+    bitset.collect().into_iter().collect()
+}
+
+/// Extract unique trigrams as a Vec (faster than HashSet when order doesn't matter)
+pub fn extract_trigrams_vec(content: &[u8]) -> Vec<Trigram> {
+    if content.len() < 3 {
+        return Vec::new();
+    }
+
+    // For small files, use simple dedup
+    if content.len() < 1024 {
+        let mut trigrams: Vec<Trigram> = content
+            .windows(3)
+            .map(|w| bytes_to_trigram(w[0], w[1], w[2]))
+            .collect();
+        trigrams.sort_unstable();
+        trigrams.dedup();
+        return trigrams;
+    }
+
+    // For larger files, use bitset
+    let mut bitset = TrigramBitset::new();
+
+    for window in content.windows(3) {
+        let trigram = bytes_to_trigram(window[0], window[1], window[2]);
+        bitset.test_and_set(trigram);
+    }
+
+    bitset.collect()
 }
 
 /// Extract trigrams from a query string for searching

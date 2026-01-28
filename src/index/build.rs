@@ -1,17 +1,18 @@
-use crate::index::types::{DocFlags, DocId, IndexConfig, Language, SegmentId};
-use crate::index::writer::{ChunkedIndexWriter, ParallelChunkResult};
+use crate::index::types::{DocFlags, IndexConfig, Language, SegmentId};
+use crate::index::writer::ChunkedIndexWriter;
 use crate::utils::{
-    extract_tokens, extract_trigrams, find_codebase_root, get_index_dir, is_binary, is_minified,
-    remove_index, AppConfig,
+    extract_tokens, extract_trigrams_vec, find_codebase_root, get_index_dir, is_binary,
+    is_minified, remove_index,
 };
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
+use memmap2::Mmap;
 use rayon::prelude::*;
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 /// Result of processing a single file (computed in parallel)
@@ -46,8 +47,8 @@ fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option
         flags.0 |= DocFlags::MINIFIED;
     }
 
-    // Extract trigrams
-    let trigrams: Vec<u32> = extract_trigrams(content).into_iter().collect();
+    // Extract trigrams using optimized bitset-based extraction
+    let trigrams: Vec<u32> = extract_trigrams_vec(content);
 
     // Extract tokens
     let tokens: Vec<String> = if let Ok(text) = std::str::from_utf8(content) {
@@ -71,12 +72,19 @@ fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option
     })
 }
 
-/// Build line offset map from content
+/// Build line offset map from content using fast memchr search
 fn build_line_map(content: &[u8]) -> Vec<u32> {
-    let mut offsets = vec![0u32];
-    for (i, &byte) in content.iter().enumerate() {
-        if byte == b'\n' && i + 1 < content.len() {
-            offsets.push((i + 1) as u32);
+    use memchr::memchr_iter;
+
+    // Pre-allocate: estimate ~50 chars per line on average
+    let estimated_lines = content.len() / 50 + 1;
+    let mut offsets = Vec::with_capacity(estimated_lines);
+    offsets.push(0u32);
+
+    // Use memchr for SIMD-accelerated newline search
+    for pos in memchr_iter(b'\n', content) {
+        if pos + 1 < content.len() {
+            offsets.push((pos + 1) as u32);
         }
     }
     offsets
@@ -152,9 +160,6 @@ pub fn build_index_with_progress(root_path: &Path, force: bool, silent: bool) ->
         spinner.finish_with_message(format!("Found {} files", total_files));
     }
 
-    // Load app config for parallel processing settings
-    let app_config = AppConfig::load().unwrap_or_default();
-
     // Phase 2: Process in chunks
     let mut chunked_writer = ChunkedIndexWriter::new(&root, config)?;
     let error_count = Arc::new(AtomicUsize::new(0));
@@ -162,188 +167,101 @@ pub fn build_index_with_progress(root_path: &Path, force: bool, silent: bool) ->
 
     let num_chunks = (total_files + chunk_size - 1) / chunk_size;
 
-    if app_config.parallel_chunk_indexing && num_chunks > 1 {
-        // Parallel chunk processing
-        let parallel_count = app_config.effective_parallel_chunk_count().min(num_chunks);
-        if !silent {
-            println!(
-                "Processing {} chunks in parallel (up to {} at a time, {} files per chunk)",
-                num_chunks, parallel_count, chunk_size
+    if num_chunks > 1 && !silent {
+        println!(
+            "Processing in {} chunks of up to {} files each",
+            num_chunks, chunk_size
+        );
+    }
+
+    for (chunk_idx, chunk) in file_entries.chunks(chunk_size).enumerate() {
+        let segment_id = (chunk_idx + 1) as SegmentId;
+
+        // Create progress bar for this chunk
+        let progress_bar = if !silent {
+            let pb = ProgressBar::new(chunk.len() as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                    .unwrap()
+                    .progress_chars("█▓▒░  "),
             );
-        }
-
-        // Pre-compute document ID ranges for each chunk
-        // We need to estimate how many files will pass filtering in each chunk
-        // For simplicity, we'll assign generous ranges and compact later
-        let chunks_data: Vec<_> = file_entries
-            .chunks(chunk_size)
-            .enumerate()
-            .map(|(idx, chunk)| {
-                let segment_id = (idx + 1) as SegmentId;
-                let doc_id_start = (idx * chunk_size + 1) as DocId;
-                (segment_id, doc_id_start, chunk.to_vec())
-            })
-            .collect();
-
-        // Set up multi-progress for parallel display
-        let multi_progress = if !silent {
-            Some(MultiProgress::new())
+            if num_chunks > 1 {
+                pb.set_message(format!("Chunk {}/{}", chunk_idx + 1, num_chunks));
+            } else {
+                pb.set_message("Processing files...");
+            }
+            Some(pb)
         } else {
             None
         };
 
-        // Process chunks in parallel with limited concurrency
-        let index_path = chunked_writer.segments_path().parent().unwrap().to_path_buf();
-        let results: Vec<ParallelChunkResult> = {
-            // Create a thread pool with limited parallelism for chunk processing
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(parallel_count)
-                .build()
-                .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+        let pb_clone = progress_bar.clone();
+        let error_count_clone = error_count.clone();
+        let total_processed_clone = total_processed.clone();
 
-            let results_mutex: Arc<Mutex<Vec<(usize, ParallelChunkResult)>>> =
-                Arc::new(Mutex::new(Vec::with_capacity(num_chunks)));
+        // Process chunk files in parallel using memory-mapped I/O
+        let processed_files: Vec<ProcessedFile> = chunk
+            .par_iter()
+            .filter_map(|(full_path, rel_path)| {
+                // Use memory-mapped I/O for faster file reading
+                let file = match File::open(full_path) {
+                    Ok(f) => f,
+                    Err(_) => {
+                        error_count_clone.fetch_add(1, Ordering::Relaxed);
+                        if let Some(ref pb) = pb_clone {
+                            pb.inc(1);
+                        }
+                        return None;
+                    }
+                };
 
-            pool.scope(|s| {
-                for (chunk_idx, (segment_id, doc_id_start, chunk)) in chunks_data.into_iter().enumerate() {
-                    let error_count = error_count.clone();
-                    let total_processed = total_processed.clone();
-                    let results_mutex = results_mutex.clone();
-                    let index_path = index_path.clone();
-                    let mp = multi_progress.as_ref();
+                let metadata = match file.metadata() {
+                    Ok(m) => m,
+                    Err(_) => {
+                        error_count_clone.fetch_add(1, Ordering::Relaxed);
+                        if let Some(ref pb) = pb_clone {
+                            pb.inc(1);
+                        }
+                        return None;
+                    }
+                };
 
-                    // Create progress bar for this chunk
-                    let progress_bar = mp.map(|mp| {
-                        let pb = mp.add(ProgressBar::new(chunk.len() as u64));
-                        pb.set_style(
-                            ProgressStyle::default_bar()
-                                .template("{spinner:.green} [{bar:30.cyan/blue}] {pos}/{len} chunk {msg}")
-                                .unwrap()
-                                .progress_chars("█▓▒░  "),
-                        );
-                        pb.set_message(format!("{}/{}", chunk_idx + 1, num_chunks));
-                        pb
-                    });
+                let file_size = metadata.len();
 
-                    s.spawn(move |_| {
-                        let pb_clone = progress_bar.clone();
+                // Check size limit before reading
+                if file_size > max_file_size {
+                    if let Some(ref pb) = pb_clone {
+                        pb.inc(1);
+                    }
+                    return None;
+                }
 
-                        // Process files in this chunk (inner parallelism via rayon)
-                        let processed_files: Vec<ProcessedFile> = chunk
-                            .par_iter()
-                            .filter_map(|(full_path, rel_path)| {
-                                let content = match fs::read(full_path) {
-                                    Ok(c) => c,
-                                    Err(_) => {
-                                        error_count.fetch_add(1, Ordering::Relaxed);
-                                        if let Some(ref pb) = pb_clone {
-                                            pb.inc(1);
-                                        }
-                                        return None;
-                                    }
-                                };
+                // Skip empty files
+                if file_size == 0 {
+                    if let Some(ref pb) = pb_clone {
+                        pb.inc(1);
+                    }
+                    return None;
+                }
 
-                                if content.len() as u64 > max_file_size {
-                                    if let Some(ref pb) = pb_clone {
-                                        pb.inc(1);
-                                    }
-                                    return None;
-                                }
-
-                                let mtime = full_path
-                                    .metadata()
-                                    .and_then(|m| m.modified())
-                                    .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64)
-                                    .unwrap_or(0);
-
-                                let result = process_file_content(rel_path.clone(), &content, mtime);
-
-                                if result.is_some() {
-                                    total_processed.fetch_add(1, Ordering::Relaxed);
-                                }
-
+                // Use mmap for files, fall back to read for small files
+                let content: Vec<u8> = if file_size > 4096 {
+                    match unsafe { Mmap::map(&file) } {
+                        Ok(mmap) => mmap.to_vec(),
+                        Err(_) => match fs::read(full_path) {
+                            Ok(c) => c,
+                            Err(_) => {
+                                error_count_clone.fetch_add(1, Ordering::Relaxed);
                                 if let Some(ref pb) = pb_clone {
                                     pb.inc(1);
                                 }
-
-                                result
-                            })
-                            .collect();
-
-                        let file_count = processed_files.len();
-
-                        // Create chunk result with pre-assigned doc IDs
-                        let result = ParallelChunkResult::process(segment_id, doc_id_start, processed_files);
-
-                        // Write segment files
-                        if let Err(e) = ChunkedIndexWriter::write_chunk_segment(&index_path, &result) {
-                            eprintln!("Error writing segment {}: {}", segment_id, e);
-                        }
-
-                        if let Some(pb) = progress_bar {
-                            pb.finish_with_message(format!("{}/{}: {} files", chunk_idx + 1, num_chunks, file_count));
-                        }
-
-                        // Store result for later merging (with index to maintain order)
-                        results_mutex.lock().unwrap().push((chunk_idx, result));
-                    });
-                }
-            });
-
-            // Sort results by chunk index and extract
-            let mut results = Arc::try_unwrap(results_mutex)
-                .expect("All chunk processing threads should have finished")
-                .into_inner()
-                .expect("Mutex should not be poisoned");
-            results.sort_by_key(|(idx, _)| *idx);
-            results.into_iter().map(|(_, r)| r).collect()
-        };
-
-        // Merge all results into global state
-        chunked_writer.merge_parallel_results(results)?;
-
-        let file_count = total_processed.load(Ordering::Relaxed);
-        if !silent {
-            println!("Total: {} files processed across {} segments (parallel)", file_count, num_chunks);
-        }
-    } else {
-        // Sequential chunk processing (original behavior)
-        if num_chunks > 1 && !silent {
-            println!("Processing in {} chunks of up to {} files each", num_chunks, chunk_size);
-        }
-
-        for (chunk_idx, chunk) in file_entries.chunks(chunk_size).enumerate() {
-            let segment_id = (chunk_idx + 1) as SegmentId;
-
-            // Create progress bar for this chunk
-            let progress_bar = if !silent {
-                let pb = ProgressBar::new(chunk.len() as u64);
-                pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
-                        .unwrap()
-                        .progress_chars("█▓▒░  "),
-                );
-                if num_chunks > 1 {
-                    pb.set_message(format!("Chunk {}/{}", chunk_idx + 1, num_chunks));
+                                return None;
+                            }
+                        },
+                    }
                 } else {
-                    pb.set_message("Processing files...");
-                }
-                Some(pb)
-            } else {
-                None
-            };
-
-            let pb_clone = progress_bar.clone();
-            let error_count_clone = error_count.clone();
-            let total_processed_clone = total_processed.clone();
-
-            // Process chunk files in parallel
-            let processed_files: Vec<ProcessedFile> = chunk
-                .par_iter()
-                .filter_map(|(full_path, rel_path)| {
-                    // Read file content
-                    let content = match fs::read(full_path) {
+                    match fs::read(full_path) {
                         Ok(c) => c,
                         Err(_) => {
                             error_count_clone.fetch_add(1, Ordering::Relaxed);
@@ -352,58 +270,57 @@ pub fn build_index_with_progress(root_path: &Path, force: bool, silent: bool) ->
                             }
                             return None;
                         }
-                    };
-
-                    // Check size limit
-                    if content.len() as u64 > max_file_size {
-                        if let Some(ref pb) = pb_clone {
-                            pb.inc(1);
-                        }
-                        return None;
                     }
+                };
 
-                    // Get modification time
-                    let mtime = full_path
-                        .metadata()
-                        .and_then(|m| m.modified())
-                        .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64)
-                        .unwrap_or(0);
+                // Get modification time
+                let mtime = metadata
+                    .modified()
+                    .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64)
+                    .unwrap_or(0);
 
-                    // Process file content (trigrams, tokens, line map)
-                    let result = process_file_content(rel_path.clone(), &content, mtime);
+                // Process file content (trigrams, tokens, line map)
+                let result = process_file_content(rel_path.clone(), &content, mtime);
 
-                    if result.is_some() {
-                        total_processed_clone.fetch_add(1, Ordering::Relaxed);
-                    }
-
-                    if let Some(ref pb) = pb_clone {
-                        pb.inc(1);
-                    }
-
-                    result
-                })
-                .collect();
-
-            let chunk_file_count = processed_files.len();
-
-            if let Some(pb) = progress_bar {
-                if num_chunks > 1 {
-                    pb.finish_with_message(format!("Chunk {}/{}: {} files", chunk_idx + 1, num_chunks, chunk_file_count));
-                } else {
-                    pb.finish_with_message(format!("Processed {} files", chunk_file_count));
+                if result.is_some() {
+                    total_processed_clone.fetch_add(1, Ordering::Relaxed);
                 }
+
+                if let Some(ref pb) = pb_clone {
+                    pb.inc(1);
+                }
+
+                result
+            })
+            .collect();
+
+        let chunk_file_count = processed_files.len();
+
+        if let Some(pb) = progress_bar {
+            if num_chunks > 1 {
+                pb.finish_with_message(format!(
+                    "Chunk {}/{}: {} files",
+                    chunk_idx + 1,
+                    num_chunks,
+                    chunk_file_count
+                ));
+            } else {
+                pb.finish_with_message(format!("Processed {} files", chunk_file_count));
             }
-
-            // Write this chunk as a segment
-            chunked_writer.write_chunk(segment_id, processed_files)?;
-
-            // Memory freed here - processed_files dropped
         }
 
-        let file_count = total_processed.load(Ordering::Relaxed);
-        if num_chunks > 1 && !silent {
-            println!("Total: {} files processed across {} segments", file_count, num_chunks);
-        }
+        // Write this chunk as a segment
+        chunked_writer.write_chunk(segment_id, processed_files)?;
+
+        // Memory freed here - processed_files dropped
+    }
+
+    let file_count = total_processed.load(Ordering::Relaxed);
+    if num_chunks > 1 && !silent {
+        println!(
+            "Total: {} files processed across {} segments",
+            file_count, num_chunks
+        );
     }
 
     // Phase 3: Finalize global data with spinner
