@@ -8,9 +8,62 @@ use globset::Glob;
 use rayon::prelude::*;
 use regex::Regex;
 use roaring::RoaringBitmap;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// Thread-safe regex cache for avoiding repeated compilation
+/// Uses a simple LRU-like approach with a bounded size
+struct RegexCache {
+    cache: Mutex<HashMap<String, Arc<Regex>>>,
+    max_size: usize,
+}
+
+impl RegexCache {
+    fn new(max_size: usize) -> Self {
+        Self {
+            cache: Mutex::new(HashMap::with_capacity(max_size)),
+            max_size,
+        }
+    }
+
+    /// Get or compile a regex pattern
+    fn get_or_compile(&self, pattern: &str) -> Option<Arc<Regex>> {
+        // Check cache first
+        {
+            let cache = self.cache.lock().ok()?;
+            if let Some(re) = cache.get(pattern) {
+                return Some(Arc::clone(re));
+            }
+        }
+
+        // Compile the regex
+        let re = Regex::new(pattern).ok()?;
+        let arc_re = Arc::new(re);
+
+        // Try to cache it
+        if let Ok(mut cache) = self.cache.lock() {
+            // Evict oldest entries if cache is full
+            if cache.len() >= self.max_size {
+                // Simple eviction: remove a random entry
+                if let Some(key) = cache.keys().next().cloned() {
+                    cache.remove(&key);
+                }
+            }
+            cache.insert(pattern.to_string(), Arc::clone(&arc_re));
+        }
+
+        Some(arc_re)
+    }
+}
+
+/// Global regex cache for the executor
+static REGEX_CACHE: std::sync::OnceLock<RegexCache> = std::sync::OnceLock::new();
+
+fn get_regex_cache() -> &'static RegexCache {
+    REGEX_CACHE.get_or_init(|| RegexCache::new(64))
+}
 
 /// Query executor
 pub struct QueryExecutor<'a> {
@@ -466,7 +519,8 @@ impl<'a> QueryExecutor<'a> {
                 Self::find_literal_matches_static(content, text, true, doc_id)
             }
             VerificationStep::Regex(pattern) => {
-                if let Ok(re) = Regex::new(pattern) {
+                // Use cached regex compilation for performance
+                if let Some(re) = get_regex_cache().get_or_compile(pattern) {
                     Self::find_regex_matches_static(content, &re, doc_id)
                 } else {
                     Vec::new()
