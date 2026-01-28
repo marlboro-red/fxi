@@ -78,7 +78,15 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
         .results
         .iter()
-        .map(|result| {
+        .enumerate()
+        .map(|(idx, result)| {
+            let is_selected = idx == app.selected;
+            // Apply selection background to individual spans to prevent overflow onto preview panel
+            let selection_bg = if is_selected {
+                Some(Color::DarkGray)
+            } else {
+                None
+            };
             let path_style = Style::default().fg(Color::Blue);
             let line_style = Style::default().fg(Color::Yellow);
 
@@ -101,10 +109,19 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
             };
 
             // Build line with highlighted match
+            // Apply selection background to each span to prevent overflow
+            let apply_bg = |style: Style| -> Style {
+                if let Some(bg) = selection_bg {
+                    style.bg(bg)
+                } else {
+                    style
+                }
+            };
+
             let mut spans = vec![
-                Span::styled(format!("{}:", path_str), path_style),
-                Span::styled(format!("{}", line_num), line_style),
-                Span::raw("  "),
+                Span::styled(format!("{}:", path_str), apply_bg(path_style)),
+                Span::styled(format!("{}", line_num), apply_bg(line_style)),
+                Span::styled("  ", apply_bg(Style::default())),
             ];
 
             // Adjust match positions for trimming
@@ -120,11 +137,11 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
                 } else {
                     end
                 };
-                spans.extend(highlight_match(&content, adj_start, effective_end));
+                spans.extend(highlight_match(&content, adj_start, effective_end, selection_bg));
             } else {
                 spans.push(Span::styled(
                     content,
-                    Style::default().fg(Color::White),
+                    apply_bg(Style::default().fg(Color::White)),
                 ));
             }
 
@@ -134,17 +151,11 @@ fn draw_results_list(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" Results ({}) ", app.results.len())),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        );
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Results ({}) ", app.results.len())),
+    );
 
     // Use ListState to properly track selection and enable automatic scrolling
     let mut state = ListState::default();
@@ -425,18 +436,28 @@ fn draw_help_panel(f: &mut Frame, area: Rect) {
 }
 
 /// Highlight matches in text, returning owned spans
-fn highlight_match(text: &str, start: usize, end: usize) -> Vec<Span<'static>> {
+/// selection_bg is applied to non-match portions when the item is selected
+fn highlight_match(
+    text: &str,
+    start: usize,
+    end: usize,
+    selection_bg: Option<Color>,
+) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
 
     // Clamp positions to valid char boundaries for UTF-8 safety
     let start = text.floor_char_boundary(start.min(text.len()));
     let end = text.floor_char_boundary(end.min(text.len())).max(start);
 
+    // Base style for non-match text, with optional selection background
+    let base_style = if let Some(bg) = selection_bg {
+        Style::default().fg(Color::White).bg(bg)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
     if start > 0 {
-        spans.push(Span::styled(
-            text[..start].to_string(),
-            Style::default().fg(Color::White),
-        ));
+        spans.push(Span::styled(text[..start].to_string(), base_style));
     }
 
     if end > start {
@@ -450,10 +471,7 @@ fn highlight_match(text: &str, start: usize, end: usize) -> Vec<Span<'static>> {
     }
 
     if end < text.len() {
-        spans.push(Span::styled(
-            text[end..].to_string(),
-            Style::default().fg(Color::White),
-        ));
+        spans.push(Span::styled(text[end..].to_string(), base_style));
     }
 
     spans
