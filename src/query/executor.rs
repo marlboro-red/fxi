@@ -5,9 +5,12 @@ use crate::query::planner::{FilterStep, PlanStep, QueryPlan, VerificationStep};
 use crate::query::scorer::{ScoreContext, Scorer, ScoringWeights};
 use anyhow::Result;
 use globset::Glob;
+use rayon::prelude::*;
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use roaring::RoaringBitmap;
 use std::fs;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Query executor
 pub struct QueryExecutor<'a> {
@@ -50,79 +53,78 @@ impl<'a> QueryExecutor<'a> {
         Ok(results)
     }
 
-    /// Execute the narrowing phase
-    fn execute_plan(&self, plan: &QueryPlan) -> Result<HashSet<DocId>> {
-        let mut candidates: Option<HashSet<DocId>> = None;
-        let mut exclude_set: HashSet<DocId> = HashSet::new();
+    /// Execute the narrowing phase using RoaringBitmap for efficient set operations
+    fn execute_plan(&self, plan: &QueryPlan) -> Result<RoaringBitmap> {
+        let mut candidates: Option<RoaringBitmap> = None;
+        let mut exclude_set = RoaringBitmap::new();
 
         for step in &plan.steps {
             match step {
                 PlanStep::TrigramIntersect(trigrams) => {
-                    // Get postings for each trigram and intersect
-                    let mut trigram_sets: Vec<HashSet<DocId>> = trigrams
+                    // Filter out stop-grams and get (trigram, doc_freq) pairs
+                    let mut trigram_freqs: Vec<_> = trigrams
                         .iter()
                         .filter(|&&t| !self.reader.is_stop_gram(t))
-                        .map(|&t| self.reader.get_trigram_docs(t).into_iter().collect())
+                        .map(|&t| (t, self.reader.get_trigram_doc_freq(t)))
                         .collect();
 
-                    // Sort by size for efficient intersection
-                    trigram_sets.sort_by_key(|s| s.len());
+                    // Sort by ascending frequency for optimal intersection order
+                    trigram_freqs.sort_by_key(|&(_, freq)| freq);
 
-                    if let Some(first) = trigram_sets.first() {
-                        let mut result = first.clone();
-                        for set in trigram_sets.iter().skip(1) {
-                            result.retain(|id| set.contains(id));
+                    if let Some(&(first_trigram, _)) = trigram_freqs.first() {
+                        // Start with smallest posting list
+                        let mut result = self.reader.get_trigram_docs(first_trigram);
+
+                        // Intersect with remaining trigrams (already sorted by frequency)
+                        for &(trigram, _) in trigram_freqs.iter().skip(1) {
+                            if result.is_empty() {
+                                break; // Early termination
+                            }
+                            result &= self.reader.get_trigram_docs(trigram);
                         }
 
                         candidates = Some(match candidates {
-                            Some(existing) => existing
-                                .intersection(&result)
-                                .copied()
-                                .collect(),
+                            Some(existing) => existing & result,
                             None => result,
                         });
                     }
                 }
 
                 PlanStep::TokenLookup(token) => {
-                    let docs: HashSet<DocId> =
-                        self.reader.get_token_docs(token).into_iter().collect();
+                    let docs = self.reader.get_token_docs(token);
 
                     candidates = Some(match candidates {
-                        Some(existing) => existing.intersection(&docs).copied().collect(),
+                        Some(existing) => existing & docs,
                         None => docs,
                     });
                 }
 
                 PlanStep::Union(sub_plans) => {
-                    let mut union: HashSet<DocId> = HashSet::new();
+                    let mut union = RoaringBitmap::new();
                     for sub_plan in sub_plans {
                         let sub_candidates = self.execute_plan(sub_plan)?;
-                        union.extend(sub_candidates);
+                        union |= sub_candidates;
                     }
 
                     candidates = Some(match candidates {
-                        Some(existing) => existing.intersection(&union).copied().collect(),
+                        Some(existing) => existing & union,
                         None => union,
                     });
                 }
 
                 PlanStep::Intersect(sub_plans) => {
-                    let mut intersection: Option<HashSet<DocId>> = None;
+                    let mut intersection: Option<RoaringBitmap> = None;
                     for sub_plan in sub_plans {
                         let sub_candidates = self.execute_plan(sub_plan)?;
                         intersection = Some(match intersection {
-                            Some(existing) => existing
-                                .intersection(&sub_candidates)
-                                .copied()
-                                .collect(),
+                            Some(existing) => existing & sub_candidates,
                             None => sub_candidates,
                         });
                     }
 
                     if let Some(int) = intersection {
                         candidates = Some(match candidates {
-                            Some(existing) => existing.intersection(&int).copied().collect(),
+                            Some(existing) => existing & int,
                             None => int,
                         });
                     }
@@ -130,7 +132,7 @@ impl<'a> QueryExecutor<'a> {
 
                 PlanStep::Exclude(sub_plan) => {
                     let excluded = self.execute_plan(sub_plan)?;
-                    exclude_set.extend(excluded);
+                    exclude_set |= excluded;
                 }
 
                 PlanStep::Filter(filter) => {
@@ -141,25 +143,28 @@ impl<'a> QueryExecutor<'a> {
             }
         }
 
-        // Remove excluded documents
+        // Remove excluded documents using bitmap difference
         if let Some(ref mut cands) = candidates {
-            cands.retain(|id| !exclude_set.contains(id));
+            *cands -= exclude_set;
         }
 
         // If no narrowing steps, start with all valid documents
-        Ok(candidates.unwrap_or_else(|| self.reader.valid_doc_ids().into_iter().collect()))
+        Ok(candidates.unwrap_or_else(|| self.reader.valid_doc_ids()))
     }
 
-    /// Apply document filters
+    /// Apply document filters using RoaringBitmap
     fn apply_filter(
         &self,
         filter: &FilterStep,
-        candidates: Option<&HashSet<DocId>>,
-    ) -> Result<HashSet<DocId>> {
-        let docs = if let Some(cands) = candidates {
-            cands.iter().copied().collect::<Vec<_>>()
+        candidates: Option<&RoaringBitmap>,
+    ) -> Result<RoaringBitmap> {
+        // Get the set of doc_ids to filter
+        let owned_valid_docs;
+        let doc_ids: Vec<u32> = if let Some(cands) = candidates {
+            cands.iter().collect()
         } else {
-            self.reader.valid_doc_ids()
+            owned_valid_docs = self.reader.valid_doc_ids();
+            owned_valid_docs.iter().collect()
         };
 
         let path_matcher = filter.path_glob.as_ref().map(|g| {
@@ -168,9 +173,9 @@ impl<'a> QueryExecutor<'a> {
                 .compile_matcher()
         });
 
-        let mut result = HashSet::new();
+        let mut result = RoaringBitmap::new();
 
-        for doc_id in docs {
+        for doc_id in doc_ids {
             if let Some(doc) = self.reader.get_document(doc_id) {
                 // Skip stale/tombstone
                 if !doc.is_valid() {
@@ -240,21 +245,19 @@ impl<'a> QueryExecutor<'a> {
         Ok(result)
     }
 
-    /// Verify candidates against actual file content
+    /// Verify candidates against actual file content using parallel processing
     fn verify_candidates(
         &self,
-        candidates: &HashSet<DocId>,
+        candidates: &RoaringBitmap,
         plan: &QueryPlan,
     ) -> Result<Vec<SearchMatch>> {
-        let mut matches = Vec::new();
-
         let verification = match &plan.verification {
             Some(v) => v,
-            None => return Ok(matches),
+            None => return Ok(Vec::new()),
         };
 
         // Extract search terms for filename matching
-        let search_terms = Self::extract_search_terms(verification);
+        let search_terms = Arc::new(Self::extract_search_terms(verification));
 
         // Extract boost factor from verification steps
         let boost = Self::extract_boost(verification);
@@ -262,20 +265,30 @@ impl<'a> QueryExecutor<'a> {
         // Extract line filter from plan (if present)
         let (line_start, line_end) = Self::extract_line_filter(&plan.steps);
 
-        // First pass: collect all matches grouped by doc_id
-        let mut doc_matches: HashMap<DocId, Vec<(u32, String, usize, usize)>> = HashMap::new();
+        // Collect candidate doc_ids with their paths for parallel processing
+        let candidate_infos: Vec<(DocId, PathBuf, PathBuf, u64)> = candidates
+            .iter()
+            .filter_map(|doc_id| {
+                self.reader.get_document(doc_id).and_then(|doc| {
+                    self.reader.get_full_path(doc).map(|full_path| {
+                        let rel_path = self.reader.get_path(doc).cloned().unwrap_or_default();
+                        (doc_id, full_path, rel_path, doc.mtime)
+                    })
+                })
+            })
+            .collect();
 
-        for &doc_id in candidates {
-            if let Some(doc) = self.reader.get_document(doc_id) {
-                if let Some(full_path) = self.reader.get_full_path(doc) {
+        // Process files in parallel using Rayon
+        let all_matches: Vec<(DocId, PathBuf, u64, Vec<(u32, String, usize, usize)>)> =
+            candidate_infos
+                .into_par_iter()
+                .filter_map(|(doc_id, full_path, rel_path, mtime)| {
                     // Read file content
-                    let content = match fs::read_to_string(&full_path) {
-                        Ok(c) => c,
-                        Err(_) => continue,
-                    };
+                    let content = fs::read_to_string(&full_path).ok()?;
 
                     // Find matches
-                    let mut file_matches = self.verify_content(&content, verification, doc_id);
+                    let mut file_matches =
+                        Self::verify_content_static(&content, verification, doc_id);
 
                     // Apply line filter if specified
                     if line_start.is_some() || line_end.is_some() {
@@ -286,45 +299,43 @@ impl<'a> QueryExecutor<'a> {
                         });
                     }
 
-                    if !file_matches.is_empty() {
-                        doc_matches.insert(doc_id, file_matches);
+                    if file_matches.is_empty() {
+                        None
+                    } else {
+                        Some((doc_id, rel_path, mtime, file_matches))
                     }
-                }
-            }
-        }
+                })
+                .collect();
 
-        // Second pass: calculate scores and build results
-        for (doc_id, file_matches) in doc_matches {
-            if let Some(doc) = self.reader.get_document(doc_id) {
-                let path = self.reader.get_path(doc).cloned().unwrap_or_default();
+        // Build final results with scoring
+        let mut matches = Vec::new();
+        for (doc_id, path, mtime, file_matches) in all_matches {
+            // Build score context
+            let filename_match = search_terms
+                .iter()
+                .any(|term| Scorer::term_in_filename(&path, term));
 
-                // Build score context
-                let filename_match = search_terms
-                    .iter()
-                    .any(|term| Scorer::term_in_filename(&path, term));
+            let score_ctx = ScoreContext {
+                match_count: file_matches.len(),
+                filename_match,
+                depth: Scorer::path_depth(&path),
+                mtime,
+                boost,
+            };
 
-                let score_ctx = ScoreContext {
-                    match_count: file_matches.len(),
-                    filename_match,
-                    depth: Scorer::path_depth(&path),
-                    mtime: doc.mtime,
-                    boost,
-                };
+            let score = self.scorer.calculate_score(&score_ctx);
 
-                let score = self.scorer.calculate_score(&score_ctx);
-
-                // Create matches with calculated score
-                for (line_num, line_content, start, end) in file_matches {
-                    matches.push(SearchMatch {
-                        doc_id,
-                        path: path.clone(),
-                        line_number: line_num,
-                        line_content,
-                        match_start: start,
-                        match_end: end,
-                        score,
-                    });
-                }
+            // Create matches with calculated score
+            for (line_num, line_content, start, end) in file_matches {
+                matches.push(SearchMatch {
+                    doc_id,
+                    path: path.clone(),
+                    line_number: line_num,
+                    line_content,
+                    match_start: start,
+                    match_end: end,
+                    score,
+                });
             }
         }
 
@@ -413,41 +424,40 @@ impl<'a> QueryExecutor<'a> {
         }
     }
 
-    /// Verify content against a verification step
-    fn verify_content(
-        &self,
+    /// Verify content against a verification step (static version for parallel processing)
+    fn verify_content_static(
         content: &str,
         verification: &VerificationStep,
         doc_id: DocId,
     ) -> Vec<(u32, String, usize, usize)> {
         match verification {
             VerificationStep::Literal(text) => {
-                self.find_literal_matches(content, text, false, doc_id)
+                Self::find_literal_matches_static(content, text, false, doc_id)
             }
             VerificationStep::BoostedLiteral { text, boost: _ } => {
                 // Boosted literal: same matching as regular literal
                 // The boost is applied during scoring, not matching
-                self.find_literal_matches(content, text, false, doc_id)
+                Self::find_literal_matches_static(content, text, false, doc_id)
             }
             VerificationStep::Phrase(text) => {
-                self.find_literal_matches(content, text, true, doc_id)
+                Self::find_literal_matches_static(content, text, true, doc_id)
             }
             VerificationStep::Regex(pattern) => {
                 if let Ok(re) = Regex::new(pattern) {
-                    self.find_regex_matches(content, &re, doc_id)
+                    Self::find_regex_matches_static(content, &re, doc_id)
                 } else {
                     Vec::new()
                 }
             }
             VerificationStep::Near { terms, distance } => {
-                self.find_proximity_matches(content, terms, *distance, doc_id)
+                Self::find_proximity_matches_static(content, terms, *distance, doc_id)
             }
             VerificationStep::And(steps) => {
                 // All must have at least one match
                 let mut all_matches: Option<Vec<(u32, String, usize, usize)>> = None;
 
                 for step in steps {
-                    let step_matches = self.verify_content(content, step, doc_id);
+                    let step_matches = Self::verify_content_static(content, step, doc_id);
                     if step_matches.is_empty() {
                         return Vec::new();
                     }
@@ -466,12 +476,12 @@ impl<'a> QueryExecutor<'a> {
             VerificationStep::Or(steps) => {
                 let mut all_matches = Vec::new();
                 for step in steps {
-                    all_matches.extend(self.verify_content(content, step, doc_id));
+                    all_matches.extend(Self::verify_content_static(content, step, doc_id));
                 }
                 all_matches
             }
             VerificationStep::Not(inner) => {
-                let inner_matches = self.verify_content(content, inner, doc_id);
+                let inner_matches = Self::verify_content_static(content, inner, doc_id);
                 if inner_matches.is_empty() {
                     // Return a "match" indicating the file doesn't contain the pattern
                     vec![(1, content.lines().next().unwrap_or("").to_string(), 0, 0)]
@@ -482,9 +492,9 @@ impl<'a> QueryExecutor<'a> {
         }
     }
 
-    /// Find proximity matches: all terms must appear within distance lines of each other
-    fn find_proximity_matches(
-        &self,
+
+    /// Find proximity matches: all terms must appear within distance lines of each other (static)
+    fn find_proximity_matches_static(
         content: &str,
         terms: &[String],
         distance: u32,
@@ -494,15 +504,19 @@ impl<'a> QueryExecutor<'a> {
             return Vec::new();
         }
 
+        // Pre-lowercase all terms once
+        let terms_lower: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
+
         // Collect line numbers for each term
         let mut term_lines: Vec<Vec<u32>> = Vec::with_capacity(terms.len());
 
-        for term in terms {
-            let term_lower = term.to_lowercase();
+        for term_lower in &terms_lower {
             let mut lines_with_term = Vec::new();
 
             for (line_num, line) in content.lines().enumerate() {
-                if line.to_lowercase().contains(&term_lower) {
+                // Use ASCII case-insensitive comparison when possible
+                let line_lower = line.to_lowercase();
+                if line_lower.contains(term_lower) {
                     lines_with_term.push((line_num + 1) as u32);
                 }
             }
@@ -544,8 +558,8 @@ impl<'a> QueryExecutor<'a> {
                 // Found a valid proximity match - return the first term's match
                 let line_idx = (first_line - 1) as usize;
                 if let Some(line_content) = lines.get(line_idx) {
-                    let term_lower = terms[0].to_lowercase();
-                    if let Some(pos) = line_content.to_lowercase().find(&term_lower) {
+                    let line_lower = line_content.to_lowercase();
+                    if let Some(pos) = line_lower.find(&terms_lower[0]) {
                         matches.push((
                             first_line,
                             line_content.to_string(),
@@ -560,45 +574,70 @@ impl<'a> QueryExecutor<'a> {
         matches
     }
 
-    /// Find literal string matches
-    fn find_literal_matches(
-        &self,
+
+    /// Find literal string matches using memchr for fast search (static)
+    fn find_literal_matches_static(
         content: &str,
         needle: &str,
         case_sensitive: bool,
         _doc_id: DocId,
     ) -> Vec<(u32, String, usize, usize)> {
+        use memchr::memmem;
+
         let mut matches = Vec::new();
 
+        // Pre-lowercase the needle once for case-insensitive search
         let search_needle = if case_sensitive {
             needle.to_string()
         } else {
             needle.to_lowercase()
         };
+        let needle_bytes = search_needle.as_bytes();
+        let finder = memmem::Finder::new(needle_bytes);
 
         for (line_num, line) in content.lines().enumerate() {
-            let search_line = if case_sensitive {
-                line.to_string()
+            let search_bytes = if case_sensitive {
+                // Use line bytes directly for case-sensitive search
+                line.as_bytes()
             } else {
-                line.to_lowercase()
+                // We need to lowercase the line for case-insensitive search
+                // This is unavoidable for non-ASCII text
+                continue; // Will be handled below
             };
 
-            if let Some(pos) = search_line.find(&search_needle) {
-                matches.push((
-                    (line_num + 1) as u32,
-                    line.to_string(),
-                    pos,
-                    pos + needle.len(),
-                ));
+            if case_sensitive {
+                if let Some(pos) = finder.find(search_bytes) {
+                    matches.push((
+                        (line_num + 1) as u32,
+                        line.to_string(),
+                        pos,
+                        pos + needle.len(),
+                    ));
+                }
+            }
+        }
+
+        // Handle case-insensitive search separately (requires lowercasing)
+        if !case_sensitive {
+            for (line_num, line) in content.lines().enumerate() {
+                let line_lower = line.to_lowercase();
+                if let Some(pos) = finder.find(line_lower.as_bytes()) {
+                    matches.push((
+                        (line_num + 1) as u32,
+                        line.to_string(),
+                        pos,
+                        pos + needle.len(),
+                    ));
+                }
             }
         }
 
         matches
     }
 
-    /// Find regex matches
-    fn find_regex_matches(
-        &self,
+
+    /// Find regex matches (static)
+    fn find_regex_matches_static(
         content: &str,
         regex: &Regex,
         _doc_id: DocId,
@@ -618,6 +657,7 @@ impl<'a> QueryExecutor<'a> {
 
         matches
     }
+
 
     /// Sort results by the specified order
     fn sort_results(&self, results: &mut [SearchMatch], order: SortOrder) {

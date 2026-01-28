@@ -5,6 +5,7 @@ use crate::query::{parse_query, QueryExecutor};
 use crate::tui::highlighter::SyntaxHighlighter;
 use crate::utils::find_codebase_root;
 use anyhow::Result;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -34,6 +35,8 @@ pub struct App {
     pub preview_content: Option<String>,
     /// Path of the currently previewed file (for syntax highlighting)
     pub preview_path: Option<PathBuf>,
+    /// Cache of highlighted content by file path (cleared on new search)
+    highlight_cache: HashMap<PathBuf, Vec<Vec<ratatui::text::Span<'static>>>>,
     pub status_message: String,
     pub index_available: bool,
     /// Pending key for vim multi-key commands (e.g., 'g' for 'gg')
@@ -83,6 +86,7 @@ impl App {
             preview_scroll: 0,
             preview_content: None,
             preview_path: None,
+            highlight_cache: HashMap::new(),
             status_message: status,
             index_available,
             pending_key: None,
@@ -101,6 +105,9 @@ impl App {
     }
 
     pub fn execute_search(&mut self) {
+        // Clear highlight cache on new search
+        self.highlight_cache.clear();
+
         if self.query.is_empty() {
             self.results.clear();
             self.status_message = if self.index_available {
@@ -197,10 +204,16 @@ impl App {
         if let Some(result) = self.results.get(self.selected) {
             let full_path = self.root_path.join(&result.path);
             if let Ok(content) = std::fs::read_to_string(&full_path) {
-                self.preview_content = Some(content);
-                self.preview_path = Some(full_path);
+                self.preview_content = Some(content.clone());
+                self.preview_path = Some(full_path.clone());
                 // Scroll to show the match
                 self.preview_scroll = result.line_number.saturating_sub(5) as usize;
+
+                // Cache highlighted content if not already cached
+                if !self.highlight_cache.contains_key(&full_path) {
+                    let highlighted = self.highlighter.highlight_content(&content, &full_path);
+                    self.highlight_cache.insert(full_path, highlighted);
+                }
             } else {
                 self.preview_content = None;
                 self.preview_path = None;
@@ -209,6 +222,11 @@ impl App {
             self.preview_content = None;
             self.preview_path = None;
         }
+    }
+
+    /// Get cached highlighted content for the current preview
+    pub fn get_highlighted(&self) -> Option<&Vec<Vec<ratatui::text::Span<'static>>>> {
+        self.preview_path.as_ref().and_then(|p| self.highlight_cache.get(p))
     }
 
     pub fn scroll_preview_down(&mut self) {

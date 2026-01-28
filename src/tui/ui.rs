@@ -165,10 +165,8 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
             .map(|r| r.line_number as usize)
             .unwrap_or(0);
 
-        // Use syntax highlighting if we have a file path
-        let highlighted_lines = app.preview_path.as_ref().map(|path| {
-            app.highlighter.highlight_content(preview, path)
-        });
+        // Use cached highlighted content (computed in update_preview, cached per file)
+        let highlighted_lines = app.get_highlighted();
 
         let lines: Vec<Line> = preview
             .lines()
