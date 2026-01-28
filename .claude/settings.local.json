@@ -6,7 +6,9 @@
       "Bash(target\\\\release\\\\fxi.exe index:*)",
       "Bash(./target/release/fxi.exe index:*)",
       "Bash(./target/release/fxi.exe search:*)",
-      "Bash(cargo check:*)"
+      "Bash(cargo check:*)",
+      "Bash(git fetch:*)",
+      "Bash(git merge:*)"
     ]
   }
 }

@@ -135,6 +135,7 @@ impl SegmentReader {
     }
 
     /// Get the doc frequency for a trigram (number of documents containing it)
+    #[allow(dead_code)]
     fn get_trigram_doc_freq(&self, trigram: Trigram) -> u32 {
         self.trigram_dict
             .lookup(trigram)
@@ -307,6 +308,7 @@ impl IndexReader {
     }
 
     /// Get documents matching a trigram (queries all segments in parallel) as a RoaringBitmap
+    #[allow(dead_code)]
     pub fn get_trigram_docs(&self, trigram: Trigram) -> RoaringBitmap {
         if self.segments.len() <= 1 {
             // Single segment - no parallelization overhead
@@ -327,6 +329,7 @@ impl IndexReader {
     }
 
     /// Get the total doc frequency for a trigram across all segments (parallel)
+    #[allow(dead_code)]
     pub fn get_trigram_doc_freq(&self, trigram: Trigram) -> u32 {
         if self.segments.len() <= 1 {
             self.segments
@@ -393,6 +396,7 @@ impl IndexReader {
     /// Check if any segment might contain all the given trigrams using bloom filters.
     /// This is a fast pre-filter before doing expensive posting list operations.
     /// Returns true if at least one segment might contain all trigrams.
+    #[allow(dead_code)]
     #[inline]
     pub fn might_contain_trigrams(&self, trigrams: &[Trigram]) -> bool {
         if trigrams.is_empty() {
@@ -489,6 +493,7 @@ impl IndexReader {
 
     /// Read file content without caching (for parallel access).
     /// Use this when reading many files in parallel to avoid lock contention.
+    #[allow(dead_code)]
     #[inline]
     pub fn read_file_uncached(path: &Path) -> Option<String> {
         std::fs::read_to_string(path).ok()
@@ -496,6 +501,7 @@ impl IndexReader {
 
     /// Clear the file content cache.
     /// Call this after index updates to ensure stale content isn't served.
+    #[allow(dead_code)]
     pub fn clear_file_cache(&self) {
         if let Ok(mut cache) = self.file_cache.lock() {
             cache.clear();
