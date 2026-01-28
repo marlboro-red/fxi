@@ -52,7 +52,10 @@ pub fn run(path: PathBuf, initial_query: Option<String>) -> Result<()> {
     result
 }
 
-fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
+fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()>
+where
+    <B as ratatui::backend::Backend>::Error: Send + Sync + 'static,
+{
     loop {
         // Check for background index load completion (non-blocking)
         app.poll_index_load();
