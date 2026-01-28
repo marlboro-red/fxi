@@ -10,7 +10,29 @@
       "Bash(git fetch:*)",
       "Bash(git merge:*)",
       "Bash(git log:*)",
-      "Bash(cargo clippy:*)"
+      "Bash(cargo clippy:*)",
+      "Bash(./target/release/fxi index:*)",
+      "Bash(./target/release/fxi:*)",
+      "Bash(__NEW_LINE_546ad2eb8f616f25__ echo \"\")",
+      "Bash(time rg:*)",
+      "Bash(# Simple benchmark echo \"\"fxi \\(warm daemon\\):\"\" time ./target/release/fxi \"\"fn main\"\" -l)",
+      "Bash(done)",
+      "Bash(__NEW_LINE_d7094b60e235ebb0__ echo \"\")",
+      "Bash(for i in 1 2 3)",
+      "Bash(do)",
+      "Bash(/usr/bin/time:*)",
+      "Bash(__NEW_LINE_a983e88653ca4f98__ echo \"\")",
+      "Bash(__NEW_LINE_d3b16eb3b8dc8e7b__ echo \"\")",
+      "Bash(/usr/bin/time -p rg:*)",
+      "Bash(# Start fresh - restart daemon ./target/release/fxi daemon stop ./target/release/fxi daemon start sleep 2 # Test on chromium with simpler approach echo \"\"Testing fxi on chromium...\"\" ./target/release/fxi \"\"Browser\"\" -p ../chromium -c --no-color -n 1000 2>&1)",
+      "Bash(# Clean rebuild cargo clean cargo build --release 2>&1)",
+      "Bash(# Compare what files are being found echo \"\"Sample files found by rg but not fxi:\"\" rg \"\"nullptr\"\" -l ../chromium)",
+      "Bash(# Check if specific file is indexed echo \"\"Checking sql/recovery.cc:\"\" ./target/release/fxi \"\"sql/recovery\"\" -p ../chromium -l -n 10 echo \"\"\"\" echo \"\"Testing file filter:\"\" ./target/release/fxi \"\"nullptr\"\" -p ../chromium -l -n 10)",
+      "Bash(# Check file extensions being returned echo \"\"File extensions in fxi results:\"\" ./target/release/fxi \"\"nullptr\"\" -p ../chromium -l -n 1000)",
+      "Bash(# *)",
+      "Bash(echo *)",
+      "Bash(# Clean file extension count echo \"\"File extensions in fxi results \\(clean\\):\"\" ./target/release/fxi \"\"nullptr\"\" -p ../chromium -l -n 5000)",
+      "Bash(# Let''s check the trigrams for nullptr # Also let''s see if we can find more files by using a different search method echo \"\"Testing exact match with quotes:\"\" ./target/release/fxi ''\"\"nullptr\"\"'' -p ../chromium -l -n 5000)"
     ]
   }
 }

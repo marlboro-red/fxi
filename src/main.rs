@@ -1,4 +1,5 @@
 mod index;
+mod output;
 mod query;
 mod server;
 mod tui;
@@ -15,13 +16,44 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Search query (when no subcommand is given)
-    #[arg(trailing_var_arg = true)]
-    query: Vec<String>,
+    /// Search pattern (when no subcommand is given)
+    pattern: Option<String>,
 
     /// Path to search in
     #[arg(short, long, default_value = ".")]
     path: PathBuf,
+
+    /// Lines of context after match (-A)
+    #[arg(short = 'A', long, default_value = "0")]
+    after_context: u32,
+
+    /// Lines of context before match (-B)
+    #[arg(short = 'B', long, default_value = "0")]
+    before_context: u32,
+
+    /// Lines of context (both directions, -C)
+    #[arg(short = 'C', long)]
+    context: Option<u32>,
+
+    /// Case insensitive search (-i)
+    #[arg(short = 'i', long)]
+    ignore_case: bool,
+
+    /// Maximum results
+    #[arg(short = 'n', long, default_value = "100")]
+    max_count: usize,
+
+    /// Only print filenames (-l)
+    #[arg(short = 'l', long)]
+    files_with_matches: bool,
+
+    /// Print match count per file (-c)
+    #[arg(short = 'c', long)]
+    count: bool,
+
+    /// Disable colored output
+    #[arg(long)]
+    no_color: bool,
 }
 
 #[derive(Subcommand)]
@@ -36,13 +68,10 @@ enum Commands {
         #[arg(short, long)]
         force: bool,
     },
-    /// Search the index (interactive TUI mode)
+    /// Interactive search TUI
     Search {
-        /// Initial query
-        query: Option<String>,
-
         /// Path to search in
-        #[arg(short, long, default_value = ".")]
+        #[arg(default_value = ".")]
         path: PathBuf,
     },
     /// Show index statistics
@@ -97,8 +126,8 @@ fn main() -> Result<()> {
             // Auto-detect codebase root
             index::build::build_index_auto(&path, force)?;
         }
-        Some(Commands::Search { query, path }) => {
-            tui::run(path, query)?;
+        Some(Commands::Search { path }) => {
+            tui::run(path, None)?;
         }
         Some(Commands::Stats { path }) => {
             index::stats::show_stats(&path)?;
@@ -118,13 +147,23 @@ fn main() -> Result<()> {
             handle_daemon_command(action)?;
         }
         None => {
-            if cli.query.is_empty() {
-                // Interactive mode
-                tui::run(cli.path, None)?;
+            if let Some(pattern) = cli.pattern {
+                // Direct content search (ripgrep-like)
+                handle_grep_command(
+                    pattern,
+                    cli.path,
+                    cli.after_context,
+                    cli.before_context,
+                    cli.context,
+                    cli.ignore_case,
+                    cli.max_count,
+                    cli.files_with_matches,
+                    cli.count,
+                    cli.no_color,
+                )?;
             } else {
-                // Direct query mode
-                let query_str = cli.query.join(" ");
-                tui::run(cli.path, Some(query_str))?;
+                // Interactive TUI mode
+                tui::run(cli.path, None)?;
             }
         }
     }
@@ -253,4 +292,113 @@ fn handle_daemon_command(action: DaemonAction) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_grep_command(
+    pattern: String,
+    path: PathBuf,
+    after_context: u32,
+    before_context: u32,
+    context: Option<u32>,
+    ignore_case: bool,
+    max_count: usize,
+    files_with_matches: bool,
+    count: bool,
+    no_color: bool,
+) -> Result<()> {
+    use server::protocol::ContentSearchOptions;
+
+    // Find codebase root
+    let root = utils::find_codebase_root(&path)?;
+
+    // Resolve context flags (-C overrides -A and -B)
+    let (ctx_before, ctx_after) = if let Some(c) = context {
+        (c, c)
+    } else {
+        (before_context, after_context)
+    };
+
+    let options = ContentSearchOptions {
+        context_before: ctx_before,
+        context_after: ctx_after,
+        case_insensitive: ignore_case,
+    };
+
+    // Try to use daemon for warm search
+    let matches = if let Some(mut client) = server::IndexClient::connect() {
+        match client.content_search(&pattern, &root, max_count, options) {
+            Ok(response) => response.matches,
+            Err(e) => {
+                eprintln!("Daemon search failed, falling back to direct search: {}", e);
+                do_direct_content_search(&pattern, &root, max_count, ctx_before, ctx_after, ignore_case)?
+            }
+        }
+    } else {
+        // Fall back to direct search without daemon
+        do_direct_content_search(&pattern, &root, max_count, ctx_before, ctx_after, ignore_case)?
+    };
+
+    // Output results
+    let color = !no_color;
+    // Use heading style when results span multiple files
+    let use_heading = matches.iter().map(|m| &m.path).collect::<std::collections::HashSet<_>>().len() > 1;
+
+    if files_with_matches {
+        output::print_files_only(&matches)?;
+    } else if count {
+        output::print_match_counts(&matches)?;
+    } else {
+        output::print_content_matches(&matches, color, use_heading)?;
+    }
+
+    Ok(())
+}
+
+/// Direct content search without daemon
+fn do_direct_content_search(
+    pattern: &str,
+    root: &PathBuf,
+    limit: usize,
+    context_before: u32,
+    context_after: u32,
+    case_insensitive: bool,
+) -> Result<Vec<server::protocol::ContentMatch>> {
+    use crate::index::reader::IndexReader;
+    use crate::query::{parse_query, QueryExecutor};
+
+    // Load index
+    let reader = IndexReader::open(root)?;
+
+    // Build query - handle case insensitivity
+    let query_str = if case_insensitive {
+        format!("re:/(?i){}/", regex::escape(pattern))
+    } else {
+        pattern.to_string()
+    };
+
+    let parsed = parse_query(&query_str);
+    if parsed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let executor = QueryExecutor::new(&reader);
+    let matches = executor.execute_with_content(&parsed, context_before, context_after)?;
+
+    // Convert to protocol type and apply limit
+    let result: Vec<server::protocol::ContentMatch> = matches
+        .into_iter()
+        .take(limit)
+        .map(|m| server::protocol::ContentMatch {
+            path: m.path,
+            line_number: m.line_number,
+            line_content: m.line_content,
+            match_start: m.match_start,
+            match_end: m.match_end,
+            context_before: m.context_before,
+            context_after: m.context_after,
+        })
+        .collect();
+
+    Ok(result)
 }

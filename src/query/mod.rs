@@ -3,6 +3,8 @@ pub mod parser;
 pub mod planner;
 pub mod scorer;
 
+#[allow(unused_imports)]
+pub use executor::ContentMatchResult;
 pub use executor::QueryExecutor;
 pub use parser::parse_query;
 // Re-exports for public API

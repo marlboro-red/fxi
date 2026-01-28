@@ -93,6 +93,18 @@ fn get_regex_cache() -> &'static RegexCache {
     REGEX_CACHE.get_or_init(|| RegexCache::new(64))
 }
 
+/// Result for content-aware search
+#[derive(Debug, Clone)]
+pub struct ContentMatchResult {
+    pub path: PathBuf,
+    pub line_number: u32,
+    pub line_content: String,
+    pub match_start: usize,
+    pub match_end: usize,
+    pub context_before: Vec<(u32, String)>,
+    pub context_after: Vec<(u32, String)>,
+}
+
 /// Query executor
 pub struct QueryExecutor<'a> {
     reader: &'a IndexReader,
@@ -148,6 +160,175 @@ impl<'a> QueryExecutor<'a> {
         results.truncate(query.options.limit);
 
         Ok(results)
+    }
+
+    /// Execute query returning content matches with line content and context
+    pub fn execute_with_content(
+        &self,
+        query: &Query,
+        context_before: u32,
+        context_after: u32,
+    ) -> Result<Vec<ContentMatchResult>> {
+        let plan = QueryPlan::from_query(query);
+        let candidates = self.execute_plan(&plan)?;
+
+        let verification = match &plan.verification {
+            Some(v) => v,
+            None => return Ok(Vec::new()),
+        };
+
+        // Extract line filter from plan (if present)
+        let (line_start, line_end) = Self::extract_line_filter(&plan.steps);
+
+        // Collect candidate doc_ids with their paths for processing
+        let candidate_infos: Vec<(DocId, PathBuf, PathBuf)> = candidates
+            .iter()
+            .filter_map(|doc_id| {
+                self.reader.get_document(doc_id).and_then(|doc| {
+                    self.reader.get_full_path(doc).map(|full_path| {
+                        let rel_path = self.reader.get_path(doc).cloned().unwrap_or_default();
+                        (doc_id, full_path, rel_path)
+                    })
+                })
+            })
+            .collect();
+
+        let candidate_count = candidate_infos.len();
+        let use_cache = !should_use_parallel(candidate_count);
+
+        let mut all_results = Vec::new();
+
+        if use_cache {
+            // Sequential processing with cache
+            for (_doc_id, full_path, rel_path) in candidate_infos {
+                let content = match self.reader.read_file_cached(&full_path) {
+                    Some(c) => c,
+                    None => continue,
+                };
+
+                let file_matches = Self::verify_content_static(&content, verification, 0);
+
+                for (line_num, line_content, start, end) in file_matches {
+                    // Apply line filter if specified
+                    if let Some(min) = line_start {
+                        if line_num < min {
+                            continue;
+                        }
+                    }
+                    if let Some(max) = line_end {
+                        if line_num > max {
+                            continue;
+                        }
+                    }
+
+                    let (ctx_before, ctx_after) =
+                        Self::extract_context_lines(&content, line_num, context_before, context_after);
+
+                    all_results.push(ContentMatchResult {
+                        path: rel_path.clone(),
+                        line_number: line_num,
+                        line_content,
+                        match_start: start,
+                        match_end: end,
+                        context_before: ctx_before,
+                        context_after: ctx_after,
+                    });
+                }
+            }
+        } else {
+            // Parallel processing
+            let results: Vec<Vec<ContentMatchResult>> = candidate_infos
+                .into_par_iter()
+                .filter_map(|(_doc_id, full_path, rel_path)| {
+                    let content = fs::read_to_string(&full_path).ok()?;
+                    let file_matches = Self::verify_content_static(&content, verification, 0);
+
+                    if file_matches.is_empty() {
+                        return None;
+                    }
+
+                    let mut matches = Vec::new();
+                    for (line_num, line_content, start, end) in file_matches {
+                        // Apply line filter if specified
+                        if let Some(min) = line_start {
+                            if line_num < min {
+                                continue;
+                            }
+                        }
+                        if let Some(max) = line_end {
+                            if line_num > max {
+                                continue;
+                            }
+                        }
+
+                        let (ctx_before, ctx_after) =
+                            Self::extract_context_lines(&content, line_num, context_before, context_after);
+
+                        matches.push(ContentMatchResult {
+                            path: rel_path.clone(),
+                            line_number: line_num,
+                            line_content,
+                            match_start: start,
+                            match_end: end,
+                            context_before: ctx_before,
+                            context_after: ctx_after,
+                        });
+                    }
+
+                    if matches.is_empty() {
+                        None
+                    } else {
+                        Some(matches)
+                    }
+                })
+                .collect();
+
+            for file_results in results {
+                all_results.extend(file_results);
+            }
+        }
+
+        // Sort by path and line number
+        all_results.sort_by(|a, b| {
+            match a.path.cmp(&b.path) {
+                std::cmp::Ordering::Equal => a.line_number.cmp(&b.line_number),
+                other => other,
+            }
+        });
+
+        Ok(all_results)
+    }
+
+    /// Extract context lines around a match
+    fn extract_context_lines(
+        content: &str,
+        match_line: u32,
+        before: u32,
+        after: u32,
+    ) -> (Vec<(u32, String)>, Vec<(u32, String)>) {
+        let lines: Vec<&str> = content.lines().collect();
+        let match_idx = (match_line - 1) as usize;
+
+        let mut ctx_before = Vec::new();
+        let mut ctx_after = Vec::new();
+
+        // Extract lines before
+        let start_idx = match_idx.saturating_sub(before as usize);
+        for i in start_idx..match_idx {
+            if let Some(line) = lines.get(i) {
+                ctx_before.push(((i + 1) as u32, line.to_string()));
+            }
+        }
+
+        // Extract lines after
+        let end_idx = (match_idx + 1 + after as usize).min(lines.len());
+        for i in (match_idx + 1)..end_idx {
+            if let Some(line) = lines.get(i) {
+                ctx_after.push(((i + 1) as u32, line.to_string()));
+            }
+        }
+
+        (ctx_before, ctx_after)
     }
 
     /// Execute the narrowing phase using RoaringBitmap for efficient set operations

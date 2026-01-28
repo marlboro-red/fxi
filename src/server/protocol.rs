@@ -8,6 +8,17 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
+/// Options for content search
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ContentSearchOptions {
+    /// Lines of context before match (-B flag)
+    pub context_before: u32,
+    /// Lines of context after match (-A flag)
+    pub context_after: u32,
+    /// Case insensitive search (-i flag)
+    pub case_insensitive: bool,
+}
+
 /// Request from client to server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -20,6 +31,18 @@ pub enum Request {
         root_path: PathBuf,
         /// Maximum number of results
         limit: usize,
+    },
+
+    /// Execute a content search query (ripgrep-like)
+    ContentSearch {
+        /// The search pattern
+        pattern: String,
+        /// Root path of the codebase to search
+        root_path: PathBuf,
+        /// Maximum number of results
+        limit: usize,
+        /// Content search options
+        options: ContentSearchOptions,
     },
 
     /// Check server health and get stats
@@ -41,6 +64,9 @@ pub enum Request {
 pub enum Response {
     /// Search results
     Search(SearchResponse),
+
+    /// Content search results (ripgrep-like)
+    ContentSearch(ContentSearchResponse),
 
     /// Server status
     Status(StatusResponse),
@@ -76,6 +102,26 @@ pub struct SearchMatchData {
     pub path: PathBuf,
     pub line_number: u32,
     pub score: f32,
+}
+
+/// Match with line content (for ripgrep-like output)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentMatch {
+    pub path: PathBuf,
+    pub line_number: u32,
+    pub line_content: String,
+    pub match_start: usize,
+    pub match_end: usize,
+    pub context_before: Vec<(u32, String)>,
+    pub context_after: Vec<(u32, String)>,
+}
+
+/// Content search response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentSearchResponse {
+    pub matches: Vec<ContentMatch>,
+    pub duration_ms: f64,
+    pub files_with_matches: usize,
 }
 
 /// Server status response

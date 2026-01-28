@@ -5,8 +5,8 @@
 use crate::index::reader::IndexReader;
 use crate::query::{parse_query, QueryExecutor};
 use crate::server::protocol::{
-    read_message, write_message, Request, Response, SearchMatchData, SearchResponse,
-    StatusResponse,
+    read_message, write_message, ContentMatch, ContentSearchOptions, ContentSearchResponse,
+    Request, Response, SearchMatchData, SearchResponse, StatusResponse,
 };
 use crate::server::{get_pid_path, get_socket_path};
 use anyhow::{Context, Result};
@@ -211,6 +211,13 @@ impl IndexServer {
                 limit,
             } => self.handle_search(query, root_path, limit),
 
+            Request::ContentSearch {
+                pattern,
+                root_path,
+                limit,
+                options,
+            } => self.handle_content_search(pattern, root_path, limit, options),
+
             Request::Status => self.handle_status(),
 
             Request::Reload { root_path } => self.handle_reload(root_path),
@@ -322,6 +329,108 @@ impl IndexServer {
             matches: result_matches,
             duration_ms: start.elapsed().as_secs_f64() * 1000.0,
             cached: false,
+        })
+    }
+
+    /// Handle a content search request (ripgrep-like)
+    fn handle_content_search(
+        &self,
+        pattern: String,
+        root_path: PathBuf,
+        limit: usize,
+        options: ContentSearchOptions,
+    ) -> Response {
+        let start = Instant::now();
+
+        // Canonicalize root path
+        let root_path = match root_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return Response::Error {
+                    message: format!("Invalid path: {}", e),
+                }
+            }
+        };
+
+        // Ensure index is loaded
+        if let Err(e) = self.ensure_index_loaded(&root_path) {
+            return Response::Error {
+                message: format!("Failed to load index: {}", e),
+            };
+        }
+
+        // Access the index with read lock
+        let indexes = self.indexes.read().unwrap();
+        let cached = match indexes.get(&root_path) {
+            Some(c) => c,
+            None => {
+                return Response::Error {
+                    message: "Index not found after loading".to_string(),
+                }
+            }
+        };
+
+        cached.touch();
+
+        // Build query - handle case insensitivity by wrapping pattern
+        let query_str = if options.case_insensitive {
+            // Use regex for case-insensitive search
+            format!("re:/(?i){}/", regex::escape(&pattern))
+        } else {
+            pattern.clone()
+        };
+
+        // Parse and execute query
+        let parsed = parse_query(&query_str);
+        if parsed.is_empty() {
+            return Response::ContentSearch(ContentSearchResponse {
+                matches: vec![],
+                duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+                files_with_matches: 0,
+            });
+        }
+
+        let executor = QueryExecutor::new(&cached.reader);
+        let matches = match executor.execute_with_content(
+            &parsed,
+            options.context_before,
+            options.context_after,
+        ) {
+            Ok(m) => m,
+            Err(e) => {
+                return Response::Error {
+                    message: format!("Search failed: {}", e),
+                }
+            }
+        };
+
+        // Count unique files
+        let mut unique_files = std::collections::HashSet::new();
+        for m in &matches {
+            unique_files.insert(m.path.clone());
+        }
+
+        // Convert to protocol type and apply limit
+        let match_data: Vec<ContentMatch> = matches
+            .into_iter()
+            .take(limit)
+            .map(|m| ContentMatch {
+                path: m.path,
+                line_number: m.line_number,
+                line_content: m.line_content,
+                match_start: m.match_start,
+                match_end: m.match_end,
+                context_before: m.context_before,
+                context_after: m.context_after,
+            })
+            .collect();
+
+        self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
+
+        Response::ContentSearch(ContentSearchResponse {
+            matches: match_data,
+            duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+            files_with_matches: unique_files.len(),
         })
     }
 

@@ -1,7 +1,10 @@
 //! Client for connecting to the index server daemon
 
 use crate::index::types::SearchMatch;
-use crate::server::protocol::{read_message, write_message, Request, Response, StatusResponse};
+use crate::server::protocol::{
+    read_message, write_message, ContentSearchOptions, ContentSearchResponse, Request, Response,
+    StatusResponse,
+};
 use crate::server::get_socket_path;
 use std::io::{BufReader, BufWriter};
 use std::os::unix::net::UnixStream;
@@ -118,6 +121,32 @@ impl IndexClient {
                 duration_ms: sr.duration_ms,
                 cached: sr.cached,
             }),
+            Response::Error { message } => Err(ClientError::ServerError(message)),
+            _ => Err(ClientError::InvalidResponse),
+        }
+    }
+
+    /// Execute a content search query (ripgrep-like)
+    pub fn content_search(
+        &mut self,
+        pattern: &str,
+        root_path: &PathBuf,
+        limit: usize,
+        options: ContentSearchOptions,
+    ) -> ClientResult<ContentSearchResponse> {
+        let request = Request::ContentSearch {
+            pattern: pattern.to_string(),
+            root_path: root_path.clone(),
+            limit,
+            options,
+        };
+
+        write_message(&mut self.writer, &request)?;
+
+        let response: Response = read_message(&mut self.reader)?;
+
+        match response {
+            Response::ContentSearch(sr) => Ok(sr),
             Response::Error { message } => Err(ClientError::ServerError(message)),
             _ => Err(ClientError::InvalidResponse),
         }

@@ -10,7 +10,7 @@
 
 mod client;
 pub mod daemon;
-mod protocol;
+pub mod protocol;
 
 pub use client::IndexClient;
 
