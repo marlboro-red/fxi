@@ -12,6 +12,11 @@ const MAX_HIGHLIGHT_LINES: usize = 3000;
 /// Number of lines to highlight around the visible viewport
 const VIEWPORT_BUFFER_LINES: usize = 50;
 
+/// Maximum line number from which to start highlighting
+/// Beyond this, syntax highlighting is skipped entirely for performance
+/// (syntect requires sequential processing from line 0)
+const MAX_HIGHLIGHT_START_LINE: usize = 500;
+
 /// Syntax highlighter for code preview
 pub struct SyntaxHighlighter {
     syntax_set: SyntaxSet,
@@ -109,6 +114,12 @@ impl SyntaxHighlighter {
         viewport_start: usize,
         viewport_height: usize,
     ) -> (Vec<Vec<Span<'static>>>, usize) {
+        // Skip syntax highlighting for deep line numbers - syntect requires
+        // sequential processing from line 0, making it O(line_number)
+        if viewport_start > MAX_HIGHLIGHT_START_LINE {
+            return (Vec::new(), viewport_start);
+        }
+
         let total_lines = content.lines().count();
 
         // Calculate the range to highlight with buffer on both sides
