@@ -43,6 +43,7 @@ indicatif = "0.18"
 # Utilities
 anyhow = "1.0.100"
 dirs = "6.0"
+libc = "0.2"
 
 [profile.release]
 lto = true
