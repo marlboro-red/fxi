@@ -9,7 +9,8 @@
       "Bash(cargo check:*)",
       "Bash(git fetch:*)",
       "Bash(git merge:*)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(cargo clippy:*)"
     ]
   }
 }
