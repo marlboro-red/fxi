@@ -122,10 +122,26 @@ impl<'a> QueryExecutor<'a> {
         let candidates = self.execute_plan(&plan)?;
 
         // Verify candidates with limit for early termination
-        let verified = self.verify_candidates(&candidates, &plan, query.options.limit)?;
+        let mut results = self.verify_candidates(&candidates, &plan, query.options.limit)?;
+
+        // Also find files whose names match the search terms
+        if let Some(ref verification) = plan.verification {
+            let search_terms = Self::extract_search_terms(verification);
+            if !search_terms.is_empty() {
+                let filename_matches = self.find_filename_matches(&search_terms, query.options.limit)?;
+
+                // Merge filename matches, avoiding duplicates
+                let existing_paths: std::collections::HashSet<PathBuf> =
+                    results.iter().map(|m| m.path.clone()).collect();
+                for m in filename_matches {
+                    if !existing_paths.contains(&m.path) {
+                        results.push(m);
+                    }
+                }
+            }
+        }
 
         // Sort results
-        let mut results = verified;
         self.sort_results(&mut results, query.options.sort);
 
         // Apply final limit (may have collected slightly more for better ranking)
@@ -244,19 +260,8 @@ impl<'a> QueryExecutor<'a> {
                 .compile_matcher()
         });
 
-        let filename_matcher = filter.filename.as_ref().map(|f| {
-            // Support both glob patterns and substring matching
-            if f.contains('*') || f.contains('?') {
-                Glob::new(f)
-                    .unwrap_or_else(|_| Glob::new("*").unwrap())
-                    .compile_matcher()
-            } else {
-                // For plain strings, create a glob that matches anywhere in filename
-                Glob::new(&format!("*{}*", f))
-                    .unwrap_or_else(|_| Glob::new("*").unwrap())
-                    .compile_matcher()
-            }
-        });
+        // For filename filter, store the pattern for case-insensitive matching
+        let filename_pattern = filter.filename.clone();
 
         let mut result = RoaringBitmap::new();
 
@@ -276,11 +281,23 @@ impl<'a> QueryExecutor<'a> {
                     }
                 }
 
-                // Filename filter
-                if let Some(ref matcher) = filename_matcher {
+                // Filename filter (case-insensitive)
+                if let Some(ref pattern) = filename_pattern {
                     if let Some(path) = self.reader.get_path(doc) {
                         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                        if !matcher.is_match(filename) {
+                        let filename_lower = filename.to_lowercase();
+                        let pattern_lower = pattern.to_lowercase();
+
+                        // Support glob patterns or substring matching
+                        let matches = if pattern.contains('*') || pattern.contains('?') {
+                            Glob::new(&pattern_lower)
+                                .map(|g| g.compile_matcher().is_match(&filename_lower))
+                                .unwrap_or(false)
+                        } else {
+                            filename_lower.contains(&pattern_lower)
+                        };
+
+                        if !matches {
                             continue;
                         }
                     } else {
@@ -359,6 +376,49 @@ impl<'a> QueryExecutor<'a> {
                         line_number: 1,
                         score: 1.0,
                     });
+                }
+            }
+        }
+
+        Ok(matches)
+    }
+
+    /// Find files whose names contain any of the search terms
+    fn find_filename_matches(
+        &self,
+        search_terms: &[String],
+        limit: usize,
+    ) -> Result<Vec<SearchMatch>> {
+        let mut matches = Vec::new();
+        let valid_docs = self.reader.valid_doc_ids();
+
+        // Convert search terms to lowercase for case-insensitive matching
+        let terms_lower: Vec<String> = search_terms.iter().map(|t| t.to_lowercase()).collect();
+
+        for doc_id in valid_docs.iter() {
+            if matches.len() >= limit {
+                break;
+            }
+
+            if let Some(doc) = self.reader.get_document(doc_id) {
+                if let Some(path) = self.reader.get_path(doc) {
+                    let filename = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+
+                    // Check if filename contains any search term
+                    let matches_term = terms_lower.iter().any(|term| filename.contains(term));
+
+                    if matches_term {
+                        matches.push(SearchMatch {
+                            doc_id,
+                            path: path.clone(),
+                            line_number: 1,
+                            score: 2.0, // Boost filename matches
+                        });
+                    }
                 }
             }
         }

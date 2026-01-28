@@ -99,6 +99,8 @@ foo bar                    # AND: both terms must match
 ^3:foo                     # Boosted term with custom weight
 ```
 
+Searches automatically match both file content AND filenames - typing `config` will find files containing "config" as well as files named `config.json`, `config.rs`, etc.
+
 ### Boolean Operators
 ```
 foo | bar                  # OR: either term matches
