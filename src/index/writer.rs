@@ -9,6 +9,99 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Result from processing a single chunk in parallel
+/// Contains all the data needed to write a segment and merge into global state
+#[derive(Debug)]
+pub struct ParallelChunkResult {
+    pub segment_id: SegmentId,
+    /// Document ID range start (pre-assigned)
+    #[allow(dead_code)]
+    pub doc_id_start: DocId,
+    /// Documents created in this chunk (with correct doc_ids)
+    pub documents: Vec<Document>,
+    /// Paths discovered in this chunk (relative paths)
+    pub paths: Vec<PathBuf>,
+    /// Trigram postings for this segment
+    pub trigram_postings: BTreeMap<Trigram, Vec<DocId>>,
+    /// Token postings for this segment
+    pub token_postings: BTreeMap<String, Vec<DocId>>,
+    /// Line maps for documents in this segment
+    pub line_maps: HashMap<DocId, Vec<u32>>,
+    /// Trigram frequencies for stop-gram computation
+    pub trigram_frequencies: HashMap<Trigram, u32>,
+}
+
+impl ParallelChunkResult {
+    /// Create a new chunk result by processing files with pre-assigned doc IDs
+    pub fn process(
+        segment_id: SegmentId,
+        doc_id_start: DocId,
+        processed_files: Vec<ProcessedFile>,
+    ) -> Self {
+        let mut documents = Vec::with_capacity(processed_files.len());
+        let mut paths = Vec::with_capacity(processed_files.len());
+        let mut path_to_local_id: HashMap<PathBuf, PathId> = HashMap::new();
+        let mut trigram_postings: BTreeMap<Trigram, Vec<DocId>> = BTreeMap::new();
+        let mut token_postings: BTreeMap<String, Vec<DocId>> = BTreeMap::new();
+        let mut line_maps: HashMap<DocId, Vec<u32>> = HashMap::new();
+        let mut trigram_frequencies: HashMap<Trigram, u32> = HashMap::new();
+
+        let mut next_doc_id = doc_id_start;
+
+        for processed in processed_files {
+            let doc_id = next_doc_id;
+            next_doc_id += 1;
+
+            // Get or create local path ID
+            let path_id = if let Some(&id) = path_to_local_id.get(&processed.rel_path) {
+                id
+            } else {
+                let id = paths.len() as PathId;
+                paths.push(processed.rel_path.clone());
+                path_to_local_id.insert(processed.rel_path.clone(), id);
+                id
+            };
+
+            // Create document entry
+            let doc = Document {
+                doc_id,
+                path_id, // This is a local path ID, will be remapped during merge
+                size: processed.size,
+                mtime: processed.mtime,
+                language: processed.language,
+                flags: processed.flags,
+                segment_id,
+            };
+            documents.push(doc);
+
+            // Add trigrams to segment postings and track frequencies
+            for trigram in processed.trigrams {
+                trigram_postings.entry(trigram).or_default().push(doc_id);
+                *trigram_frequencies.entry(trigram).or_insert(0) += 1;
+            }
+
+            // Add tokens to segment postings
+            for token in processed.tokens {
+                token_postings.entry(token).or_default().push(doc_id);
+            }
+
+            // Store line map
+            line_maps.insert(doc_id, processed.line_offsets);
+        }
+
+        Self {
+            segment_id,
+            doc_id_start,
+            documents,
+            paths,
+            trigram_postings,
+            token_postings,
+            line_maps,
+            trigram_frequencies,
+        }
+    }
+}
+
 /// Chunked index writer for memory-bounded index building.
 /// Processes files in chunks and writes each chunk as a separate segment.
 pub struct ChunkedIndexWriter {
@@ -346,6 +439,214 @@ impl ChunkedIndexWriter {
     #[allow(dead_code)]
     pub fn index_path(&self) -> &Path {
         &self.index_path
+    }
+
+    /// Merge and write a parallel chunk result
+    /// This writes the segment files and incorporates the chunk data into global state
+    #[allow(dead_code)]
+    pub fn merge_chunk_result(&mut self, result: ParallelChunkResult) -> Result<()> {
+        if result.documents.is_empty() {
+            return Ok(());
+        }
+
+        self.segment_ids.push(result.segment_id);
+
+        // Build path ID mapping: local path ID -> global path ID
+        let mut path_id_map: HashMap<PathId, PathId> = HashMap::new();
+        for (local_id, path) in result.paths.iter().enumerate() {
+            let global_id = self.add_path(path);
+            path_id_map.insert(local_id as PathId, global_id);
+        }
+
+        // Remap documents and add to global list
+        for mut doc in result.documents {
+            // Remap path_id from local to global
+            if let Some(&global_path_id) = path_id_map.get(&doc.path_id) {
+                doc.path_id = global_path_id;
+            }
+            self.all_documents.push(doc);
+        }
+
+        // Track max doc_id for future chunks
+        if let Some(last_doc) = self.all_documents.last() {
+            if last_doc.doc_id >= self.next_doc_id {
+                self.next_doc_id = last_doc.doc_id + 1;
+            }
+        }
+
+        // Merge trigram frequencies
+        for (trigram, count) in result.trigram_frequencies {
+            *self.trigram_frequencies.entry(trigram).or_insert(0) += count;
+        }
+
+        // Write segment files
+        let segment_name = format!("seg_{:04}", result.segment_id);
+        let segment_path = self.index_path.join("segments").join(&segment_name);
+        fs::create_dir_all(&segment_path)?;
+
+        // Write trigram index
+        self.write_trigram_index(&segment_path, &result.trigram_postings)?;
+
+        // Write token index
+        self.write_token_index(&segment_path, &result.token_postings)?;
+
+        // Write line maps
+        self.write_line_maps(&segment_path, &result.line_maps)?;
+
+        Ok(())
+    }
+
+    /// Get the segments directory path
+    pub fn segments_path(&self) -> PathBuf {
+        self.index_path.join("segments")
+    }
+
+    /// Write a parallel chunk result directly to disk (for parallel I/O)
+    /// Returns the paths of written files for verification
+    pub fn write_chunk_segment(index_path: &Path, result: &ParallelChunkResult) -> Result<()> {
+        let segment_name = format!("seg_{:04}", result.segment_id);
+        let segment_path = index_path.join("segments").join(&segment_name);
+        fs::create_dir_all(&segment_path)?;
+
+        // Write trigram index
+        Self::write_trigram_index_static(&segment_path, &result.trigram_postings)?;
+
+        // Write token index
+        Self::write_token_index_static(&segment_path, &result.token_postings)?;
+
+        // Write line maps
+        Self::write_line_maps_static(&segment_path, &result.line_maps)?;
+
+        Ok(())
+    }
+
+    /// Static version of write_trigram_index for parallel use
+    fn write_trigram_index_static(segment_path: &Path, trigram_postings: &BTreeMap<Trigram, Vec<DocId>>) -> Result<()> {
+        let dict_path = segment_path.join("grams.dict");
+        let postings_path = segment_path.join("grams.postings");
+
+        let mut dict_file = BufWriter::new(File::create(&dict_path)?);
+        let mut postings_file = BufWriter::new(File::create(&postings_path)?);
+
+        dict_file.write_all(&(trigram_postings.len() as u32).to_le_bytes())?;
+
+        let mut postings_offset: u64 = 0;
+
+        for (&trigram, doc_ids) in trigram_postings {
+            let mut sorted_ids: Vec<_> = doc_ids.iter().copied().collect();
+            sorted_ids.sort_unstable();
+            sorted_ids.dedup();
+
+            let mut encoded = Vec::new();
+            delta_encode(&sorted_ids, &mut encoded);
+
+            dict_file.write_all(&trigram.to_le_bytes())?;
+            dict_file.write_all(&postings_offset.to_le_bytes())?;
+            dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
+            dict_file.write_all(&(sorted_ids.len() as u32).to_le_bytes())?;
+
+            postings_file.write_all(&encoded)?;
+            postings_offset += encoded.len() as u64;
+        }
+
+        dict_file.flush()?;
+        postings_file.flush()?;
+        Ok(())
+    }
+
+    /// Static version of write_token_index for parallel use
+    fn write_token_index_static(segment_path: &Path, token_postings: &BTreeMap<String, Vec<DocId>>) -> Result<()> {
+        let dict_path = segment_path.join("tokens.dict");
+        let postings_path = segment_path.join("tokens.postings");
+
+        let mut dict_file = BufWriter::new(File::create(&dict_path)?);
+        let mut postings_file = BufWriter::new(File::create(&postings_path)?);
+
+        dict_file.write_all(&(token_postings.len() as u32).to_le_bytes())?;
+
+        let mut postings_offset: u64 = 0;
+
+        for (token, doc_ids) in token_postings {
+            let mut sorted_ids: Vec<_> = doc_ids.iter().copied().collect();
+            sorted_ids.sort_unstable();
+            sorted_ids.dedup();
+
+            let mut encoded = Vec::new();
+            delta_encode(&sorted_ids, &mut encoded);
+
+            let token_bytes = token.as_bytes();
+            dict_file.write_all(&(token_bytes.len() as u16).to_le_bytes())?;
+            dict_file.write_all(token_bytes)?;
+
+            dict_file.write_all(&postings_offset.to_le_bytes())?;
+            dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
+            dict_file.write_all(&(sorted_ids.len() as u32).to_le_bytes())?;
+
+            postings_file.write_all(&encoded)?;
+            postings_offset += encoded.len() as u64;
+        }
+
+        dict_file.flush()?;
+        postings_file.flush()?;
+        Ok(())
+    }
+
+    /// Static version of write_line_maps for parallel use
+    fn write_line_maps_static(segment_path: &Path, line_maps: &HashMap<DocId, Vec<u32>>) -> Result<()> {
+        let linemap_path = segment_path.join("linemap.bin");
+        let mut file = BufWriter::new(File::create(&linemap_path)?);
+
+        file.write_all(&(line_maps.len() as u32).to_le_bytes())?;
+
+        let mut sorted: Vec<_> = line_maps.iter().collect();
+        sorted.sort_by_key(|(id, _)| *id);
+
+        for (&doc_id, offsets) in sorted {
+            file.write_all(&doc_id.to_le_bytes())?;
+            file.write_all(&(offsets.len() as u32).to_le_bytes())?;
+
+            let mut encoded = Vec::new();
+            delta_encode(offsets, &mut encoded);
+            file.write_all(&(encoded.len() as u32).to_le_bytes())?;
+            file.write_all(&encoded)?;
+        }
+
+        file.flush()?;
+        Ok(())
+    }
+
+    /// Merge global state from parallel chunk results (after segments are written)
+    pub fn merge_parallel_results(&mut self, results: Vec<ParallelChunkResult>) -> Result<()> {
+        for result in results {
+            self.segment_ids.push(result.segment_id);
+
+            // Build path ID mapping: local path ID -> global path ID
+            let mut path_id_map: HashMap<PathId, PathId> = HashMap::new();
+            for (local_id, path) in result.paths.iter().enumerate() {
+                let global_id = self.add_path(path);
+                path_id_map.insert(local_id as PathId, global_id);
+            }
+
+            // Remap documents and add to global list
+            for mut doc in result.documents {
+                if let Some(&global_path_id) = path_id_map.get(&doc.path_id) {
+                    doc.path_id = global_path_id;
+                }
+                self.all_documents.push(doc);
+            }
+
+            // Merge trigram frequencies
+            for (trigram, count) in result.trigram_frequencies {
+                *self.trigram_frequencies.entry(trigram).or_insert(0) += count;
+            }
+        }
+
+        // Update next_doc_id based on merged documents
+        if let Some(max_doc) = self.all_documents.iter().map(|d| d.doc_id).max() {
+            self.next_doc_id = max_doc + 1;
+        }
+
+        Ok(())
     }
 }
 
