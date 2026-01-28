@@ -1,10 +1,92 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::fs;
 
 const APP_NAME: &str = "fxi";
+const CONFIG_FILE: &str = "config.json";
+
+/// Application configuration stored in the app data directory
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    /// Enable parallel chunk processing during indexing
+    #[serde(default = "default_parallel_chunk_indexing")]
+    pub parallel_chunk_indexing: bool,
+
+    /// Maximum number of chunks to process in parallel (limits memory usage)
+    /// If None or 0, uses the number of CPU cores
+    #[serde(default = "default_parallel_chunk_count")]
+    pub parallel_chunk_count: usize,
+}
+
+fn default_parallel_chunk_indexing() -> bool {
+    false
+}
+
+fn default_parallel_chunk_count() -> usize {
+    0 // 0 means use CPU count
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            parallel_chunk_indexing: default_parallel_chunk_indexing(),
+            parallel_chunk_count: default_parallel_chunk_count(),
+        }
+    }
+}
+
+impl AppConfig {
+    /// Load config from the app data directory, or return default if not found
+    pub fn load() -> Result<Self> {
+        let config_path = get_config_path()?;
+
+        if config_path.exists() {
+            let content = fs::read_to_string(&config_path)
+                .context("Failed to read config file")?;
+            let config: AppConfig = serde_json::from_str(&content)
+                .context("Failed to parse config file")?;
+            Ok(config)
+        } else {
+            Ok(Self::default())
+        }
+    }
+
+    /// Save config to the app data directory
+    #[allow(dead_code)]
+    pub fn save(&self) -> Result<()> {
+        let config_path = get_config_path()?;
+        let content = serde_json::to_string_pretty(self)
+            .context("Failed to serialize config")?;
+        fs::write(&config_path, content)
+            .context("Failed to write config file")?;
+        Ok(())
+    }
+
+    /// Get the effective parallel chunk count (resolves 0 to CPU count)
+    pub fn effective_parallel_chunk_count(&self) -> usize {
+        if self.parallel_chunk_count == 0 {
+            num_cpus()
+        } else {
+            self.parallel_chunk_count
+        }
+    }
+}
+
+/// Get the number of CPUs available
+fn num_cpus() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
+
+/// Get the path to the config file
+pub fn get_config_path() -> Result<PathBuf> {
+    let app_dir = get_app_data_dir()?;
+    Ok(app_dir.join(CONFIG_FILE))
+}
 
 /// Get the application data directory for storing indexes
 pub fn get_app_data_dir() -> Result<PathBuf> {
@@ -190,5 +272,59 @@ mod tests {
 
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_app_config_default() {
+        let config = AppConfig::default();
+        assert!(!config.parallel_chunk_indexing);
+        assert_eq!(config.parallel_chunk_count, 0);
+    }
+
+    #[test]
+    fn test_app_config_effective_parallel_count() {
+        let mut config = AppConfig::default();
+
+        // 0 should resolve to CPU count
+        let cpu_count = config.effective_parallel_chunk_count();
+        assert!(cpu_count >= 1);
+
+        // Explicit value should be used as-is
+        config.parallel_chunk_count = 4;
+        assert_eq!(config.effective_parallel_chunk_count(), 4);
+    }
+
+    #[test]
+    fn test_app_config_serialization() {
+        let config = AppConfig {
+            parallel_chunk_indexing: true,
+            parallel_chunk_count: 8,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.parallel_chunk_indexing, true);
+        assert_eq!(parsed.parallel_chunk_count, 8);
+    }
+
+    #[test]
+    fn test_app_config_partial_json() {
+        // Should use defaults for missing fields
+        let json = r#"{"parallel_chunk_indexing": true}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+
+        assert!(config.parallel_chunk_indexing);
+        assert_eq!(config.parallel_chunk_count, 0); // default
+    }
+
+    #[test]
+    fn test_app_config_empty_json() {
+        // Empty object should use all defaults
+        let json = "{}";
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+
+        assert!(!config.parallel_chunk_indexing);
+        assert_eq!(config.parallel_chunk_count, 0);
     }
 }
