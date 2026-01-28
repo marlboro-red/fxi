@@ -46,7 +46,7 @@ fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option
         flags.0 |= DocFlags::MINIFIED;
     }
 
-    // Extract trigrams
+    // Extract trigrams (AHashSet for fast deduplication, convert to Vec for storage)
     let trigrams: Vec<u32> = extract_trigrams(content).into_iter().collect();
 
     // Extract tokens
