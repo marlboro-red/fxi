@@ -186,8 +186,9 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
             .map(|r| r.line_number as usize)
             .unwrap_or(0);
 
-        // Use cached highlighted content (computed in update_preview, cached per file)
-        let highlighted_lines = app.get_highlighted();
+        // Use cached highlighted content with viewport offset
+        // (highlighted_lines, start_offset) where start_offset is 0-indexed line number
+        let highlighted_data = app.get_highlighted();
 
         let mut lines: Vec<Line> = preview
             .lines()
@@ -204,43 +205,38 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
                 ];
 
                 // Use highlighted spans if available, otherwise fall back to plain text
-                if let Some(ref highlighted) = highlighted_lines {
-                    if let Some(line_spans) = highlighted.get(line_num) {
-                        if is_match {
-                            // For matched line, add bold modifier to all spans
-                            for span in line_spans {
-                                let mut style = span.style;
-                                style = style.add_modifier(Modifier::BOLD);
-                                // Also add a subtle background to indicate match
-                                style = style.bg(Color::Rgb(60, 60, 40));
-                                spans.push(Span::styled(span.content.clone(), style));
+                // Account for viewport offset when looking up highlighted lines
+                if let Some((highlighted, start_offset)) = highlighted_data {
+                    // Convert absolute line number to relative index in highlighted buffer
+                    let relative_idx = line_num.checked_sub(start_offset);
+                    if let Some(idx) = relative_idx {
+                        if let Some(line_spans) = highlighted.get(idx) {
+                            if is_match {
+                                // For matched line, add bold modifier to all spans
+                                for span in line_spans {
+                                    let mut style = span.style;
+                                    style = style.add_modifier(Modifier::BOLD);
+                                    // Also add a subtle background to indicate match
+                                    style = style.bg(Color::Rgb(60, 60, 40));
+                                    spans.push(Span::styled(span.content.clone(), style));
+                                }
+                            } else {
+                                spans.extend(line_spans.clone());
                             }
-                        } else {
-                            spans.extend(line_spans.clone());
+                            return Line::from(spans);
                         }
-                    } else {
-                        // Fallback for lines beyond highlighted content
-                        let content_style = if is_match {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
-                        };
-                        spans.push(Span::styled(plain_line.to_string(), content_style));
                     }
-                } else {
-                    // No highlighting available, use plain text
-                    let content_style = if is_match {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
-                    spans.push(Span::styled(plain_line.to_string(), content_style));
                 }
 
+                // Fallback for lines outside highlighted range or no highlighting available
+                let content_style = if is_match {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                spans.push(Span::styled(plain_line.to_string(), content_style));
                 Line::from(spans)
             })
             .collect();
