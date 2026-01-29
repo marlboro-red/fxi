@@ -2,7 +2,7 @@ fn main() {
     println!("Hello, world!");
     let x = 42;
     // TODO: fix this
-    let y = x + 1;
+    let _y = x + 1;
 }
 
 fn helper() {

@@ -1,8 +1,21 @@
 //! Output formatting for ripgrep-like content search results
 
-use crate::server::protocol::ContentMatch;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
+
+/// Match with line content (for ripgrep-like output)
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "daemon", derive(serde::Serialize, serde::Deserialize))]
+pub struct ContentMatch {
+    pub path: PathBuf,
+    pub line_number: u32,
+    pub line_content: String,
+    pub match_start: usize,
+    pub match_end: usize,
+    pub context_before: Vec<(u32, String)>,
+    pub context_after: Vec<(u32, String)>,
+}
 
 /// Print content matches in ripgrep-style format
 pub fn print_content_matches(

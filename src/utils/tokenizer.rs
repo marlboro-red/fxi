@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use ahash::AHashSet;
 
 /// Extract tokens from source code content
 /// Handles: identifiers, snake_case splits, camelCase splits, words
 /// Optimized for speed with byte-level processing where possible.
-pub fn extract_tokens(content: &str) -> HashSet<String> {
+pub fn extract_tokens(content: &str) -> Vec<String> {
     let bytes = content.as_bytes();
 
     // For small files, use simple approach
@@ -11,8 +11,9 @@ pub fn extract_tokens(content: &str) -> HashSet<String> {
         return extract_tokens_simple(content);
     }
 
-    // Pre-allocate with reasonable capacity
-    let mut tokens = HashSet::with_capacity(bytes.len() / 8);
+    // Pre-allocate with reasonable capacity - use AHashSet of hashes for speed
+    let mut seen: AHashSet<u64> = AHashSet::with_capacity(bytes.len() / 64);
+    let mut tokens: Vec<String> = Vec::with_capacity(bytes.len() / 64);
 
     // Process as bytes for speed (ASCII-focused, as most code is ASCII)
     let mut token_start: Option<usize> = None;
@@ -29,10 +30,17 @@ pub fn extract_tokens(content: &str) -> HashSet<String> {
             if is_upper && prev_was_lower {
                 if let Some(start) = token_start {
                     let slice = &bytes[start..i];
-                    if slice.len() >= 2 {
-                        // SAFETY: we only process ASCII bytes
-                        let s = unsafe { std::str::from_utf8_unchecked(slice) };
-                        tokens.insert(s.to_ascii_lowercase());
+                    if slice.len() >= 3 {
+                        // Hash the lowercase bytes directly
+                        let hash = hash_lowercase_slice(slice);
+                        if seen.insert(hash) {
+                            // Only allocate string if new token
+                            let mut s = String::with_capacity(slice.len());
+                            for &b in slice {
+                                s.push((b | 0x20) as char);
+                            }
+                            tokens.push(s);
+                        }
                     }
                 }
                 token_start = Some(i);
@@ -44,31 +52,33 @@ pub fn extract_tokens(content: &str) -> HashSet<String> {
             // End of token (underscore or other char)
             if let Some(start) = token_start {
                 let slice = &bytes[start..i];
-                if slice.len() >= 2 {
-                    // SAFETY: we only process ASCII bytes
-                    let s = unsafe { std::str::from_utf8_unchecked(slice) };
-                    tokens.insert(s.to_ascii_lowercase());
+                if slice.len() >= 3 {
+                    let hash = hash_lowercase_slice(slice);
+                    if seen.insert(hash) {
+                        let mut s = String::with_capacity(slice.len());
+                        for &b in slice {
+                            s.push((b | 0x20) as char);
+                        }
+                        tokens.push(s);
+                    }
                 }
             }
             token_start = None;
             prev_was_lower = false;
-
-            // Skip non-ASCII chars entirely
-            if !is_underscore && byte > 127 {
-                // Non-ASCII: skip to next ASCII
-                continue;
-            }
         }
     }
 
     // Handle last token
     if let Some(start) = token_start {
         let slice = &bytes[start..];
-        if slice.len() >= 2 {
-            // Check if it's valid UTF-8 ASCII
-            if slice.iter().all(|&b| b < 128) {
-                let s = unsafe { std::str::from_utf8_unchecked(slice) };
-                tokens.insert(s.to_ascii_lowercase());
+        if slice.len() >= 3 && slice.iter().all(|&b| b < 128) {
+            let hash = hash_lowercase_slice(slice);
+            if seen.insert(hash) {
+                let mut s = String::with_capacity(slice.len());
+                for &b in slice {
+                    s.push((b | 0x20) as char);
+                }
+                tokens.push(s);
             }
         }
     }
@@ -76,9 +86,20 @@ pub fn extract_tokens(content: &str) -> HashSet<String> {
     tokens
 }
 
+/// Fast hash of lowercase ASCII slice using FNV-1a
+#[inline]
+fn hash_lowercase_slice(slice: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+    for &b in slice {
+        hash ^= (b | 0x20) as u64; // lowercase
+        hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+    }
+    hash
+}
+
 /// Simple tokenization for small content (original algorithm)
-fn extract_tokens_simple(content: &str) -> HashSet<String> {
-    let mut tokens = HashSet::new();
+fn extract_tokens_simple(content: &str) -> Vec<String> {
+    let mut tokens: AHashSet<String> = AHashSet::new();
     let mut current_token = String::new();
     let mut prev_char_type = CharType::Other;
 
@@ -117,7 +138,7 @@ fn extract_tokens_simple(content: &str) -> HashSet<String> {
         add_token(&mut tokens, &current_token);
     }
 
-    tokens
+    tokens.into_iter().collect()
 }
 
 /// Extract tokens suitable for query matching
@@ -152,7 +173,7 @@ fn classify_char(ch: char) -> CharType {
     }
 }
 
-fn add_token(tokens: &mut HashSet<String>, token: &str) {
+fn add_token(tokens: &mut AHashSet<String>, token: &str) {
     // Only add tokens of meaningful length
     if token.len() >= 2 {
         tokens.insert(token.to_lowercase());
@@ -161,8 +182,8 @@ fn add_token(tokens: &mut HashSet<String>, token: &str) {
 
 /// Extract identifiers (complete symbols) from code
 #[allow(dead_code)]
-pub fn extract_identifiers(content: &str) -> HashSet<String> {
-    let mut identifiers = HashSet::new();
+pub fn extract_identifiers(content: &str) -> AHashSet<String> {
+    let mut identifiers = AHashSet::new();
     let mut current = String::new();
     let mut in_identifier = false;
 
@@ -198,20 +219,20 @@ mod tests {
     fn test_extract_tokens() {
         let content = "getUserById";
         let tokens = extract_tokens(content);
-        assert!(tokens.contains("get"));
-        assert!(tokens.contains("user"));
-        assert!(tokens.contains("by"));
-        assert!(tokens.contains("id"));
+        assert!(tokens.iter().any(|t| t == "get"));
+        assert!(tokens.iter().any(|t| t == "user"));
+        assert!(tokens.iter().any(|t| t == "by"));
+        assert!(tokens.iter().any(|t| t == "id"));
     }
 
     #[test]
     fn test_snake_case() {
         let content = "get_user_by_id";
         let tokens = extract_tokens(content);
-        assert!(tokens.contains("get"));
-        assert!(tokens.contains("user"));
-        assert!(tokens.contains("by"));
-        assert!(tokens.contains("id"));
+        assert!(tokens.iter().any(|t| t == "get"));
+        assert!(tokens.iter().any(|t| t == "user"));
+        assert!(tokens.iter().any(|t| t == "by"));
+        assert!(tokens.iter().any(|t| t == "id"));
     }
 
     #[test]

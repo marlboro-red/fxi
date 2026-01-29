@@ -611,7 +611,6 @@ fn read_trigram_dict(segment_path: &Path) -> Result<TrigramDict> {
     let mut file = BufReader::new(File::open(&dict_path)?);
 
     let mut buf4 = [0u8; 4];
-    let mut buf8 = [0u8; 8];
 
     // Read count
     file.read_exact(&mut buf4)?;
@@ -624,9 +623,9 @@ fn read_trigram_dict(segment_path: &Path) -> Result<TrigramDict> {
         file.read_exact(&mut buf4)?;
         let trigram = u32::from_le_bytes(buf4);
 
-        // offset (u64)
-        file.read_exact(&mut buf8)?;
-        let offset = u64::from_le_bytes(buf8);
+        // offset (u32) - changed from u64
+        file.read_exact(&mut buf4)?;
+        let offset = u32::from_le_bytes(buf4) as u64;
 
         // length (u32)
         file.read_exact(&mut buf4)?;
@@ -664,7 +663,6 @@ fn read_token_dict(segment_path: &Path) -> Result<TokenDict> {
 
     let mut buf2 = [0u8; 2];
     let mut buf4 = [0u8; 4];
-    let mut buf8 = [0u8; 8];
 
     // Read count
     file.read_exact(&mut buf4)?;
@@ -682,9 +680,9 @@ fn read_token_dict(segment_path: &Path) -> Result<TokenDict> {
         file.read_exact(&mut token_bytes)?;
         let token = String::from_utf8_lossy(&token_bytes).to_string();
 
-        // offset (u64)
-        file.read_exact(&mut buf8)?;
-        let offset = u64::from_le_bytes(buf8);
+        // offset (u32) - changed from u64
+        file.read_exact(&mut buf4)?;
+        let offset = u32::from_le_bytes(buf4) as u64;
 
         // length (u32)
         file.read_exact(&mut buf4)?;

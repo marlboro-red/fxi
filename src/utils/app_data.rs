@@ -1,10 +1,25 @@
 use anyhow::{Context, Result};
 use std::collections::hash_map::DefaultHasher;
+use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 const APP_NAME: &str = "fxi";
+
+/// Get the indexes directory, checking FXI_INDEXES env var first
+fn get_indexes_dir() -> Result<PathBuf> {
+    if let Ok(custom_path) = env::var("FXI_INDEXES") {
+        let path = PathBuf::from(custom_path);
+        fs::create_dir_all(&path)?;
+        return Ok(path);
+    }
+
+    let app_data = get_app_data_dir()?;
+    let indexes_dir = app_data.join("indexes");
+    fs::create_dir_all(&indexes_dir)?;
+    Ok(indexes_dir)
+}
 
 /// Get the application data directory for storing indexes
 pub fn get_app_data_dir() -> Result<PathBuf> {
@@ -27,9 +42,7 @@ pub fn get_app_data_dir() -> Result<PathBuf> {
 
 /// Get the index directory for a specific codebase root
 pub fn get_index_dir(root_path: &Path) -> Result<PathBuf> {
-    let app_data = get_app_data_dir()?;
-    let indexes_dir = app_data.join("indexes");
-    fs::create_dir_all(&indexes_dir)?;
+    let indexes_dir = get_indexes_dir()?;
 
     // Create a unique folder name from the root path
     let folder_name = hash_path(root_path);
@@ -128,8 +141,7 @@ pub fn get_index_metadata(root_path: &Path) -> Result<Option<IndexLocation>> {
 
 /// List all indexed codebases
 pub fn list_indexed_codebases() -> Result<Vec<IndexLocation>> {
-    let app_data = get_app_data_dir()?;
-    let indexes_dir = app_data.join("indexes");
+    let indexes_dir = get_indexes_dir()?;
 
     if !indexes_dir.exists() {
         return Ok(Vec::new());

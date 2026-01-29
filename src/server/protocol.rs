@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
+// Re-export ContentMatch from output module
+pub use crate::output::ContentMatch;
+
 /// Options for content search
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContentSearchOptions {
@@ -105,18 +108,6 @@ pub struct SearchMatchData {
     pub path: PathBuf,
     pub line_number: u32,
     pub score: f32,
-}
-
-/// Match with line content (for ripgrep-like output)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContentMatch {
-    pub path: PathBuf,
-    pub line_number: u32,
-    pub line_content: String,
-    pub match_start: usize,
-    pub match_end: usize,
-    pub context_before: Vec<(u32, String)>,
-    pub context_after: Vec<(u32, String)>,
 }
 
 /// Content search response

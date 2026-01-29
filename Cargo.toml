@@ -6,6 +6,12 @@ description = "Terminal-first, ultra-fast code search engine"
 license = "MIT"
 readme = "README.md"
 
+[features]
+default = ["interactive", "daemon", "progress"]
+interactive = ["ratatui", "crossterm"]
+daemon = []
+progress = ["indicatif"]
+
 [dependencies]
 # Core
 memmap2 = "0.9.9"
@@ -25,10 +31,11 @@ roaring = "0.11"
 memchr = "2.7"
 lru = "0.16"
 ahash = "0.8"
+rustc-hash = "2"
 
-# TUI
-ratatui = "0.30"
-crossterm = "0.29"
+# TUI (optional - for interactive mode)
+ratatui = { version = "0.30", optional = true }
+crossterm = { version = "0.29", optional = true }
 
 # Serialization
 serde = { version = "1.0.228", features = ["derive"] }
@@ -37,8 +44,8 @@ serde_json = "1.0.145"
 # CLI
 clap = { version = "4.5.54", features = ["derive"] }
 
-# Progress indicators
-indicatif = "0.18"
+# Progress indicators (optional)
+indicatif = { version = "0.18", optional = true }
 
 # Utilities
 anyhow = "1.0.100"
@@ -48,7 +55,16 @@ libc = "0.2"
 # Colored terminal output
 termcolor = "1.4"
 
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "indexing"
+harness = false
+
 [profile.release]
 lto = true
+strip = true
+panic = "abort"
 codegen-units = 1
 opt-level = 3

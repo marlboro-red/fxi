@@ -235,7 +235,7 @@ pub struct IndexConfig {
 impl Default for IndexConfig {
     fn default() -> Self {
         Self {
-            max_file_size: 10 * 1024 * 1024, // 10MB
+            max_file_size: 100 * 1024 * 1024, // 100MB - matches GitHub's file size limit
             stop_gram_count: 512,
             delta_threshold: 100,
             compaction_ratio: 0.5,
@@ -246,7 +246,7 @@ impl Default for IndexConfig {
                 ".codesearch".to_string(),
             ],
             scoring_weights: ScoringWeights::default(),
-            chunk_size: 5000, // Files per segment chunk
+            chunk_size: 50000, // Files per segment chunk (larger = fewer segments = faster)
         }
     }
 }

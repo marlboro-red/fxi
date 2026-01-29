@@ -714,7 +714,7 @@ fn test_filter_combined() {
     let fxi_files = extract_files(&fxi_out);
 
     // Should find .rs files containing fn
-    assert!(fxi_files.len() > 0, "Should find matches");
+    assert!(!fxi_files.is_empty(), "Should find matches");
     for file in &fxi_files {
         assert!(file.ends_with(".rs"), "All matches should be .rs files");
     }

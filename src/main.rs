@@ -1,7 +1,9 @@
 mod index;
 mod output;
 mod query;
+#[cfg(feature = "daemon")]
 mod server;
+#[cfg(feature = "interactive")]
 mod tui;
 mod utils;
 
@@ -92,6 +94,7 @@ enum Commands {
         force: bool,
     },
     /// Interactive search TUI
+    #[cfg(feature = "interactive")]
     Search {
         /// Path to search in
         #[arg(default_value = ".")]
@@ -117,12 +120,14 @@ enum Commands {
         path: PathBuf,
     },
     /// Start the index server daemon (keeps indexes warm for fast searches)
+    #[cfg(feature = "daemon")]
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
     },
 }
 
+#[cfg(feature = "daemon")]
 #[derive(Subcommand)]
 enum DaemonAction {
     /// Start the daemon in background
@@ -149,6 +154,7 @@ fn main() -> Result<()> {
             // Auto-detect codebase root
             index::build::build_index_auto(&path, force)?;
         }
+        #[cfg(feature = "interactive")]
         Some(Commands::Search { path }) => {
             tui::run(path, None)?;
         }
@@ -166,6 +172,7 @@ fn main() -> Result<()> {
             utils::remove_index(&root)?;
             println!("Removed index for: {}", root.display());
         }
+        #[cfg(feature = "daemon")]
         Some(Commands::Daemon { action }) => {
             handle_daemon_command(action)?;
         }
@@ -194,7 +201,16 @@ fn main() -> Result<()> {
                 )?;
             } else {
                 // Interactive TUI mode
-                tui::run(cli.path, None)?;
+                #[cfg(feature = "interactive")]
+                {
+                    tui::run(cli.path, None)?;
+                }
+                #[cfg(not(feature = "interactive"))]
+                {
+                    eprintln!("Interactive mode not available. Build with --features interactive");
+                    eprintln!("Usage: fxi <pattern> [options]");
+                    std::process::exit(1);
+                }
             }
         }
     }
@@ -202,6 +218,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "daemon")]
 fn handle_daemon_command(action: DaemonAction) -> Result<()> {
     use server::{is_daemon_running, IndexClient};
 
@@ -346,7 +363,6 @@ fn handle_grep_command(
     count: bool,
     color_choice: ColorChoice,
 ) -> Result<()> {
-    use server::protocol::ContentSearchOptions;
     use std::io::IsTerminal;
 
     // -v (invert match) is not supported with indexed search
@@ -367,26 +383,31 @@ fn handle_grep_command(
         (before_context, after_context)
     };
 
-    let options = ContentSearchOptions {
-        context_before: ctx_before,
-        context_after: ctx_after,
-        case_insensitive: ignore_case,
-        files_only: files_with_matches,  // Optimize for -l mode
+    // Try to use daemon for warm search (if available)
+    #[cfg(feature = "daemon")]
+    let matches = {
+        use server::protocol::ContentSearchOptions;
+        let options = ContentSearchOptions {
+            context_before: ctx_before,
+            context_after: ctx_after,
+            case_insensitive: ignore_case,
+            files_only: files_with_matches,
+        };
+        if let Some(mut client) = server::IndexClient::connect() {
+            match client.content_search(&combined_pattern, &root, max_count, options) {
+                Ok(response) => response.matches,
+                Err(e) => {
+                    eprintln!("Daemon search failed, falling back to direct search: {}", e);
+                    do_direct_content_search(&combined_pattern, &root, max_count, ctx_before, ctx_after, ignore_case, word_regexp)?
+                }
+            }
+        } else {
+            do_direct_content_search(&combined_pattern, &root, max_count, ctx_before, ctx_after, ignore_case, word_regexp)?
+        }
     };
 
-    // Try to use daemon for warm search
-    let matches = if let Some(mut client) = server::IndexClient::connect() {
-        match client.content_search(&combined_pattern, &root, max_count, options) {
-            Ok(response) => response.matches,
-            Err(e) => {
-                eprintln!("Daemon search failed, falling back to direct search: {}", e);
-                do_direct_content_search(&combined_pattern, &root, max_count, ctx_before, ctx_after, ignore_case, word_regexp)?
-            }
-        }
-    } else {
-        // Fall back to direct search without daemon
-        do_direct_content_search(&combined_pattern, &root, max_count, ctx_before, ctx_after, ignore_case, word_regexp)?
-    };
+    #[cfg(not(feature = "daemon"))]
+    let matches = do_direct_content_search(&combined_pattern, &root, max_count, ctx_before, ctx_after, ignore_case, word_regexp)?;
 
     // Output results
     let color = match color_choice {
@@ -460,7 +481,7 @@ fn do_direct_content_search(
     context_after: u32,
     case_insensitive: bool,
     word_regexp: bool,
-) -> Result<Vec<server::protocol::ContentMatch>> {
+) -> Result<Vec<output::ContentMatch>> {
     use crate::index::reader::IndexReader;
     use crate::query::{parse_query, QueryExecutor};
 
@@ -483,15 +504,15 @@ fn do_direct_content_search(
     let executor = QueryExecutor::new(&reader);
     let matches = executor.execute_with_content(&parsed, context_before, context_after)?;
 
-    // Convert to protocol type and apply limit (0 = unlimited)
+    // Convert to output type and apply limit (0 = unlimited)
     let iter = matches.into_iter();
     let limited: Box<dyn Iterator<Item = _>> = if limit == 0 {
         Box::new(iter)
     } else {
         Box::new(iter.take(limit))
     };
-    let result: Vec<server::protocol::ContentMatch> = limited
-        .map(|m| server::protocol::ContentMatch {
+    let result: Vec<output::ContentMatch> = limited
+        .map(|m| output::ContentMatch {
             path: m.path,
             line_number: m.line_number,
             line_content: m.line_content,

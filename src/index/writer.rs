@@ -2,31 +2,35 @@ use crate::index::build::ProcessedFile;
 use crate::index::types::*;
 #[allow(unused_imports)]
 use crate::utils::{delta_encode, extract_tokens, extract_trigrams, get_index_dir, is_binary, is_minified, BloomFilter};
+use ahash::AHashMap;
 use anyhow::Result;
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Chunked index writer for memory-bounded index building.
-/// Processes files in chunks and writes each chunk as a separate segment.
+/// Single-segment index writer for fast index building.
+/// Accumulates all data in memory and writes once at the end.
+/// This is much faster than writing multiple segments.
 pub struct ChunkedIndexWriter {
     root_path: PathBuf,
     index_path: PathBuf,
     config: IndexConfig,
-    // Global state (persists across chunks)
+    // Global state
     all_documents: Vec<Document>,
     all_paths: Vec<PathBuf>,
-    path_to_id: HashMap<PathBuf, PathId>,
+    path_to_id: AHashMap<PathBuf, PathId>,
     next_doc_id: DocId,
-    segment_ids: Vec<SegmentId>,
-    // Accumulated trigram frequencies for stop-gram computation
-    trigram_frequencies: HashMap<Trigram, u32>,
+    // Accumulated posting lists (global, not per-segment)
+    trigram_postings: AHashMap<Trigram, Vec<DocId>>,
+    token_postings: AHashMap<String, Vec<DocId>>,
+    line_maps: AHashMap<DocId, Vec<u32>>,
 }
 
 impl ChunkedIndexWriter {
-    /// Create a new chunked index writer
+    /// Create a new single-segment index writer
     pub fn new(root_path: &Path, config: IndexConfig) -> Result<Self> {
         let root_path = root_path.canonicalize()?;
         let index_path = get_index_dir(&root_path)?;
@@ -42,10 +46,11 @@ impl ChunkedIndexWriter {
             config,
             all_documents: Vec::new(),
             all_paths: Vec::new(),
-            path_to_id: HashMap::new(),
+            path_to_id: AHashMap::new(),
             next_doc_id: 1,
-            segment_ids: Vec::new(),
-            trigram_frequencies: HashMap::new(),
+            trigram_postings: AHashMap::with_capacity(100_000),
+            token_postings: AHashMap::with_capacity(50_000),
+            line_maps: AHashMap::new(),
         })
     }
 
@@ -61,33 +66,20 @@ impl ChunkedIndexWriter {
         id
     }
 
-    /// Write a chunk of processed files as a segment
-    pub fn write_chunk(&mut self, segment_id: SegmentId, processed_files: Vec<ProcessedFile>) -> Result<()> {
+    /// Accumulate a chunk of processed files (no disk writes yet)
+    pub fn write_chunk(&mut self, _segment_id: SegmentId, processed_files: Vec<ProcessedFile>) -> Result<()> {
         if processed_files.is_empty() {
             return Ok(());
         }
 
-        self.segment_ids.push(segment_id);
-
-        let file_count = processed_files.len();
-
-        // Segment-local data (pre-sized for efficiency)
-        let mut trigram_postings: BTreeMap<Trigram, Vec<DocId>> = BTreeMap::new();
-        let mut token_postings: BTreeMap<String, Vec<DocId>> = BTreeMap::new();
-        let mut line_maps: HashMap<DocId, Vec<u32>> = HashMap::with_capacity(file_count);
-
-        // Create bloom filter for this segment for fast pre-filtering
-        let estimated_trigrams = processed_files.len() * 500;
-        let mut bloom_filter = BloomFilter::new(estimated_trigrams.max(10000), 0.01);
-
-        // Process each file
+        // Process each file - accumulate into global posting lists
         for processed in processed_files {
             let doc_id = self.next_doc_id;
             self.next_doc_id += 1;
 
             let path_id = self.add_path(&processed.rel_path);
 
-            // Create document entry
+            // Create document entry (segment_id=1 for single segment)
             let doc = Document {
                 doc_id,
                 path_id,
@@ -95,79 +87,71 @@ impl ChunkedIndexWriter {
                 mtime: processed.mtime,
                 language: processed.language,
                 flags: processed.flags,
-                segment_id,
+                segment_id: 1,
             };
             self.all_documents.push(doc);
 
-            // Add trigrams to segment postings, bloom filter, and track global frequencies
+            // Add trigrams to global postings (bloom filter populated at finalize)
             for trigram in processed.trigrams {
-                trigram_postings.entry(trigram).or_default().push(doc_id);
-                *self.trigram_frequencies.entry(trigram).or_insert(0) += 1;
-                bloom_filter.insert(trigram);
+                self.trigram_postings.entry(trigram).or_default().push(doc_id);
             }
 
-            // Add tokens to segment postings
+            // Add tokens to global postings
             for token in processed.tokens {
-                token_postings.entry(token).or_default().push(doc_id);
+                self.token_postings.entry(token).or_default().push(doc_id);
             }
 
             // Store line map
-            line_maps.insert(doc_id, processed.line_offsets);
+            self.line_maps.insert(doc_id, processed.line_offsets);
         }
-
-        // Write segment files
-        let segment_name = format!("seg_{:04}", segment_id);
-        let segment_path = self.index_path.join("segments").join(&segment_name);
-        fs::create_dir_all(&segment_path)?;
-
-        // Write trigram index (without stop-gram filtering - we'll filter at query time)
-        self.write_trigram_index(&segment_path, &trigram_postings)?;
-
-        // Write token index
-        self.write_token_index(&segment_path, &token_postings)?;
-
-        // Write line maps
-        self.write_line_maps(&segment_path, &line_maps)?;
-
-        // Write bloom filter for fast pre-filtering
-        Self::write_bloom_filter(&segment_path, &bloom_filter)?;
 
         Ok(())
     }
 
-    /// Write trigram index for a segment
-    fn write_trigram_index(&self, segment_path: &Path, trigram_postings: &BTreeMap<Trigram, Vec<DocId>>) -> Result<()> {
+    /// Write trigram index (sorted for binary search at read time)
+    /// Optimized format: varint offset/length for smaller dict file
+    fn write_trigram_index(&self, segment_path: &Path) -> Result<()> {
         let dict_path = segment_path.join("grams.dict");
         let postings_path = segment_path.join("grams.postings");
 
-        // Use 64KB buffers for better I/O throughput
-        let mut dict_file = BufWriter::with_capacity(65536, File::create(&dict_path)?);
-        let mut postings_file = BufWriter::with_capacity(65536, File::create(&postings_path)?);
+        // Sort trigrams for binary search
+        let mut sorted_trigrams: Vec<_> = self.trigram_postings.iter().collect();
+        sorted_trigrams.par_sort_unstable_by_key(|(t, _)| *t);
+
+        // Pre-process all postings in parallel (sort, dedup, encode)
+        let encoded_postings: Vec<_> = sorted_trigrams
+            .par_iter()
+            .map(|&(&trigram, ref doc_ids)| {
+                let mut sorted_ids: Vec<_> = doc_ids.iter().copied().collect();
+                sorted_ids.sort_unstable();
+                sorted_ids.dedup();
+                
+                let mut encoded = Vec::with_capacity(sorted_ids.len() * 2);
+                delta_encode(&sorted_ids, &mut encoded);
+                
+                (trigram, sorted_ids.len() as u32, encoded)
+            })
+            .collect();
+
+        // Use 256KB buffers for better I/O throughput
+        let mut dict_file = BufWriter::with_capacity(262144, File::create(&dict_path)?);
+        let mut postings_file = BufWriter::with_capacity(262144, File::create(&postings_path)?);
 
         // Write entry count to dictionary
-        dict_file.write_all(&(trigram_postings.len() as u32).to_le_bytes())?;
+        dict_file.write_all(&(encoded_postings.len() as u32).to_le_bytes())?;
 
-        let mut postings_offset: u64 = 0;
+        let mut postings_offset: u32 = 0;
 
-        for (&trigram, doc_ids) in trigram_postings {
-            // Sort and deduplicate doc_ids
-            let mut sorted_ids: Vec<_> = doc_ids.iter().copied().collect();
-            sorted_ids.sort_unstable();
-            sorted_ids.dedup();
-
-            // Delta-encode postings
-            let mut encoded = Vec::new();
-            delta_encode(&sorted_ids, &mut encoded);
-
-            // Write dictionary entry: trigram, offset, length, doc_freq
+        for (trigram, doc_freq, encoded) in encoded_postings {
+            // Write dictionary entry: trigram (4), offset (4), length (4), doc_freq (4) = 16 bytes
             dict_file.write_all(&trigram.to_le_bytes())?;
             dict_file.write_all(&postings_offset.to_le_bytes())?;
             dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
-            dict_file.write_all(&(sorted_ids.len() as u32).to_le_bytes())?;
+            dict_file.write_all(&doc_freq.to_le_bytes())?;
 
             // Write postings
             postings_file.write_all(&encoded)?;
-            postings_offset += encoded.len() as u64;
+            postings_offset += encoded.len() as u32;
         }
 
         dict_file.flush()?;
@@ -175,43 +159,53 @@ impl ChunkedIndexWriter {
         Ok(())
     }
 
-    /// Write token index for a segment
-    fn write_token_index(&self, segment_path: &Path, token_postings: &BTreeMap<String, Vec<DocId>>) -> Result<()> {
+    /// Write token index (sorted for binary search at read time)
+    fn write_token_index(&self, segment_path: &Path) -> Result<()> {
         let dict_path = segment_path.join("tokens.dict");
         let postings_path = segment_path.join("tokens.postings");
 
-        // Use 64KB buffers for better I/O throughput
-        let mut dict_file = BufWriter::with_capacity(65536, File::create(&dict_path)?);
-        let mut postings_file = BufWriter::with_capacity(65536, File::create(&postings_path)?);
+        // Sort tokens for binary search
+        let mut sorted_tokens: Vec<_> = self.token_postings.iter().collect();
+        sorted_tokens.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+
+        // Pre-process all postings in parallel (sort, dedup, encode)
+        let encoded_postings: Vec<_> = sorted_tokens
+            .par_iter()
+            .map(|&(ref token, ref doc_ids)| {
+                let mut sorted_ids: Vec<_> = doc_ids.iter().copied().collect();
+                sorted_ids.sort_unstable();
+                sorted_ids.dedup();
+                
+                let mut encoded = Vec::with_capacity(sorted_ids.len() * 2);
+                delta_encode(&sorted_ids, &mut encoded);
+                
+                (token.clone(), sorted_ids.len() as u32, encoded)
+            })
+            .collect();
+
+        // Use 256KB buffers for better I/O throughput
+        let mut dict_file = BufWriter::with_capacity(262144, File::create(&dict_path)?);
+        let mut postings_file = BufWriter::with_capacity(262144, File::create(&postings_path)?);
 
         // Write entry count
-        dict_file.write_all(&(token_postings.len() as u32).to_le_bytes())?;
+        dict_file.write_all(&(encoded_postings.len() as u32).to_le_bytes())?;
 
-        let mut postings_offset: u64 = 0;
+        let mut postings_offset: u32 = 0;
 
-        for (token, doc_ids) in token_postings {
-            // Sort and deduplicate
-            let mut sorted_ids: Vec<_> = doc_ids.iter().copied().collect();
-            sorted_ids.sort_unstable();
-            sorted_ids.dedup();
-
-            // Delta-encode
-            let mut encoded = Vec::new();
-            delta_encode(&sorted_ids, &mut encoded);
-
+        for (token, doc_freq, encoded) in encoded_postings {
             // Write token (length-prefixed)
             let token_bytes = token.as_bytes();
             dict_file.write_all(&(token_bytes.len() as u16).to_le_bytes())?;
             dict_file.write_all(token_bytes)?;
 
-            // Write offset, length, freq
+            // Write offset (u32), length (u32), freq (u32)
             dict_file.write_all(&postings_offset.to_le_bytes())?;
             dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
-            dict_file.write_all(&(sorted_ids.len() as u32).to_le_bytes())?;
+            dict_file.write_all(&doc_freq.to_le_bytes())?;
 
             // Write postings
             postings_file.write_all(&encoded)?;
-            postings_offset += encoded.len() as u64;
+            postings_offset += encoded.len() as u32;
         }
 
         dict_file.flush()?;
@@ -219,16 +213,16 @@ impl ChunkedIndexWriter {
         Ok(())
     }
 
-    /// Write line maps for a segment
-    fn write_line_maps(&self, segment_path: &Path, line_maps: &HashMap<DocId, Vec<u32>>) -> Result<()> {
+    /// Write line maps for the single segment
+    fn write_line_maps(&self, segment_path: &Path) -> Result<()> {
         let linemap_path = segment_path.join("linemap.bin");
-        let mut file = BufWriter::with_capacity(65536, File::create(&linemap_path)?);
+        let mut file = BufWriter::with_capacity(262144, File::create(&linemap_path)?);
 
         // Write count
-        file.write_all(&(line_maps.len() as u32).to_le_bytes())?;
+        file.write_all(&(self.line_maps.len() as u32).to_le_bytes())?;
 
         // Sort by doc_id for consistent ordering
-        let mut sorted: Vec<_> = line_maps.iter().collect();
+        let mut sorted: Vec<_> = self.line_maps.iter().collect();
         sorted.sort_by_key(|(id, _)| *id);
 
         for (&doc_id, offsets) in sorted {
@@ -247,16 +241,22 @@ impl ChunkedIndexWriter {
         Ok(())
     }
 
-    /// Write bloom filter to segment for fast pre-filtering
-    fn write_bloom_filter(segment_path: &Path, bloom_filter: &BloomFilter) -> Result<()> {
+    /// Write bloom filter for fast pre-filtering
+    fn write_bloom_filter(&self, segment_path: &Path) -> Result<()> {
+        // Build bloom filter from all trigrams
+        let mut bloom = BloomFilter::new(self.trigram_postings.len().max(1), 0.01);
+        for &trigram in self.trigram_postings.keys() {
+            bloom.insert(trigram);
+        }
+        
         let bloom_path = segment_path.join("bloom.bin");
         let mut file = BufWriter::with_capacity(65536, File::create(&bloom_path)?);
 
         // Write num_hashes (u8)
-        file.write_all(&[bloom_filter.num_hashes()])?;
+        file.write_all(&[bloom.num_hashes()])?;
 
         // Write number of u64 words
-        let bits = bloom_filter.bits();
+        let bits = bloom.bits();
         file.write_all(&(bits.len() as u32).to_le_bytes())?;
 
         // Write bit data
@@ -268,10 +268,10 @@ impl ChunkedIndexWriter {
         Ok(())
     }
 
-    /// Compute stop-grams from accumulated frequencies
+    /// Compute stop-grams from posting list lengths
     fn compute_stop_grams(&self) -> HashSet<Trigram> {
-        let mut freq: Vec<_> = self.trigram_frequencies.iter()
-            .map(|(&t, &count)| (t, count as usize))
+        let mut freq: Vec<_> = self.trigram_postings.iter()
+            .map(|(&t, docs)| (t, docs.len()))
             .collect();
 
         freq.sort_by(|a, b| b.1.cmp(&a.1));
@@ -282,19 +282,57 @@ impl ChunkedIndexWriter {
             .collect()
     }
 
-    /// Finalize the index - write global data (docs, paths, meta)
+    /// Finalize the index - write single segment and global data
     pub fn finalize(&self) -> Result<()> {
+        use std::time::Instant;
+        
+        // Create single segment directory
+        let segment_path = self.index_path.join("segments").join("seg_0001");
+        fs::create_dir_all(&segment_path)?;
+
+        // Write all index data to single segment with timing
+        let t0 = Instant::now();
+        self.write_trigram_index(&segment_path)?;
+        let trigram_ms = t0.elapsed().as_millis();
+        
+        let t1 = Instant::now();
+        self.write_token_index(&segment_path)?;
+        let token_ms = t1.elapsed().as_millis();
+        
+        let t2 = Instant::now();
+        self.write_line_maps(&segment_path)?;
+        let linemap_ms = t2.elapsed().as_millis();
+        
+        let t3 = Instant::now();
+        self.write_bloom_filter(&segment_path)?;
+        let bloom_ms = t3.elapsed().as_millis();
+
         // Write documents table
+        let t4 = Instant::now();
         self.write_documents()?;
+        let docs_ms = t4.elapsed().as_millis();
 
         // Write path store
+        let t5 = Instant::now();
         self.write_paths()?;
+        let paths_ms = t5.elapsed().as_millis();
 
         // Compute stop-grams from accumulated frequencies
+        let t6 = Instant::now();
         let stop_grams = self.compute_stop_grams();
+        let stopgram_ms = t6.elapsed().as_millis();
 
         // Write metadata
         self.write_meta(&stop_grams)?;
+        
+        println!("\n=== Finalize Breakdown ===");
+        println!("  Trigram index:  {:>6} ms ({} entries)", trigram_ms, self.trigram_postings.len());
+        println!("  Token index:    {:>6} ms ({} entries)", token_ms, self.token_postings.len());
+        println!("  Line maps:      {:>6} ms ({} docs)", linemap_ms, self.line_maps.len());
+        println!("  Bloom filter:   {:>6} ms", bloom_ms);
+        println!("  Documents:      {:>6} ms", docs_ms);
+        println!("  Paths:          {:>6} ms", paths_ms);
+        println!("  Stop-grams:     {:>6} ms", stopgram_ms);
 
         Ok(())
     }
@@ -347,22 +385,14 @@ impl ChunkedIndexWriter {
             .unwrap()
             .as_secs();
 
-        // Use first segment as base, rest as delta
-        let (base_segment, delta_segments) = if self.segment_ids.is_empty() {
-            (None, Vec::new())
-        } else if self.segment_ids.len() == 1 {
-            (Some(self.segment_ids[0]), Vec::new())
-        } else {
-            (Some(self.segment_ids[0]), self.segment_ids[1..].to_vec())
-        };
-
+        // Single segment architecture
         let meta = IndexMeta {
             version: 1,
             root_path: self.root_path.clone(),
             doc_count: self.all_documents.len() as u32,
-            segment_count: self.segment_ids.len() as u16,
-            base_segment,
-            delta_segments,
+            segment_count: 1,
+            base_segment: Some(1),
+            delta_segments: Vec::new(),
             stop_grams: stop_grams.iter().copied().collect(),
             created_at: now,
             updated_at: now,
