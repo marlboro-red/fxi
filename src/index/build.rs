@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 /// Result of processing a single file (computed in parallel)
@@ -94,11 +94,21 @@ fn build_line_map(content: &[u8]) -> Vec<u32> {
 
 /// Build or rebuild the search index
 pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
-    build_index_with_progress(root_path, force, false)
+    build_index_with_options(root_path, force, false, None)
+}
+
+/// Build or rebuild the search index with custom chunk size
+pub fn build_index_with_chunk_size(root_path: &Path, force: bool, chunk_size: Option<usize>) -> Result<()> {
+    build_index_with_options(root_path, force, false, chunk_size)
 }
 
 /// Build or rebuild the search index with optional silent mode
 pub fn build_index_with_progress(root_path: &Path, force: bool, silent: bool) -> Result<()> {
+    build_index_with_options(root_path, force, silent, None)
+}
+
+/// Build or rebuild the search index with all options
+pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chunk_size_override: Option<usize>) -> Result<()> {
     let root = root_path.canonicalize().context("Invalid path")?;
     let index_path = get_index_dir(&root)?;
 
@@ -108,7 +118,6 @@ pub fn build_index_with_progress(root_path: &Path, force: bool, silent: bool) ->
     }
 
     let config = IndexConfig::default();
-    let chunk_size = config.chunk_size;
     let max_file_size = config.max_file_size;
 
     if !silent {
@@ -130,31 +139,43 @@ pub fn build_index_with_progress(root_path: &Path, force: bool, silent: bool) ->
         None
     };
 
-    let walker = WalkBuilder::new(&root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .filter_entry(|entry| {
-            let name = entry.file_name().to_string_lossy();
-            // Skip common non-code directories
-            !matches!(
-                name.as_ref(),
-                ".git" | "node_modules" | "target" | ".codesearch" | "__pycache__" | ".venv" | "venv"
-            )
-        })
-        .build();
+    // Use parallel walker for faster file discovery
+    let file_entries: Vec<(PathBuf, PathBuf)> = {
+        let entries = Arc::new(Mutex::new(Vec::new()));
+        let root_clone = root.clone();
 
-    // Collect file entries for parallel processing
-    let file_entries: Vec<_> = walker
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().is_file())
-        .filter_map(|entry| {
-            let path = entry.path().to_path_buf();
-            let rel_path = path.strip_prefix(&root).ok()?.to_path_buf();
-            Some((path, rel_path))
-        })
-        .collect();
+        WalkBuilder::new(&root)
+            .hidden(true)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .filter_entry(|entry| {
+                let name = entry.file_name().to_string_lossy();
+                // Skip common non-code directories
+                !matches!(
+                    name.as_ref(),
+                    ".git" | "node_modules" | "target" | ".codesearch" | "__pycache__" | ".venv" | "venv"
+                )
+            })
+            .build_parallel()
+            .run(|| {
+                let entries = Arc::clone(&entries);
+                let root = root_clone.clone();
+                Box::new(move |result| {
+                    if let Ok(entry) = result {
+                        if entry.path().is_file() {
+                            if let Ok(rel_path) = entry.path().strip_prefix(&root) {
+                                let mut entries = entries.lock().unwrap();
+                                entries.push((entry.path().to_path_buf(), rel_path.to_path_buf()));
+                            }
+                        }
+                    }
+                    ignore::WalkState::Continue
+                })
+            });
+
+        Arc::try_unwrap(entries).unwrap().into_inner().unwrap()
+    };
 
     let total_files = file_entries.len();
 
@@ -162,12 +183,19 @@ pub fn build_index_with_progress(root_path: &Path, force: bool, silent: bool) ->
         spinner.finish_with_message(format!("Found {} files", total_files));
     }
 
+    // Determine chunk size: 0 means all files in one chunk
+    let chunk_size = match chunk_size_override {
+        Some(0) => total_files.max(1), // All in one chunk
+        Some(n) => n,
+        None => config.chunk_size,
+    };
+
     // Phase 2: Process in chunks
     let mut chunked_writer = ChunkedIndexWriter::new(&root, config)?;
     let error_count = Arc::new(AtomicUsize::new(0));
     let total_processed = Arc::new(AtomicUsize::new(0));
 
-    let num_chunks = (total_files + chunk_size - 1) / chunk_size;
+    let num_chunks = if chunk_size == 0 { 1 } else { (total_files + chunk_size - 1) / chunk_size };
 
     if num_chunks > 1 && !silent {
         println!(
@@ -325,25 +353,36 @@ pub fn build_index_with_progress(root_path: &Path, force: bool, silent: bool) ->
         );
     }
 
-    // Phase 3: Finalize global data with spinner
-    let finalize_spinner = if !silent {
-        let spinner = ProgressBar::new_spinner();
-        spinner.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg}")
-                .unwrap(),
+    // Phase 3: Finalize - wait for segment writes and write global data
+    let total_segments = chunked_writer.total_segments();
+    let finalize_progress = if !silent && total_segments > 0 {
+        let pb = ProgressBar::new(total_segments as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.cyan} [{bar:40.cyan/blue}] {pos}/{len} segments written {msg}")
+                .unwrap()
+                .progress_chars("█▓▒░  "),
         );
-        spinner.set_message("Finalizing index...");
-        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
-        Some(spinner)
+        pb.set_message("");
+        pb.enable_steady_tick(std::time::Duration::from_millis(80));
+        Some(pb)
     } else {
         None
     };
 
-    chunked_writer.finalize()?;
+    let pb_for_closure = finalize_progress.clone();
+    chunked_writer.finalize_with_progress(|completed, _total| {
+        if let Some(ref pb) = pb_for_closure {
+            pb.set_position(completed as u64);
+        }
+    })?;
 
-    if let Some(spinner) = finalize_spinner {
-        spinner.finish_with_message("Index complete");
+    if let Some(pb) = finalize_progress {
+        pb.finish_with_message("- finalizing...");
+    }
+
+    if !silent {
+        println!("Index complete");
     }
 
     if !silent {
@@ -552,13 +591,13 @@ fn perform_incremental_update(
 
 /// Build index, detecting codebase root from current directory
 /// Uses incremental update by default, force=true for full rebuild
-pub fn build_index_auto(start_path: &Path, force: bool) -> Result<()> {
+pub fn build_index_auto(start_path: &Path, force: bool, chunk_size: Option<usize>) -> Result<()> {
     let root = find_codebase_root(start_path)?;
     println!("Detected codebase root: {}", root.display());
 
-    if force {
-        // Force full rebuild
-        build_index(&root, true)
+    if force || chunk_size.is_some() {
+        // Force full rebuild (also when chunk_size is specified, since incremental doesn't support it)
+        build_index_with_chunk_size(&root, true, chunk_size)
     } else {
         // Try incremental update first
         update_index(&root)?;

@@ -82,7 +82,18 @@
       "Bash(fxi daemon:*)",
       "Bash(time fxi:*)",
       "Bash(fxi:*)",
-      "Bash(cargo run:*)"
+      "Bash(cargo run:*)",
+      "Bash(cargo clean:*)",
+      "Bash(PATH=\"/Users/cjpark/Desktop/Projects/fxi/target/release:$PATH\" bash:*)",
+      "Bash(xxd:*)",
+      "Bash(do /usr/bin/time -p /Users/cjpark/Desktop/Projects/fxi/target/release/fxi \"struct\" -l --color=never)",
+      "Bash(do { /usr/bin/time -p /Users/cjpark/Desktop/Projects/fxi/target/release/fxi \"struct\" -l --color=never)",
+      "Bash(})",
+      "Bash(for pattern in '\"\"static void\"\"' '\"\"unsigned long\"\"')",
+      "Bash(do echo -n \"$pattern: \")",
+      "Bash(do /usr/bin/time -p sh -c:*)",
+      "Bash(for pattern in \"struct\" \"return\" \"NULL\")",
+      "Bash(/Users/cjpark/Desktop/Projects/fxi/scripts/benchmark-chromium.sh:*)"
     ]
   }
 }

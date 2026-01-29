@@ -121,75 +121,100 @@ impl QueryPlanner {
             QueryNode::Empty => (Vec::new(), None),
 
             QueryNode::Literal(text) => {
-                let trigrams = query_trigrams(text);
+                // For single-word queries, prefer direct token lookup over trigrams.
+                // Token lookup is O(1) vs trigram intersection which can hit stop-grams.
+                let is_single_word = !text.contains(char::is_whitespace) && text.len() >= 2;
 
-                if trigrams.is_empty() {
-                    // Short query, use token index
-                    let tokens: Vec<_> = text
-                        .split_whitespace()
-                        .filter(|t| t.len() >= 2)
-                        .map(|t| t.to_lowercase())
-                        .collect();
-
-                    if tokens.is_empty() {
-                        return (Vec::new(), Some(VerificationStep::Literal(text.clone())));
-                    }
-
-                    let steps: Vec<_> = tokens
-                        .into_iter()
-                        .map(PlanStep::TokenLookup)
-                        .collect();
-
-                    (steps, Some(VerificationStep::Literal(text.clone())))
-                } else {
-                    // Use trigram narrowing
+                if is_single_word {
+                    // Direct token lookup for single words (faster for common terms)
                     (
-                        vec![PlanStep::TrigramIntersect(trigrams)],
+                        vec![PlanStep::TokenLookup(text.to_lowercase())],
                         Some(VerificationStep::Literal(text.clone())),
                     )
+                } else {
+                    let trigrams = query_trigrams(text);
+
+                    if trigrams.is_empty() {
+                        // Short query or multiple short words, use token index
+                        let tokens: Vec<_> = text
+                            .split_whitespace()
+                            .filter(|t| t.len() >= 2)
+                            .map(|t| t.to_lowercase())
+                            .collect();
+
+                        if tokens.is_empty() {
+                            return (Vec::new(), Some(VerificationStep::Literal(text.clone())));
+                        }
+
+                        let steps: Vec<_> = tokens
+                            .into_iter()
+                            .map(PlanStep::TokenLookup)
+                            .collect();
+
+                        (steps, Some(VerificationStep::Literal(text.clone())))
+                    } else {
+                        // Multi-word query: use trigram narrowing
+                        (
+                            vec![PlanStep::TrigramIntersect(trigrams)],
+                            Some(VerificationStep::Literal(text.clone())),
+                        )
+                    }
                 }
             }
 
             QueryNode::BoostedLiteral { text, boost } => {
-                let trigrams = query_trigrams(text);
+                // For single-word queries, prefer direct token lookup over trigrams
+                let is_single_word = !text.contains(char::is_whitespace) && text.len() >= 2;
 
-                if trigrams.is_empty() {
-                    let tokens: Vec<_> = text
-                        .split_whitespace()
-                        .filter(|t| t.len() >= 2)
-                        .map(|t| t.to_lowercase())
-                        .collect();
-
-                    if tokens.is_empty() {
-                        return (
-                            Vec::new(),
-                            Some(VerificationStep::BoostedLiteral {
-                                text: text.clone(),
-                                boost: *boost,
-                            }),
-                        );
-                    }
-
-                    let steps: Vec<_> = tokens
-                        .into_iter()
-                        .map(PlanStep::TokenLookup)
-                        .collect();
-
+                if is_single_word {
                     (
-                        steps,
+                        vec![PlanStep::TokenLookup(text.to_lowercase())],
                         Some(VerificationStep::BoostedLiteral {
                             text: text.clone(),
                             boost: *boost,
                         }),
                     )
                 } else {
-                    (
-                        vec![PlanStep::TrigramIntersect(trigrams)],
-                        Some(VerificationStep::BoostedLiteral {
-                            text: text.clone(),
-                            boost: *boost,
-                        }),
-                    )
+                    let trigrams = query_trigrams(text);
+
+                    if trigrams.is_empty() {
+                        let tokens: Vec<_> = text
+                            .split_whitespace()
+                            .filter(|t| t.len() >= 2)
+                            .map(|t| t.to_lowercase())
+                            .collect();
+
+                        if tokens.is_empty() {
+                            return (
+                                Vec::new(),
+                                Some(VerificationStep::BoostedLiteral {
+                                    text: text.clone(),
+                                    boost: *boost,
+                                }),
+                            );
+                        }
+
+                        let steps: Vec<_> = tokens
+                            .into_iter()
+                            .map(PlanStep::TokenLookup)
+                            .collect();
+
+                        (
+                            steps,
+                            Some(VerificationStep::BoostedLiteral {
+                                text: text.clone(),
+                                boost: *boost,
+                            }),
+                        )
+                    } else {
+                        (
+                            vec![PlanStep::TrigramIntersect(trigrams)],
+                            Some(VerificationStep::BoostedLiteral {
+                                text: text.clone(),
+                                boost: *boost,
+                            }),
+                        )
+                    }
                 }
             }
 

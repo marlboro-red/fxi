@@ -90,6 +90,10 @@ enum Commands {
         /// Force full rebuild
         #[arg(short, long)]
         force: bool,
+
+        /// Files per chunk (0 = all in one chunk)
+        #[arg(long)]
+        chunk_size: Option<usize>,
     },
     /// Interactive search TUI
     Search {
@@ -145,9 +149,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Index { path, force }) => {
+        Some(Commands::Index { path, force, chunk_size }) => {
             // Auto-detect codebase root
-            index::build::build_index_auto(&path, force)?;
+            index::build::build_index_auto(&path, force, chunk_size)?;
         }
         Some(Commands::Search { path }) => {
             tui::run(path, None)?;

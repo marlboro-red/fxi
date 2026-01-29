@@ -1,5 +1,9 @@
 use std::collections::HashSet;
 
+/// Maximum token length to store in the index.
+/// Tokens longer than this are likely base64, hex dumps, or other non-searchable content.
+const MAX_TOKEN_LENGTH: usize = 128;
+
 /// Extract tokens from source code content
 /// Handles: identifiers, snake_case splits, camelCase splits, words
 /// Optimized for speed with byte-level processing where possible.
@@ -29,7 +33,7 @@ pub fn extract_tokens(content: &str) -> HashSet<String> {
             if is_upper && prev_was_lower {
                 if let Some(start) = token_start {
                     let slice = &bytes[start..i];
-                    if slice.len() >= 2 {
+                    if slice.len() >= 2 && slice.len() <= MAX_TOKEN_LENGTH {
                         // SAFETY: we only process ASCII bytes
                         let s = unsafe { std::str::from_utf8_unchecked(slice) };
                         tokens.insert(s.to_ascii_lowercase());
@@ -44,7 +48,7 @@ pub fn extract_tokens(content: &str) -> HashSet<String> {
             // End of token (underscore or other char)
             if let Some(start) = token_start {
                 let slice = &bytes[start..i];
-                if slice.len() >= 2 {
+                if slice.len() >= 2 && slice.len() <= MAX_TOKEN_LENGTH {
                     // SAFETY: we only process ASCII bytes
                     let s = unsafe { std::str::from_utf8_unchecked(slice) };
                     tokens.insert(s.to_ascii_lowercase());
@@ -64,7 +68,7 @@ pub fn extract_tokens(content: &str) -> HashSet<String> {
     // Handle last token
     if let Some(start) = token_start {
         let slice = &bytes[start..];
-        if slice.len() >= 2 {
+        if slice.len() >= 2 && slice.len() <= MAX_TOKEN_LENGTH {
             // Check if it's valid UTF-8 ASCII
             if slice.iter().all(|&b| b < 128) {
                 let s = unsafe { std::str::from_utf8_unchecked(slice) };
@@ -153,8 +157,8 @@ fn classify_char(ch: char) -> CharType {
 }
 
 fn add_token(tokens: &mut HashSet<String>, token: &str) {
-    // Only add tokens of meaningful length
-    if token.len() >= 2 {
+    // Only add tokens of meaningful length, skip overly long tokens
+    if token.len() >= 2 && token.len() <= MAX_TOKEN_LENGTH {
         tokens.insert(token.to_lowercase());
     }
 }

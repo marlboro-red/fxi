@@ -245,7 +245,13 @@ impl IndexReader {
                                     .join("segments")
                                     .join(format!("seg_{:04}", seg_id));
                                 if segment_path.exists() {
-                                    SegmentReader::open(&segment_path, seg_id, index_path_ref).ok()
+                                    match SegmentReader::open(&segment_path, seg_id, index_path_ref) {
+                                        Ok(reader) => Some(reader),
+                                        Err(e) => {
+                                            eprintln!("Warning: Failed to open segment {}: {}. Index may be corrupted - try 'fxi index --force' to rebuild.", seg_id, e);
+                                            None
+                                        }
+                                    }
                                 } else {
                                     None
                                 }
@@ -672,9 +678,10 @@ fn read_token_dict(segment_path: &Path) -> Result<TokenDict> {
 
     let mut entries = Vec::with_capacity(count);
 
-    for _ in 0..count {
+    for i in 0..count {
         // token length (u16)
-        file.read_exact(&mut buf2)?;
+        file.read_exact(&mut buf2)
+            .with_context(|| format!("Token dictionary truncated at entry {}/{} - index may be corrupted", i, count))?;
         let token_len = u16::from_le_bytes(buf2) as usize;
 
         // token bytes

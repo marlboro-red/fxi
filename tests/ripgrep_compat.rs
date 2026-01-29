@@ -1002,3 +1002,114 @@ fn test_context_overrides() {
         large_lines
     );
 }
+
+// ============================================================================
+// Chunk size configuration tests
+// ============================================================================
+
+/// Create an isolated test directory for chunk size tests
+fn create_chunk_test_dir(suffix: &str) -> PathBuf {
+    let dir = std::env::temp_dir()
+        .join("fxi_chunk_tests")
+        .join(format!("test_{}_{}", std::process::id(), suffix));
+
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("Failed to create test dir");
+
+    // Initialize git repo
+    Command::new("git")
+        .args(["init"])
+        .current_dir(&dir)
+        .output()
+        .expect("Failed to init git repo");
+
+    // Create multiple test files
+    for i in 1..=10 {
+        fs::write(
+            dir.join(format!("file{}.rs", i)),
+            format!("pub fn func{}() {{\n    println!(\"hello {}\");\n}}\n", i, i),
+        ).unwrap();
+    }
+
+    dir
+}
+
+#[test]
+fn test_chunk_size_zero_all_in_one() {
+    let dir = create_chunk_test_dir("zero");
+    let fxi = fxi_binary();
+
+    // Index with chunk_size=0 (all files in one chunk)
+    let output = Command::new(&fxi)
+        .args(["index", "--force", "--chunk-size", "0"])
+        .arg(&dir)
+        .output()
+        .expect("Failed to run fxi index");
+
+    assert!(
+        output.status.success(),
+        "fxi index --chunk-size 0 should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify search works
+    let (stdout, _, success) = run_fxi(&["func1"], &dir);
+    assert!(success, "Search should succeed");
+    assert!(stdout.contains("func1"), "Should find func1");
+
+    // Verify we can find content from all files
+    let (stdout, _, success) = run_fxi(&["func10"], &dir);
+    assert!(success, "Search should succeed");
+    assert!(stdout.contains("func10"), "Should find func10");
+}
+
+#[test]
+fn test_chunk_size_small_multiple_segments() {
+    let dir = create_chunk_test_dir("small");
+    let fxi = fxi_binary();
+
+    // Index with small chunk_size to force multiple segments
+    let output = Command::new(&fxi)
+        .args(["index", "--force", "--chunk-size", "3"])
+        .arg(&dir)
+        .output()
+        .expect("Failed to run fxi index");
+
+    assert!(
+        output.status.success(),
+        "fxi index --chunk-size 3 should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify search works across all files (which may span multiple segments)
+    let (stdout, _, success) = run_fxi(&["func"], &dir);
+    assert!(success, "Search should succeed");
+    // Should find matches in multiple files
+    assert!(stdout.contains("func1"), "Should find func1");
+    assert!(stdout.contains("func5"), "Should find func5");
+    assert!(stdout.contains("func10"), "Should find func10");
+}
+
+#[test]
+fn test_chunk_size_default_no_flag() {
+    let dir = create_chunk_test_dir("default");
+    let fxi = fxi_binary();
+
+    // Index without chunk_size flag (uses default)
+    let output = Command::new(&fxi)
+        .args(["index", "--force"])
+        .arg(&dir)
+        .output()
+        .expect("Failed to run fxi index");
+
+    assert!(
+        output.status.success(),
+        "fxi index should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify search works
+    let (stdout, _, success) = run_fxi(&["func1"], &dir);
+    assert!(success, "Search should succeed");
+    assert!(stdout.contains("func1"), "Should find func1");
+}

@@ -3,14 +3,36 @@ use crate::index::types::*;
 #[allow(unused_imports)]
 use crate::utils::{delta_encode, extract_tokens, extract_trigrams, get_index_dir, is_binary, is_minified, BloomFilter};
 use anyhow::Result;
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// File data with pre-assigned IDs, ready for background processing
+struct AssignedFile {
+    doc_id: DocId,
+    trigrams: Vec<u32>,
+    tokens: Vec<String>,
+    line_offsets: Vec<u32>,
+}
+
+/// Data needed to write a segment to disk (sent to background thread)
+struct SegmentWriteJob {
+    segment_id: SegmentId,
+    segment_path: PathBuf,
+    files: Vec<AssignedFile>,
+    trigram_frequencies: Arc<Mutex<HashMap<Trigram, u32>>>,
+}
 
 /// Chunked index writer for memory-bounded index building.
 /// Processes files in chunks and writes each chunk as a separate segment.
+/// Segment writes happen asynchronously in a background thread to overlap
+/// I/O with processing of the next chunk.
 pub struct ChunkedIndexWriter {
     root_path: PathBuf,
     index_path: PathBuf,
@@ -21,8 +43,13 @@ pub struct ChunkedIndexWriter {
     path_to_id: HashMap<PathBuf, PathId>,
     next_doc_id: DocId,
     segment_ids: Vec<SegmentId>,
-    // Accumulated trigram frequencies for stop-gram computation
-    trigram_frequencies: HashMap<Trigram, u32>,
+    // Accumulated trigram frequencies for stop-gram computation (shared with background thread)
+    trigram_frequencies: Arc<Mutex<HashMap<Trigram, u32>>>,
+    // Background writer thread
+    write_sender: Option<Sender<SegmentWriteJob>>,
+    write_thread: Option<JoinHandle<Vec<anyhow::Error>>>,
+    // Channel for receiving segment completion notifications
+    completion_receiver: Option<Receiver<SegmentId>>,
 }
 
 impl ChunkedIndexWriter {
@@ -36,6 +63,27 @@ impl ChunkedIndexWriter {
         let segments_path = index_path.join("segments");
         fs::create_dir_all(&segments_path)?;
 
+        // Create channel for async segment writes
+        let (tx, rx) = mpsc::channel::<SegmentWriteJob>();
+
+        // Create channel for completion notifications
+        let (completion_tx, completion_rx) = mpsc::channel::<SegmentId>();
+
+        // Spawn background writer thread
+        let write_thread = thread::spawn(move || {
+            let mut errors = Vec::new();
+            while let Ok(job) = rx.recv() {
+                let segment_id = job.segment_id;
+                if let Err(e) = Self::process_and_write_segment(job) {
+                    errors.push(e);
+                } else {
+                    // Notify that segment write completed successfully
+                    let _ = completion_tx.send(segment_id);
+                }
+            }
+            errors
+        });
+
         Ok(Self {
             root_path,
             index_path,
@@ -45,7 +93,10 @@ impl ChunkedIndexWriter {
             path_to_id: HashMap::new(),
             next_doc_id: 1,
             segment_ids: Vec::new(),
-            trigram_frequencies: HashMap::new(),
+            trigram_frequencies: Arc::new(Mutex::new(HashMap::new())),
+            write_sender: Some(tx),
+            write_thread: Some(write_thread),
+            completion_receiver: Some(completion_rx),
         })
     }
 
@@ -61,7 +112,30 @@ impl ChunkedIndexWriter {
         id
     }
 
-    /// Write a chunk of processed files as a segment
+    /// Get total number of segments queued for writing
+    pub fn total_segments(&self) -> usize {
+        self.segment_ids.len()
+    }
+
+    /// Try to receive a segment completion notification (non-blocking).
+    /// Returns Some(segment_id) if a segment finished writing, None otherwise.
+    pub fn try_recv_completion(&self) -> Option<SegmentId> {
+        self.completion_receiver
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+    }
+
+    /// Wait for the next segment completion with timeout.
+    /// Returns Some(segment_id) if a segment finished, None on timeout.
+    pub fn recv_completion_timeout(&self, timeout: Duration) -> Option<SegmentId> {
+        self.completion_receiver
+            .as_ref()
+            .and_then(|rx| rx.recv_timeout(timeout).ok())
+    }
+
+    /// Write a chunk of processed files as a segment.
+    /// This only assigns IDs and builds Document entries synchronously,
+    /// then dispatches all heavy work to a background thread.
     pub fn write_chunk(&mut self, segment_id: SegmentId, processed_files: Vec<ProcessedFile>) -> Result<()> {
         if processed_files.is_empty() {
             return Ok(());
@@ -69,18 +143,9 @@ impl ChunkedIndexWriter {
 
         self.segment_ids.push(segment_id);
 
-        let file_count = processed_files.len();
+        // Assign IDs and build documents synchronously (fast - just ID assignment)
+        let mut assigned_files = Vec::with_capacity(processed_files.len());
 
-        // Segment-local data (pre-sized for efficiency)
-        let mut trigram_postings: BTreeMap<Trigram, Vec<DocId>> = BTreeMap::new();
-        let mut token_postings: BTreeMap<String, Vec<DocId>> = BTreeMap::new();
-        let mut line_maps: HashMap<DocId, Vec<u32>> = HashMap::with_capacity(file_count);
-
-        // Create bloom filter for this segment for fast pre-filtering
-        let estimated_trigrams = processed_files.len() * 500;
-        let mut bloom_filter = BloomFilter::new(estimated_trigrams.max(10000), 0.01);
-
-        // Process each file
         for processed in processed_files {
             let doc_id = self.next_doc_id;
             self.next_doc_id += 1;
@@ -99,128 +164,235 @@ impl ChunkedIndexWriter {
             };
             self.all_documents.push(doc);
 
-            // Add trigrams to segment postings, bloom filter, and track global frequencies
-            for trigram in processed.trigrams {
-                trigram_postings.entry(trigram).or_default().push(doc_id);
-                *self.trigram_frequencies.entry(trigram).or_insert(0) += 1;
-                bloom_filter.insert(trigram);
-            }
-
-            // Add tokens to segment postings
-            for token in processed.tokens {
-                token_postings.entry(token).or_default().push(doc_id);
-            }
-
-            // Store line map
-            line_maps.insert(doc_id, processed.line_offsets);
+            // Store file data with assigned ID for background processing
+            assigned_files.push(AssignedFile {
+                doc_id,
+                trigrams: processed.trigrams,
+                tokens: processed.tokens,
+                line_offsets: processed.line_offsets,
+            });
         }
 
-        // Write segment files
-        let segment_name = format!("seg_{:04}", segment_id);
-        let segment_path = self.index_path.join("segments").join(&segment_name);
-        fs::create_dir_all(&segment_path)?;
+        // Dispatch all heavy work to background thread
+        if let Some(ref sender) = self.write_sender {
+            let segment_name = format!("seg_{:04}", segment_id);
+            let segment_path = self.index_path.join("segments").join(&segment_name);
 
-        // Write trigram index (without stop-gram filtering - we'll filter at query time)
-        self.write_trigram_index(&segment_path, &trigram_postings)?;
-
-        // Write token index
-        self.write_token_index(&segment_path, &token_postings)?;
-
-        // Write line maps
-        self.write_line_maps(&segment_path, &line_maps)?;
-
-        // Write bloom filter for fast pre-filtering
-        Self::write_bloom_filter(&segment_path, &bloom_filter)?;
+            let job = SegmentWriteJob {
+                segment_id,
+                segment_path,
+                files: assigned_files,
+                trigram_frequencies: Arc::clone(&self.trigram_frequencies),
+            };
+            let _ = sender.send(job);
+        }
 
         Ok(())
     }
 
-    /// Write trigram index for a segment
-    fn write_trigram_index(&self, segment_path: &Path, trigram_postings: &BTreeMap<Trigram, Vec<DocId>>) -> Result<()> {
+    /// Process files and write segment to disk (called from background thread)
+    fn process_and_write_segment(job: SegmentWriteJob) -> Result<()> {
+        // Create segment directory
+        fs::create_dir_all(&job.segment_path)?;
+
+        let file_count = job.files.len();
+
+        // Use HashMap for O(1) insertion instead of BTreeMap's O(log n)
+        let mut trigram_postings: HashMap<Trigram, Vec<DocId>> = HashMap::with_capacity(file_count * 200);
+        let mut token_postings: HashMap<String, Vec<DocId>> = HashMap::with_capacity(file_count * 50);
+        let mut line_maps: HashMap<DocId, Vec<u32>> = HashMap::with_capacity(file_count);
+
+        // Create bloom filter for this segment
+        let estimated_trigrams = file_count * 500;
+        let mut bloom_filter = BloomFilter::new(estimated_trigrams.max(10000), 0.01);
+
+        // Local frequency accumulator (batch update to shared map at end)
+        let mut local_frequencies: HashMap<Trigram, u32> = HashMap::with_capacity(file_count * 200);
+
+        // Process each file - collect postings
+        for file in job.files {
+            // Add trigrams to postings, bloom filter, and local frequencies
+            for trigram in file.trigrams {
+                trigram_postings.entry(trigram).or_default().push(file.doc_id);
+                *local_frequencies.entry(trigram).or_insert(0) += 1;
+                bloom_filter.insert(trigram);
+            }
+
+            // Add tokens to postings
+            for token in file.tokens {
+                token_postings.entry(token).or_default().push(file.doc_id);
+            }
+
+            // Store line map
+            line_maps.insert(file.doc_id, file.line_offsets);
+        }
+
+        // Batch update shared frequency map (single lock acquisition)
+        {
+            let mut freq_map = job.trigram_frequencies.lock().unwrap();
+            for (trigram, count) in local_frequencies {
+                *freq_map.entry(trigram).or_insert(0) += count;
+            }
+        }
+
+        // Write all segment files (trigram and token indexes use parallel encoding)
+        Self::write_trigram_index_parallel(&job.segment_path, trigram_postings)?;
+        Self::write_token_index_parallel(&job.segment_path, token_postings)?;
+        Self::write_line_maps_static(&job.segment_path, &line_maps)?;
+        Self::write_bloom_filter(&job.segment_path, &bloom_filter)?;
+
+        Ok(())
+    }
+
+    /// Write trigram index with parallel sort/encode
+    fn write_trigram_index_parallel(segment_path: &Path, trigram_postings: HashMap<Trigram, Vec<DocId>>) -> Result<()> {
         let dict_path = segment_path.join("grams.dict");
         let postings_path = segment_path.join("grams.postings");
 
-        // Use 64KB buffers for better I/O throughput
-        let mut dict_file = BufWriter::with_capacity(65536, File::create(&dict_path)?);
-        let mut postings_file = BufWriter::with_capacity(65536, File::create(&postings_path)?);
+        // Convert to vec for parallel processing and sort by trigram for consistent output
+        let mut entries: Vec<_> = trigram_postings.into_iter().collect();
+        entries.sort_unstable_by_key(|(trigram, _)| *trigram);
 
-        // Write entry count to dictionary
-        dict_file.write_all(&(trigram_postings.len() as u32).to_le_bytes())?;
+        let entry_count = entries.len();
 
+        // Parallel sort, dedup, and encode - this is the expensive part
+        let encoded_entries: Vec<(Trigram, Vec<u8>, u32)> = entries
+            .into_par_iter()
+            .map(|(trigram, mut doc_ids)| {
+                // Sort and deduplicate in place
+                doc_ids.sort_unstable();
+                doc_ids.dedup();
+                let doc_freq = doc_ids.len() as u32;
+
+                // Delta-encode
+                let mut encoded = Vec::with_capacity(doc_ids.len() * 2);
+                delta_encode(&doc_ids, &mut encoded);
+
+                (trigram, encoded, doc_freq)
+            })
+            .collect();
+
+        // Sequential I/O write (must be sequential for correct offsets)
+        let mut dict_file = BufWriter::with_capacity(131072, File::create(&dict_path)?);
+        let mut postings_file = BufWriter::with_capacity(131072, File::create(&postings_path)?);
+
+        dict_file.write_all(&(entry_count as u32).to_le_bytes())?;
+
+        let expected_dict_size: u64 = 4 + (entry_count as u64 * 20);
         let mut postings_offset: u64 = 0;
 
-        for (&trigram, doc_ids) in trigram_postings {
-            // Sort and deduplicate doc_ids
-            let mut sorted_ids: Vec<_> = doc_ids.iter().copied().collect();
-            sorted_ids.sort_unstable();
-            sorted_ids.dedup();
-
-            // Delta-encode postings
-            let mut encoded = Vec::new();
-            delta_encode(&sorted_ids, &mut encoded);
-
+        for (trigram, encoded, doc_freq) in encoded_entries {
             // Write dictionary entry: trigram, offset, length, doc_freq
             dict_file.write_all(&trigram.to_le_bytes())?;
             dict_file.write_all(&postings_offset.to_le_bytes())?;
             dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
-            dict_file.write_all(&(sorted_ids.len() as u32).to_le_bytes())?;
+            dict_file.write_all(&doc_freq.to_le_bytes())?;
 
-            // Write postings
             postings_file.write_all(&encoded)?;
             postings_offset += encoded.len() as u64;
         }
 
         dict_file.flush()?;
         postings_file.flush()?;
+
+        // Validate file sizes
+        let actual_dict_size = fs::metadata(&dict_path)?.len();
+        if actual_dict_size != expected_dict_size {
+            anyhow::bail!(
+                "Trigram dictionary size mismatch: expected {} bytes, got {} bytes",
+                expected_dict_size, actual_dict_size
+            );
+        }
+
+        let actual_postings_size = fs::metadata(&postings_path)?.len();
+        if actual_postings_size != postings_offset {
+            anyhow::bail!(
+                "Trigram postings size mismatch: expected {} bytes, got {} bytes",
+                postings_offset, actual_postings_size
+            );
+        }
+
         Ok(())
     }
 
-    /// Write token index for a segment
-    fn write_token_index(&self, segment_path: &Path, token_postings: &BTreeMap<String, Vec<DocId>>) -> Result<()> {
+    /// Write token index with parallel sort/encode
+    fn write_token_index_parallel(segment_path: &Path, token_postings: HashMap<String, Vec<DocId>>) -> Result<()> {
         let dict_path = segment_path.join("tokens.dict");
         let postings_path = segment_path.join("tokens.postings");
 
-        // Use 64KB buffers for better I/O throughput
-        let mut dict_file = BufWriter::with_capacity(65536, File::create(&dict_path)?);
-        let mut postings_file = BufWriter::with_capacity(65536, File::create(&postings_path)?);
+        // Convert to vec for parallel processing and sort by token for consistent output
+        let mut entries: Vec<_> = token_postings.into_iter().collect();
+        entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
 
-        // Write entry count
-        dict_file.write_all(&(token_postings.len() as u32).to_le_bytes())?;
+        let entry_count = entries.len();
 
+        // Parallel sort, dedup, and encode
+        let encoded_entries: Vec<(String, Vec<u8>, u32)> = entries
+            .into_par_iter()
+            .map(|(token, mut doc_ids)| {
+                doc_ids.sort_unstable();
+                doc_ids.dedup();
+                let doc_freq = doc_ids.len() as u32;
+
+                let mut encoded = Vec::with_capacity(doc_ids.len() * 2);
+                delta_encode(&doc_ids, &mut encoded);
+
+                (token, encoded, doc_freq)
+            })
+            .collect();
+
+        // Sequential I/O write
+        let mut dict_file = BufWriter::with_capacity(131072, File::create(&dict_path)?);
+        let mut postings_file = BufWriter::with_capacity(131072, File::create(&postings_path)?);
+
+        dict_file.write_all(&(entry_count as u32).to_le_bytes())?;
+
+        let mut expected_dict_size: u64 = 4;
         let mut postings_offset: u64 = 0;
 
-        for (token, doc_ids) in token_postings {
-            // Sort and deduplicate
-            let mut sorted_ids: Vec<_> = doc_ids.iter().copied().collect();
-            sorted_ids.sort_unstable();
-            sorted_ids.dedup();
-
-            // Delta-encode
-            let mut encoded = Vec::new();
-            delta_encode(&sorted_ids, &mut encoded);
+        for (token, encoded, doc_freq) in encoded_entries {
+            let token_bytes = token.as_bytes();
 
             // Write token (length-prefixed)
-            let token_bytes = token.as_bytes();
             dict_file.write_all(&(token_bytes.len() as u16).to_le_bytes())?;
             dict_file.write_all(token_bytes)?;
 
             // Write offset, length, freq
             dict_file.write_all(&postings_offset.to_le_bytes())?;
             dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
-            dict_file.write_all(&(sorted_ids.len() as u32).to_le_bytes())?;
+            dict_file.write_all(&doc_freq.to_le_bytes())?;
 
-            // Write postings
+            expected_dict_size += 18 + token_bytes.len() as u64;
+
             postings_file.write_all(&encoded)?;
             postings_offset += encoded.len() as u64;
         }
 
         dict_file.flush()?;
         postings_file.flush()?;
+
+        // Validate file sizes
+        let actual_dict_size = fs::metadata(&dict_path)?.len();
+        if actual_dict_size != expected_dict_size {
+            anyhow::bail!(
+                "Token dictionary size mismatch: expected {} bytes, got {} bytes",
+                expected_dict_size, actual_dict_size
+            );
+        }
+
+        let actual_postings_size = fs::metadata(&postings_path)?.len();
+        if actual_postings_size != postings_offset {
+            anyhow::bail!(
+                "Token postings size mismatch: expected {} bytes, got {} bytes",
+                postings_offset, actual_postings_size
+            );
+        }
+
         Ok(())
     }
 
-    /// Write line maps for a segment
-    fn write_line_maps(&self, segment_path: &Path, line_maps: &HashMap<DocId, Vec<u32>>) -> Result<()> {
+    /// Write line maps for a segment (static version for background thread)
+    fn write_line_maps_static(segment_path: &Path, line_maps: &HashMap<DocId, Vec<u32>>) -> Result<()> {
         let linemap_path = segment_path.join("linemap.bin");
         let mut file = BufWriter::with_capacity(65536, File::create(&linemap_path)?);
 
@@ -270,7 +442,8 @@ impl ChunkedIndexWriter {
 
     /// Compute stop-grams from accumulated frequencies
     fn compute_stop_grams(&self) -> HashSet<Trigram> {
-        let mut freq: Vec<_> = self.trigram_frequencies.iter()
+        let freq_map = self.trigram_frequencies.lock().unwrap();
+        let mut freq: Vec<_> = freq_map.iter()
             .map(|(&t, &count)| (t, count as usize))
             .collect();
 
@@ -282,8 +455,50 @@ impl ChunkedIndexWriter {
             .collect()
     }
 
-    /// Finalize the index - write global data (docs, paths, meta)
-    pub fn finalize(&self) -> Result<()> {
+    /// Finalize the index - wait for pending writes, then write global data (docs, paths, meta)
+    #[allow(dead_code)]
+    pub fn finalize(&mut self) -> Result<()> {
+        self.finalize_with_progress(|_, _| {})
+    }
+
+    /// Finalize with progress callback.
+    /// The callback receives (completed_count, total_count) for each segment that finishes writing.
+    pub fn finalize_with_progress<F>(&mut self, mut on_segment_complete: F) -> Result<()>
+    where
+        F: FnMut(usize, usize),
+    {
+        let total_segments = self.segment_ids.len();
+        let mut completed = 0;
+
+        // Drop the sender to signal the background thread to finish
+        self.write_sender.take();
+
+        // Poll for completions while waiting for thread to finish
+        // This allows progress reporting as each segment completes
+        if let Some(handle) = self.write_thread.take() {
+            // Drain completion notifications while thread is running
+            while !handle.is_finished() {
+                // Check for completions with a short timeout
+                if let Some(_segment_id) = self.recv_completion_timeout(Duration::from_millis(50)) {
+                    completed += 1;
+                    on_segment_complete(completed, total_segments);
+                }
+            }
+
+            // Drain any remaining completions after thread finishes
+            while let Some(_segment_id) = self.try_recv_completion() {
+                completed += 1;
+                on_segment_complete(completed, total_segments);
+            }
+
+            // Now join and check for errors
+            let errors = handle.join().map_err(|_| anyhow::anyhow!("Background write thread panicked"))?;
+            if !errors.is_empty() {
+                // Return the first error (could aggregate if needed)
+                return Err(errors.into_iter().next().unwrap());
+            }
+        }
+
         // Write documents table
         self.write_documents()?;
 
@@ -962,11 +1177,209 @@ fn build_line_map(content: &[u8]) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_build_line_map() {
         let content = b"line1\nline2\nline3";
         let offsets = build_line_map(content);
         assert_eq!(offsets, vec![0, 6, 12]);
+    }
+
+    fn create_test_processed_file(rel_path: &str, content: &str) -> ProcessedFile {
+        let trigrams: Vec<u32> = content
+            .as_bytes()
+            .windows(3)
+            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], 0]))
+            .collect();
+        let tokens: Vec<String> = content
+            .split_whitespace()
+            .map(|s| s.to_lowercase())
+            .collect();
+        let line_offsets: Vec<u32> = std::iter::once(0)
+            .chain(
+                content
+                    .bytes()
+                    .enumerate()
+                    .filter(|(_, b)| *b == b'\n')
+                    .map(|(i, _)| (i + 1) as u32),
+            )
+            .collect();
+
+        ProcessedFile {
+            rel_path: PathBuf::from(rel_path),
+            mtime: 1234567890,
+            size: content.len() as u64,
+            language: Language::Rust,
+            flags: DocFlags::new(),
+            trigrams,
+            tokens,
+            line_offsets,
+        }
+    }
+
+    #[test]
+    fn test_chunked_writer_single_chunk() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        // Create a dummy file so the root exists
+        fs::write(root.join("test.rs"), "fn main() {}").unwrap();
+
+        let config = IndexConfig::default();
+        let mut writer = ChunkedIndexWriter::new(root, config).unwrap();
+
+        let files = vec![
+            create_test_processed_file("src/main.rs", "fn main() {\n    println!(\"hello\");\n}"),
+            create_test_processed_file("src/lib.rs", "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}"),
+        ];
+
+        writer.write_chunk(1, files).unwrap();
+        writer.finalize().unwrap();
+
+        // Verify index was created
+        let index_path = crate::utils::get_index_dir(root).unwrap();
+        assert!(index_path.join("meta.json").exists());
+        assert!(index_path.join("docs.bin").exists());
+        assert!(index_path.join("paths.bin").exists());
+        assert!(index_path.join("segments").join("seg_0001").exists());
+    }
+
+    #[test]
+    fn test_chunked_writer_multiple_chunks() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        fs::write(root.join("test.rs"), "fn main() {}").unwrap();
+
+        let config = IndexConfig::default();
+        let mut writer = ChunkedIndexWriter::new(root, config).unwrap();
+
+        // Write first chunk
+        let files1 = vec![
+            create_test_processed_file("src/main.rs", "fn main() {}"),
+            create_test_processed_file("src/lib.rs", "pub fn lib() {}"),
+        ];
+        writer.write_chunk(1, files1).unwrap();
+
+        // Write second chunk
+        let files2 = vec![
+            create_test_processed_file("src/utils.rs", "pub fn util() {}"),
+            create_test_processed_file("src/config.rs", "pub struct Config {}"),
+        ];
+        writer.write_chunk(2, files2).unwrap();
+
+        writer.finalize().unwrap();
+
+        // Verify both segments were created
+        let index_path = crate::utils::get_index_dir(root).unwrap();
+        assert!(index_path.join("segments").join("seg_0001").exists());
+        assert!(index_path.join("segments").join("seg_0002").exists());
+
+        // Verify meta.json has correct segment count
+        let meta: IndexMeta = serde_json::from_reader(
+            File::open(index_path.join("meta.json")).unwrap()
+        ).unwrap();
+        assert_eq!(meta.segment_count, 2);
+        assert_eq!(meta.doc_count, 4);
+    }
+
+    #[test]
+    fn test_chunked_writer_empty_chunk() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        fs::write(root.join("test.rs"), "fn main() {}").unwrap();
+
+        let config = IndexConfig::default();
+        let mut writer = ChunkedIndexWriter::new(root, config).unwrap();
+
+        // Write empty chunk (should be skipped)
+        writer.write_chunk(1, vec![]).unwrap();
+
+        // Write actual chunk
+        let files = vec![
+            create_test_processed_file("src/main.rs", "fn main() {}"),
+        ];
+        writer.write_chunk(2, files).unwrap();
+
+        writer.finalize().unwrap();
+
+        // Verify only one segment exists
+        let index_path = crate::utils::get_index_dir(root).unwrap();
+        assert!(!index_path.join("segments").join("seg_0001").exists());
+        assert!(index_path.join("segments").join("seg_0002").exists());
+    }
+
+    #[test]
+    fn test_trigram_frequencies_accumulated() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        fs::write(root.join("test.rs"), "fn main() {}").unwrap();
+
+        let config = IndexConfig::default();
+        let mut writer = ChunkedIndexWriter::new(root, config).unwrap();
+
+        // Create files with overlapping trigrams
+        let files1 = vec![
+            create_test_processed_file("a.rs", "hello world"),
+        ];
+        writer.write_chunk(1, files1).unwrap();
+
+        let files2 = vec![
+            create_test_processed_file("b.rs", "hello there"),
+        ];
+        writer.write_chunk(2, files2).unwrap();
+
+        writer.finalize().unwrap();
+
+        // Verify stop-grams were computed (meta.json should have stop_grams)
+        let index_path = crate::utils::get_index_dir(root).unwrap();
+        let meta: IndexMeta = serde_json::from_reader(
+            File::open(index_path.join("meta.json")).unwrap()
+        ).unwrap();
+
+        // Should have computed some stop-grams from the accumulated frequencies
+        // The actual count depends on config.stop_gram_count and file content
+        assert!(meta.stop_grams.len() <= meta.doc_count as usize * 100);
+    }
+
+    #[test]
+    fn test_async_write_completes_before_finalize() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path();
+
+        fs::write(root.join("test.rs"), "fn main() {}").unwrap();
+
+        let config = IndexConfig::default();
+        let mut writer = ChunkedIndexWriter::new(root, config).unwrap();
+
+        // Write multiple chunks rapidly
+        for i in 1..=5 {
+            let files = vec![
+                create_test_processed_file(
+                    &format!("src/file{}.rs", i),
+                    &format!("pub fn func{}() {{}}", i),
+                ),
+            ];
+            writer.write_chunk(i as u16, files).unwrap();
+        }
+
+        // Finalize should wait for all async writes
+        writer.finalize().unwrap();
+
+        // Verify all segments exist and have required files
+        let index_path = crate::utils::get_index_dir(root).unwrap();
+        for i in 1..=5 {
+            let seg_path = index_path.join("segments").join(format!("seg_{:04}", i));
+            assert!(seg_path.join("grams.dict").exists(), "seg_{:04} missing grams.dict", i);
+            assert!(seg_path.join("grams.postings").exists(), "seg_{:04} missing grams.postings", i);
+            assert!(seg_path.join("tokens.dict").exists(), "seg_{:04} missing tokens.dict", i);
+            assert!(seg_path.join("tokens.postings").exists(), "seg_{:04} missing tokens.postings", i);
+            assert!(seg_path.join("linemap.bin").exists(), "seg_{:04} missing linemap.bin", i);
+            assert!(seg_path.join("bloom.bin").exists(), "seg_{:04} missing bloom.bin", i);
+        }
     }
 }

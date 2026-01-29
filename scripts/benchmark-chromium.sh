@@ -20,7 +20,6 @@ echo ""
 # Check dependencies
 command -v fxi >/dev/null 2>&1 || { echo -e "${RED}fxi not found in PATH${NC}"; exit 1; }
 command -v rg >/dev/null 2>&1 || { echo -e "${RED}ripgrep (rg) not found${NC}"; exit 1; }
-command -v grep >/dev/null 2>&1 || { echo -e "${RED}grep not found${NC}"; exit 1; }
 
 # Get codebase info
 CODEBASE_NAME=$(basename "$(pwd)")
@@ -130,8 +129,8 @@ echo "Times are averages of $RUNS runs. File counts shown for validation." >> "$
 echo "" >> "$OUTPUT"
 
 # Table header
-echo "| Pattern | fxi (ms) | rg (ms) | grep (ms) | fxi files | rg files | Speedup vs rg |" >> "$OUTPUT"
-echo "|---------|----------|---------|-----------|-----------|----------|---------------|" >> "$OUTPUT"
+echo "| Pattern | fxi (ms) | rg (ms) | fxi files | rg files | Speedup vs rg |" >> "$OUTPUT"
+echo "|---------|----------|---------|-----------|----------|---------------|" >> "$OUTPUT"
 
 echo -e "${GREEN}Running benchmarks...${NC}"
 echo ""
@@ -178,14 +177,6 @@ for pattern_spec in "${PATTERNS[@]}"; do
     rg_count=$(echo "$rg_result" | awk '{print $2}')
     rg_ms=$(echo "scale=0; $rg_time * 1000 / 1" | bc)
 
-    # Run grep benchmark
-    echo -n "  grep..."
-    grep_result=$(run_benchmark "grep" "$grep_cmd")
-    grep_time=$(echo "$grep_result" | awk '{print $1}')
-    grep_count=$(echo "$grep_result" | awk '{print $2}')
-    grep_ms=$(echo "scale=0; $grep_time * 1000 / 1" | bc)
-    echo " done"
-
     # Calculate speedup
     if [ "$fxi_ms" -gt 0 ]; then
         speedup=$(echo "scale=1; $rg_ms / $fxi_ms" | bc)
@@ -194,12 +185,11 @@ for pattern_spec in "${PATTERNS[@]}"; do
     fi
 
     # Output to markdown
-    echo "| $display_pattern | $fxi_ms | $rg_ms | $grep_ms | $fxi_count | $rg_count | **${speedup}x** |" >> "$OUTPUT"
+    echo "| $display_pattern | $fxi_ms | $rg_ms | $fxi_count | $rg_count | **${speedup}x** |" >> "$OUTPUT"
 
     # Terminal output
     echo -e "  fxi: ${GREEN}${fxi_ms}ms${NC} ($fxi_count files)"
     echo -e "  rg:  ${YELLOW}${rg_ms}ms${NC} ($rg_count files)"
-    echo -e "  grep: ${RED}${grep_ms}ms${NC} ($grep_count files)"
     echo -e "  Speedup: ${GREEN}${speedup}x${NC} vs ripgrep"
     echo ""
 done
@@ -211,7 +201,6 @@ cat >> "$OUTPUT" << 'NOTES'
 
 - **fxi (warm)**: Using daemon with pre-loaded index
 - **ripgrep**: Using `--no-ignore` to search all files (matching fxi's indexed files)
-- **grep**: Standard recursive grep
 - All results are unlimited (full search)
 - Times include I/O for writing results
 - File counts may differ slightly due to gitignore handling
@@ -223,7 +212,6 @@ Each benchmark was run 3 times and averaged.
 Commands used:
 - fxi: `fxi [pattern] -l --color=never`
 - ripgrep: `rg -l [pattern] --no-ignore --color=never .`
-- grep: `grep -rl [pattern] .`
 NOTES
 
 echo -e "${GREEN}Benchmark complete!${NC}"
