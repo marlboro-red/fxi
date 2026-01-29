@@ -51,6 +51,22 @@ pub struct QueryFilters {
     pub mtime_max: Option<u64>,
 }
 
+impl QueryFilters {
+    /// Check if any filter is set
+    pub fn has_any(&self) -> bool {
+        self.path.is_some()
+            || self.filename.is_some()
+            || self.ext.is_some()
+            || self.lang.is_some()
+            || self.size_min.is_some()
+            || self.size_max.is_some()
+            || self.line_start.is_some()
+            || self.line_end.is_some()
+            || self.mtime_min.is_some()
+            || self.mtime_max.is_some()
+    }
+}
+
 /// Query options
 #[derive(Debug, Clone)]
 pub struct QueryOptions {
@@ -516,9 +532,9 @@ impl Query {
         }
     }
 
-    /// Check if query is empty
+    /// Check if query is empty (no search term AND no filters)
     pub fn is_empty(&self) -> bool {
-        matches!(self.root, QueryNode::Empty)
+        matches!(self.root, QueryNode::Empty) && !self.filters.has_any()
     }
 }
 
@@ -668,5 +684,194 @@ mod tests {
             }
             _ => panic!("Expected BoostedLiteral or And node"),
         }
+    }
+
+    #[test]
+    fn test_file_filter_exact() {
+        let q = parse_query("file:main.rs");
+        assert_eq!(q.filters.filename, Some("main.rs".to_string()));
+        assert!(matches!(q.root, QueryNode::Empty));
+    }
+
+    #[test]
+    fn test_file_filter_glob() {
+        let q = parse_query("file:*.rs");
+        assert_eq!(q.filters.filename, Some("*.rs".to_string()));
+    }
+
+    #[test]
+    fn test_file_filter_with_search_term() {
+        let q = parse_query("file:main.rs fn main");
+        assert_eq!(q.filters.filename, Some("main.rs".to_string()));
+        // Should have a search term in root
+        assert!(!matches!(q.root, QueryNode::Empty));
+    }
+
+    #[test]
+    fn test_name_filter_alias() {
+        // name: is an alias for file:
+        let q = parse_query("name:test.rs");
+        assert_eq!(q.filters.filename, Some("test.rs".to_string()));
+    }
+
+    #[test]
+    fn test_path_filter_simple() {
+        let q = parse_query("path:src/lib.rs");
+        assert_eq!(q.filters.path, Some("src/lib.rs".to_string()));
+    }
+
+    #[test]
+    fn test_path_filter_glob() {
+        let q = parse_query("path:src/**/*.rs");
+        assert_eq!(q.filters.path, Some("src/**/*.rs".to_string()));
+    }
+
+    #[test]
+    fn test_lang_filter() {
+        let q = parse_query("lang:rust test");
+        assert_eq!(q.filters.lang, Some("rust".to_string()));
+    }
+
+    #[test]
+    fn test_lang_filter_aliases() {
+        // Test various language aliases
+        let q1 = parse_query("lang:rs");
+        assert_eq!(q1.filters.lang, Some("rs".to_string()));
+
+        let q2 = parse_query("lang:python");
+        assert_eq!(q2.filters.lang, Some("python".to_string()));
+
+        let q3 = parse_query("lang:js");
+        assert_eq!(q3.filters.lang, Some("js".to_string()));
+    }
+
+    #[test]
+    fn test_size_filter_min() {
+        let q = parse_query("size:>1000 test");
+        assert_eq!(q.filters.size_min, Some(1000));
+        assert_eq!(q.filters.size_max, None);
+    }
+
+    #[test]
+    fn test_size_filter_max() {
+        let q = parse_query("size:<5000 test");
+        assert_eq!(q.filters.size_min, None);
+        assert_eq!(q.filters.size_max, Some(5000));
+    }
+
+    #[test]
+    fn test_size_filter_both() {
+        let q = parse_query("size:>100 size:<10000 test");
+        assert_eq!(q.filters.size_min, Some(100));
+        assert_eq!(q.filters.size_max, Some(10000));
+    }
+
+    #[test]
+    fn test_sort_score() {
+        let q = parse_query("sort:score test");
+        assert_eq!(q.options.sort, SortOrder::Score);
+    }
+
+    #[test]
+    fn test_sort_recency() {
+        let q = parse_query("sort:recency test");
+        assert_eq!(q.options.sort, SortOrder::Recency);
+    }
+
+    #[test]
+    fn test_sort_path() {
+        let q = parse_query("sort:path test");
+        assert_eq!(q.options.sort, SortOrder::Path);
+    }
+
+    #[test]
+    fn test_top_limit() {
+        let q = parse_query("top:50 test");
+        assert_eq!(q.options.limit, 50);
+    }
+
+    #[test]
+    fn test_top_limit_zero() {
+        // top:0 means unlimited
+        let q = parse_query("top:0 test");
+        assert_eq!(q.options.limit, 0); // 0 = unlimited
+    }
+
+    #[test]
+    fn test_query_is_empty_no_filters() {
+        let q = parse_query("");
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn test_query_is_empty_with_search_term() {
+        let q = parse_query("test");
+        assert!(!q.is_empty());
+    }
+
+    #[test]
+    fn test_query_is_empty_with_filter_only() {
+        // file: filter only - should NOT be empty
+        let q = parse_query("file:main.rs");
+        assert!(!q.is_empty(), "Query with file filter should not be empty");
+    }
+
+    #[test]
+    fn test_query_is_empty_with_ext_filter_only() {
+        let q = parse_query("ext:rs");
+        assert!(!q.is_empty(), "Query with ext filter should not be empty");
+    }
+
+    #[test]
+    fn test_query_is_empty_with_path_filter_only() {
+        let q = parse_query("path:src/*");
+        assert!(!q.is_empty(), "Query with path filter should not be empty");
+    }
+
+    #[test]
+    fn test_filters_has_any_empty() {
+        let filters = QueryFilters::default();
+        assert!(!filters.has_any());
+    }
+
+    #[test]
+    fn test_filters_has_any_with_filename() {
+        let mut filters = QueryFilters::default();
+        filters.filename = Some("test.rs".to_string());
+        assert!(filters.has_any());
+    }
+
+    #[test]
+    fn test_filters_has_any_with_ext() {
+        let mut filters = QueryFilters::default();
+        filters.ext = Some("rs".to_string());
+        assert!(filters.has_any());
+    }
+
+    #[test]
+    fn test_filters_has_any_with_size() {
+        let mut filters = QueryFilters::default();
+        filters.size_min = Some(100);
+        assert!(filters.has_any());
+    }
+
+    #[test]
+    fn test_complex_query_with_multiple_filters() {
+        let q = parse_query("file:*.rs ext:rs lang:rust size:>100 path:src/* sort:recency top:20 test");
+        assert_eq!(q.filters.filename, Some("*.rs".to_string()));
+        assert_eq!(q.filters.ext, Some("rs".to_string()));
+        assert_eq!(q.filters.lang, Some("rust".to_string()));
+        assert_eq!(q.filters.size_min, Some(100));
+        assert_eq!(q.filters.path, Some("src/*".to_string()));
+        assert_eq!(q.options.sort, SortOrder::Recency);
+        assert_eq!(q.options.limit, 20);
+        assert!(!q.is_empty());
+    }
+
+    #[test]
+    fn test_mtime_filter_both() {
+        let q = parse_query("mtime:>1700000000 mtime:<1710000000 test");
+        assert_eq!(q.filters.mtime_min, Some(1700000000));
+        assert_eq!(q.filters.mtime_max, Some(1710000000));
     }
 }

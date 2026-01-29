@@ -398,6 +398,8 @@ pub struct IndexWriter {
     token_postings: BTreeMap<String, Vec<DocId>>,
     /// Line offsets per document
     line_maps: HashMap<DocId, Vec<u32>>,
+    /// Doc IDs from existing index that should be marked as stale (for incremental updates)
+    external_stale_ids: Vec<DocId>,
 }
 
 #[allow(dead_code)]
@@ -418,6 +420,7 @@ impl IndexWriter {
             trigram_postings: BTreeMap::new(),
             token_postings: BTreeMap::new(),
             line_maps: HashMap::new(),
+            external_stale_ids: Vec::new(),
         })
     }
 
@@ -787,11 +790,158 @@ impl IndexWriter {
     }
 
     /// Mark a document as stale (for incremental updates)
+    /// This tracks doc_ids from the existing index that should be skipped
     #[allow(dead_code)]
     pub fn mark_stale(&mut self, doc_id: DocId) {
+        // First try to mark in our own documents
         if let Some(doc) = self.documents.iter_mut().find(|d| d.doc_id == doc_id) {
             doc.flags.set_stale();
+        } else {
+            // Track external doc_id for writing to stale file
+            self.external_stale_ids.push(doc_id);
         }
+    }
+
+    /// Add a file with pre-processed data (for incremental updates)
+    #[allow(dead_code)]
+    pub fn add_processed(
+        &mut self,
+        rel_path: PathBuf,
+        mtime: u64,
+        size: u64,
+        language: Language,
+        flags: DocFlags,
+        trigrams: Vec<u32>,
+        tokens: Vec<String>,
+        line_offsets: Vec<u32>,
+    ) -> Result<DocId> {
+        let doc_id = self.documents.len() as DocId + 1;
+        let path_id = self.add_path(&rel_path);
+
+        // Create document entry
+        let doc = Document {
+            doc_id,
+            path_id,
+            size,
+            mtime,
+            language,
+            flags,
+            segment_id: self.segment_id,
+        };
+        self.documents.push(doc);
+
+        // Add trigrams to postings
+        for trigram in trigrams {
+            self.trigram_postings
+                .entry(trigram)
+                .or_default()
+                .push(doc_id);
+        }
+
+        // Add tokens to postings
+        for token in tokens {
+            self.token_postings.entry(token).or_default().push(doc_id);
+        }
+
+        // Store line map
+        self.line_maps.insert(doc_id, line_offsets);
+
+        Ok(doc_id)
+    }
+
+    /// Finalize the delta segment - write all data to disk
+    #[allow(dead_code)]
+    pub fn finalize(&self) -> Result<()> {
+        // Create segment directory
+        let segment_path = self.index_path
+            .join("segments")
+            .join(format!("seg_{:04}", self.segment_id));
+        fs::create_dir_all(&segment_path)?;
+
+        // Write documents for this segment
+        self.write_segment_documents(&segment_path)?;
+
+        // Write paths for this segment
+        self.write_segment_paths(&segment_path)?;
+
+        // Write trigram index
+        let stop_grams = self.compute_stop_grams();
+        self.write_trigram_index(&segment_path, &stop_grams)?;
+
+        // Write token index
+        self.write_token_index(&segment_path)?;
+
+        // Write line maps
+        self.write_line_maps(&segment_path)?;
+
+        // Write stale doc IDs (for delta segments)
+        if !self.external_stale_ids.is_empty() {
+            self.write_stale_ids(&segment_path)?;
+        }
+
+        Ok(())
+    }
+
+    /// Write documents for this segment
+    fn write_segment_documents(&self, segment_path: &Path) -> Result<()> {
+        use std::io::BufWriter;
+        let docs_path = segment_path.join("documents.bin");
+        let mut file = BufWriter::new(File::create(&docs_path)?);
+
+        // Write count
+        file.write_all(&(self.documents.len() as u32).to_le_bytes())?;
+
+        // Write each document
+        for doc in &self.documents {
+            file.write_all(&doc.doc_id.to_le_bytes())?;
+            file.write_all(&doc.path_id.to_le_bytes())?;
+            file.write_all(&doc.size.to_le_bytes())?;
+            file.write_all(&doc.mtime.to_le_bytes())?;
+            file.write_all(&(doc.language as u8).to_le_bytes())?;
+            file.write_all(&doc.flags.0.to_le_bytes())?;
+            file.write_all(&doc.segment_id.to_le_bytes())?;
+        }
+
+        file.flush()?;
+        Ok(())
+    }
+
+    /// Write paths for this segment
+    fn write_segment_paths(&self, segment_path: &Path) -> Result<()> {
+        use std::io::BufWriter;
+        let paths_path = segment_path.join("paths.bin");
+        let mut file = BufWriter::new(File::create(&paths_path)?);
+
+        // Write count
+        file.write_all(&(self.paths.len() as u32).to_le_bytes())?;
+
+        // Write each path (length-prefixed)
+        for path in &self.paths {
+            let path_bytes = path.to_string_lossy().as_bytes().to_vec();
+            file.write_all(&(path_bytes.len() as u32).to_le_bytes())?;
+            file.write_all(&path_bytes)?;
+        }
+
+        file.flush()?;
+        Ok(())
+    }
+
+    /// Write stale doc IDs file
+    fn write_stale_ids(&self, segment_path: &Path) -> Result<()> {
+        use std::io::BufWriter;
+        let stale_path = segment_path.join("stale.bin");
+        let mut file = BufWriter::new(File::create(&stale_path)?);
+
+        // Write count
+        file.write_all(&(self.external_stale_ids.len() as u32).to_le_bytes())?;
+
+        // Write each stale doc_id
+        for &doc_id in &self.external_stale_ids {
+            file.write_all(&doc_id.to_le_bytes())?;
+        }
+
+        file.flush()?;
+        Ok(())
     }
 }
 

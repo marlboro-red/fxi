@@ -723,17 +723,23 @@ impl IndexServer {
 
 /// Daemonize the current process (Windows version - runs as background process)
 pub fn daemonize() -> Result<()> {
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
+
+    // Windows process creation flags
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    const DETACHED_PROCESS: u32 = 0x00000008;
 
     // On Windows, we spawn a detached child process
     let exe = std::env::current_exe()?;
 
     // Start the server in foreground mode as a detached process
     Command::new(&exe)
-        .args(["server", "--foreground"])
+        .args(["daemon", "foreground"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
         .spawn()
         .with_context(|| "Failed to spawn daemon process")?;
 

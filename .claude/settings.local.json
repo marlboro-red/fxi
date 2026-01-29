@@ -81,7 +81,8 @@
       "Bash(cargo install:*)",
       "Bash(fxi daemon:*)",
       "Bash(time fxi:*)",
-      "Bash(fxi:*)"
+      "Bash(fxi:*)",
+      "Bash(cargo run:*)"
     ]
   }
 }

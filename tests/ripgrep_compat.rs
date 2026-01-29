@@ -584,6 +584,188 @@ fn test_combined_flags() {
 }
 
 // ============================================================================
+// Filter Tests (fxi-specific query syntax)
+// ============================================================================
+
+#[test]
+fn test_filter_file_exact() {
+    let dir = setup_fixtures();
+    build_index(&dir);
+
+    // file:main.rs should only match main.rs exactly
+    let (fxi_out, _, fxi_ok) = run_fxi(&["file:main.rs"], &dir);
+
+    assert!(fxi_ok, "fxi file: filter should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    assert!(
+        fxi_files.contains("main.rs"),
+        "Should find main.rs with exact file filter"
+    );
+    assert!(
+        !fxi_files.contains("lib.rs"),
+        "Should not find lib.rs with file:main.rs"
+    );
+}
+
+#[test]
+fn test_filter_file_glob() {
+    let dir = setup_fixtures();
+    build_index(&dir);
+
+    // file:*.rs should match all .rs files
+    let (fxi_out, _, fxi_ok) = run_fxi(&["file:*.rs"], &dir);
+
+    assert!(fxi_ok, "fxi file glob filter should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    assert!(fxi_files.contains("main.rs"), "Should find main.rs");
+    assert!(fxi_files.contains("lib.rs"), "Should find lib.rs");
+    assert!(fxi_files.contains("utils.rs"), "Should find utils.rs");
+    assert!(
+        !fxi_files.contains("config.json"),
+        "Should not find config.json with *.rs"
+    );
+}
+
+#[test]
+fn test_filter_file_with_search() {
+    let dir = setup_fixtures();
+    build_index(&dir);
+
+    // "file:main.rs fn" should find fn in main.rs only
+    let (fxi_out, _, fxi_ok) = run_fxi(&["file:main.rs fn"], &dir);
+
+    assert!(fxi_ok, "fxi file filter with search should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    assert!(fxi_files.contains("main.rs"), "Should find main.rs");
+    // Should not find other files even if they have "fn"
+    assert_eq!(fxi_files.len(), 1, "Should only match main.rs");
+}
+
+#[test]
+fn test_filter_file_no_substring_match() {
+    let dir = setup_fixtures();
+    build_index(&dir);
+
+    // file:ain.rs should NOT match main.rs (no substring matching)
+    let (fxi_out, _, _) = run_fxi(&["file:ain.rs"], &dir);
+
+    let fxi_files = extract_files(&fxi_out);
+    assert!(
+        !fxi_files.contains("main.rs"),
+        "file:ain.rs should not match main.rs (no substring)"
+    );
+}
+
+#[test]
+fn test_filter_ext() {
+    let dir = setup_fixtures();
+    build_index(&dir);
+
+    // ext:json should only match .json files
+    let (fxi_out, _, fxi_ok) = run_fxi(&["ext:json"], &dir);
+
+    assert!(fxi_ok, "fxi ext: filter should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    assert!(fxi_files.contains("config.json"), "Should find config.json");
+    assert!(
+        !fxi_files.contains("main.rs"),
+        "Should not find .rs files with ext:json"
+    );
+}
+
+#[test]
+fn test_filter_ext_with_search() {
+    let dir = setup_fixtures();
+    build_index(&dir);
+
+    // "ext:rs fn" should find fn only in .rs files
+    let (fxi_out, _, fxi_ok) = run_fxi(&["ext:rs fn"], &dir);
+
+    assert!(fxi_ok, "fxi ext filter with search should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    // All matches should be .rs files
+    for file in &fxi_files {
+        assert!(file.ends_with(".rs"), "All matches should be .rs files");
+    }
+}
+
+#[test]
+fn test_filter_path_glob() {
+    let dir = setup_fixtures();
+    build_index(&dir);
+
+    // "path:*.rs fn" should match all .rs files in root
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "path:*.rs fn"], &dir);
+
+    assert!(fxi_ok, "fxi path: filter should succeed");
+    // Should find .rs files
+    assert!(!fxi_out.is_empty(), "Should find matches with path filter");
+}
+
+#[test]
+fn test_filter_combined() {
+    let dir = setup_fixtures();
+    build_index(&dir);
+
+    // Combine multiple filters: ext:rs with search term
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "ext:rs fn"], &dir);
+
+    assert!(fxi_ok, "Combined filters should succeed");
+    let fxi_files = extract_files(&fxi_out);
+
+    // Should find .rs files containing fn
+    assert!(fxi_files.len() > 0, "Should find matches");
+    for file in &fxi_files {
+        assert!(file.ends_with(".rs"), "All matches should be .rs files");
+    }
+}
+
+#[test]
+fn test_filter_top_limit() {
+    let dir = setup_fixtures();
+    build_index(&dir);
+
+    // Use -m flag for limiting content search results (top: is for TUI mode)
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-m", "1", "fn"], &dir);
+
+    assert!(fxi_ok, "fxi -m limit should succeed");
+    let match_count = count_matches(&fxi_out);
+    assert!(match_count <= 1, "-m 1 should return at most 1 match, got {}", match_count);
+}
+
+#[test]
+fn test_filter_sort_path() {
+    let dir = setup_fixtures();
+    build_index(&dir);
+
+    // "sort:path fn" should return results sorted by path
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "sort:path fn"], &dir);
+
+    assert!(fxi_ok, "fxi sort:path should succeed");
+
+    // Extract files and verify they are sorted
+    let files: Vec<&str> = fxi_out.lines().filter(|l| !l.is_empty()).collect();
+    let mut sorted_files = files.clone();
+    sorted_files.sort();
+    assert_eq!(files, sorted_files, "Results should be sorted by path");
+}
+
+#[test]
+fn test_filter_file_only_single_result_per_file() {
+    let dir = setup_fixtures();
+    build_index(&dir);
+
+    // file:main.rs without search term should return single result per file
+    let (fxi_out, _, fxi_ok) = run_fxi(&["file:main.rs"], &dir);
+
+    assert!(fxi_ok, "file-only query should succeed");
+
+    // Count occurrences of main.rs in output
+    let main_count = fxi_out.lines().filter(|l| l.contains("main.rs")).count();
+    assert_eq!(main_count, 1, "Should have exactly one result for main.rs");
+}
+
+// ============================================================================
 // CLI Behavior Tests
 // ============================================================================
 

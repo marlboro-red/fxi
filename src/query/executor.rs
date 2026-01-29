@@ -214,7 +214,26 @@ impl<'a> QueryExecutor<'a> {
 
         let verification = match &plan.verification {
             Some(v) => v,
-            None => return Ok(Vec::new()),
+            None => {
+                // No search term - return one match per file (file-only query like "file:main.rs")
+                let results: Vec<ContentMatchResult> = candidates
+                    .iter()
+                    .filter_map(|doc_id| {
+                        self.reader.get_document(doc_id).and_then(|doc| {
+                            self.reader.get_path(doc).map(|path| ContentMatchResult {
+                                path: path.clone(),
+                                line_number: 1,
+                                line_content: String::new(),
+                                match_start: 0,
+                                match_end: 0,
+                                context_before: vec![],
+                                context_after: vec![],
+                            })
+                        })
+                    })
+                    .collect();
+                return Ok(results);
+            }
         };
 
         // Extract line filter from plan (if present)
@@ -678,20 +697,22 @@ impl<'a> QueryExecutor<'a> {
                     }
                 }
 
-                // Filename filter (case-insensitive)
+                // Filename filter (case-insensitive, exact match unless glob pattern)
                 if let Some(ref pattern) = filename_pattern {
                     if let Some(path) = self.reader.get_path(doc) {
                         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                         let filename_lower = filename.to_lowercase();
                         let pattern_lower = pattern.to_lowercase();
 
-                        // Support glob patterns or substring matching
+                        // Support glob patterns or exact matching
                         let matches = if pattern.contains('*') || pattern.contains('?') {
+                            // Glob pattern: use glob matching
                             Glob::new(&pattern_lower)
                                 .map(|g| g.compile_matcher().is_match(&filename_lower))
                                 .unwrap_or(false)
                         } else {
-                            filename_lower.contains(&pattern_lower)
+                            // Exact match: filename must equal pattern exactly
+                            filename_lower == pattern_lower
                         };
 
                         if !matches {
