@@ -97,7 +97,9 @@
       "Bash(tree:*)",
       "Bash(ls:*)",
       "Bash(wc:*)",
-      "Bash(cargo bench:*)"
+      "Bash(cargo bench:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run view:*)"
     ]
   }
 }
