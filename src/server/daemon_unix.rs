@@ -270,23 +270,23 @@ impl IndexServer {
         cached.touch();
 
         // Check query cache first
-        if let Ok(mut cache) = cached.query_cache.lock() {
-            if let Some(cached_matches) = cache.get(&query) {
-                self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut cache) = cached.query_cache.lock()
+            && let Some(cached_matches) = cache.get(&query)
+        {
+            self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
+            self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
-                let mut matches = cached_matches.clone();
-                // Only truncate if limit is non-zero (0 means use query's top:N limit)
-                if limit > 0 {
-                    matches.truncate(limit);
-                }
-
-                return Response::Search(SearchResponse {
-                    matches,
-                    duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-                    cached: true,
-                });
+            let mut matches = cached_matches.clone();
+            // Only truncate if limit is non-zero (0 means use query's top:N limit)
+            if limit > 0 {
+                matches.truncate(limit);
             }
+
+            return Response::Search(SearchResponse {
+                matches,
+                duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+                cached: true,
+            });
         }
 
         self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
@@ -608,7 +608,7 @@ pub fn daemonize() -> Result<()> {
 
                         // Redirect to /dev/null
                         let null = libc::open(
-                            b"/dev/null\0".as_ptr() as *const libc::c_char,
+                            c"/dev/null".as_ptr(),
                             libc::O_RDWR,
                         );
                         if null != -1 {

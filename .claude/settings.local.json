@@ -93,7 +93,11 @@
       "Bash(do echo -n \"$pattern: \")",
       "Bash(do /usr/bin/time -p sh -c:*)",
       "Bash(for pattern in \"struct\" \"return\" \"NULL\")",
-      "Bash(/Users/cjpark/Desktop/Projects/fxi/scripts/benchmark-chromium.sh:*)"
+      "Bash(/Users/cjpark/Desktop/Projects/fxi/scripts/benchmark-chromium.sh:*)",
+      "Bash(tree:*)",
+      "Bash(ls:*)",
+      "Bash(wc:*)",
+      "Bash(cargo bench:*)"
     ]
   }
 }

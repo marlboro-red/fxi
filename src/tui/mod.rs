@@ -1,3 +1,32 @@
+//! Interactive terminal user interface.
+//!
+//! This module provides a full-featured TUI for interactive code search:
+//!
+//! - Real-time search as you type
+//! - Vim-style keybindings (j/k, Ctrl+d/u, gg/G)
+//! - Syntax-highlighted file preview
+//! - Context lines around matches
+//!
+//! ## Architecture
+//!
+//! - [`app`] - Application state and search logic
+//! - [`ui`] - Ratatui-based rendering
+//!
+//! ## Keybindings
+//!
+//! | Key | Action |
+//! |-----|--------|
+//! | `Enter` | Execute search |
+//! | `j`/`Down` | Next result |
+//! | `k`/`Up` | Previous result |
+//! | `Ctrl+d` | Page down |
+//! | `Ctrl+u` | Page up |
+//! | `gg` | Go to first result |
+//! | `G` | Go to last result |
+//! | `Ctrl+p` | Toggle preview |
+//! | `?` | Show help |
+//! | `Esc` | Clear query / exit |
+
 mod app;
 mod ui;
 

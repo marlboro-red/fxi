@@ -16,6 +16,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
+/// Context lines before/after a match: Vec<(line_number, line_content)>
+type ContextLines = Vec<(u32, String)>;
+
+/// A single match within a file: (line_number, line_content, match_start, match_end)
+type FileMatch = (u32, String, usize, usize);
+
+/// Collected file matches with metadata: (doc_id, rel_path, mtime, matches)
+type FileMatchResult = (DocId, PathBuf, u64, Vec<FileMatch>);
+
 /// Get the number of available CPU threads (cached for performance)
 fn get_num_threads() -> usize {
     static NUM_THREADS: OnceLock<usize> = OnceLock::new();
@@ -269,15 +278,15 @@ impl<'a> QueryExecutor<'a> {
 
                 for (line_num, line_content, start, end) in file_matches {
                     // Apply line filter if specified
-                    if let Some(min) = line_start {
-                        if line_num < min {
-                            continue;
-                        }
+                    if let Some(min) = line_start
+                        && line_num < min
+                    {
+                        continue;
                     }
-                    if let Some(max) = line_end {
-                        if line_num > max {
-                            continue;
-                        }
+                    if let Some(max) = line_end
+                        && line_num > max
+                    {
+                        continue;
                     }
 
                     let (ctx_before, ctx_after) =
@@ -309,15 +318,15 @@ impl<'a> QueryExecutor<'a> {
                     let mut matches = Vec::new();
                     for (line_num, line_content, start, end) in file_matches {
                         // Apply line filter if specified
-                        if let Some(min) = line_start {
-                            if line_num < min {
-                                continue;
-                            }
+                        if let Some(min) = line_start
+                            && line_num < min
+                        {
+                            continue;
                         }
-                        if let Some(max) = line_end {
-                            if line_num > max {
-                                continue;
-                            }
+                        if let Some(max) = line_end
+                            && line_num > max
+                        {
+                            continue;
                         }
 
                         let (ctx_before, ctx_after) =
@@ -529,7 +538,7 @@ impl<'a> QueryExecutor<'a> {
         match_line: u32,
         before: u32,
         after: u32,
-    ) -> (Vec<(u32, String)>, Vec<(u32, String)>) {
+    ) -> (ContextLines, ContextLines) {
         // Early return if no context needed
         if before == 0 && after == 0 {
             return (Vec::new(), Vec::new());
@@ -689,12 +698,11 @@ impl<'a> QueryExecutor<'a> {
                 }
 
                 // Path filter
-                if let Some(ref matcher) = path_matcher {
-                    if let Some(path) = self.reader.get_path(doc) {
-                        if !matcher.is_match(path) {
-                            continue;
-                        }
-                    }
+                if let Some(ref matcher) = path_matcher
+                    && let Some(path) = self.reader.get_path(doc)
+                    && !matcher.is_match(path)
+                {
+                    continue;
                 }
 
                 // Filename filter (case-insensitive, exact match unless glob pattern)
@@ -747,27 +755,27 @@ impl<'a> QueryExecutor<'a> {
                 }
 
                 // Size filters
-                if let Some(min) = filter.size_min {
-                    if doc.size < min {
-                        continue;
-                    }
+                if let Some(min) = filter.size_min
+                    && doc.size < min
+                {
+                    continue;
                 }
-                if let Some(max) = filter.size_max {
-                    if doc.size > max {
-                        continue;
-                    }
+                if let Some(max) = filter.size_max
+                    && doc.size > max
+                {
+                    continue;
                 }
 
                 // Modification time filters
-                if let Some(min) = filter.mtime_min {
-                    if doc.mtime < min {
-                        continue;
-                    }
+                if let Some(min) = filter.mtime_min
+                    && doc.mtime < min
+                {
+                    continue;
                 }
-                if let Some(max) = filter.mtime_max {
-                    if doc.mtime > max {
-                        continue;
-                    }
+                if let Some(max) = filter.mtime_max
+                    && doc.mtime > max
+                {
+                    continue;
                 }
 
                 result.insert(doc_id);
@@ -786,15 +794,15 @@ impl<'a> QueryExecutor<'a> {
         let mut matches = Vec::with_capacity(limit.min(candidates.len() as usize));
 
         for doc_id in candidates.iter().take(limit) {
-            if let Some(doc) = self.reader.get_document(doc_id) {
-                if let Some(path) = self.reader.get_path(doc) {
-                    matches.push(SearchMatch {
-                        doc_id,
-                        path: path.clone(),
-                        line_number: 1,
-                        score: 1.0,
-                    });
-                }
+            if let Some(doc) = self.reader.get_document(doc_id)
+                && let Some(path) = self.reader.get_path(doc)
+            {
+                matches.push(SearchMatch {
+                    doc_id,
+                    path: path.clone(),
+                    line_number: 1,
+                    score: 1.0,
+                });
             }
         }
 
@@ -818,25 +826,25 @@ impl<'a> QueryExecutor<'a> {
                 break;
             }
 
-            if let Some(doc) = self.reader.get_document(doc_id) {
-                if let Some(path) = self.reader.get_path(doc) {
-                    let filename = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
+            if let Some(doc) = self.reader.get_document(doc_id)
+                && let Some(path) = self.reader.get_path(doc)
+            {
+                let filename = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
 
-                    // Check if filename contains any search term
-                    let matches_term = terms_lower.iter().any(|term| filename.contains(term));
+                // Check if filename contains any search term
+                let matches_term = terms_lower.iter().any(|term| filename.contains(term));
 
-                    if matches_term {
-                        matches.push(SearchMatch {
-                            doc_id,
-                            path: path.clone(),
-                            line_number: 1,
-                            score: 2.0, // Boost filename matches
-                        });
-                    }
+                if matches_term {
+                    matches.push(SearchMatch {
+                        doc_id,
+                        path: path.clone(),
+                        line_number: 1,
+                        score: 2.0, // Boost filename matches
+                    });
                 }
             }
         }
@@ -893,7 +901,7 @@ impl<'a> QueryExecutor<'a> {
         let target_matches = limit + (limit / 2);
         let match_count = AtomicUsize::new(0);
 
-        let all_matches: Vec<(DocId, PathBuf, u64, Vec<(u32, String, usize, usize)>)> = if use_cache {
+        let all_matches: Vec<FileMatchResult> = if use_cache {
             // Small result set: use cached reads (sequential to leverage cache)
             let mut results = Vec::with_capacity(candidate_count.min(target_matches));
             let mut total_matches = 0;
@@ -1022,10 +1030,10 @@ impl<'a> QueryExecutor<'a> {
     /// Extract line filter from plan steps
     fn extract_line_filter(steps: &[PlanStep]) -> (Option<u32>, Option<u32>) {
         for step in steps {
-            if let PlanStep::Filter(filter) = step {
-                if filter.line_start.is_some() || filter.line_end.is_some() {
-                    return (filter.line_start, filter.line_end);
-                }
+            if let PlanStep::Filter(filter) = step
+                && (filter.line_start.is_some() || filter.line_end.is_some())
+            {
+                return (filter.line_start, filter.line_end);
             }
         }
         (None, None)
@@ -1239,12 +1247,7 @@ impl<'a> QueryExecutor<'a> {
             // Check if all other terms have a match within distance
             for other_term_lines in term_lines.iter().skip(1) {
                 let has_nearby = other_term_lines.iter().any(|&other_line| {
-                    let diff = if first_line > other_line {
-                        first_line - other_line
-                    } else {
-                        other_line - first_line
-                    };
-                    diff <= distance
+                    first_line.abs_diff(other_line) <= distance
                 });
 
                 if !has_nearby {
@@ -1429,5 +1432,292 @@ fn parse_language(lang: &str) -> Language {
         "ruby" | "rb" => Language::Ruby,
         "shell" | "sh" | "bash" => Language::Shell,
         _ => Language::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::reader::IndexReader;
+    use crate::query::parser::parse_query;
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// Create a test index with multiple files for comprehensive testing
+    fn create_test_index() -> (TempDir, PathBuf, IndexReader) {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root_path = temp_dir.path().to_path_buf();
+
+        // Create multiple test files
+        fs::write(
+            root_path.join("main.rs"),
+            r#"fn main() {
+    println!("Hello, world!");
+    let x = 42;
+}
+
+fn helper() {
+    // TODO: implement
+}
+"#,
+        )
+        .expect("Failed to write main.rs");
+
+        fs::write(
+            root_path.join("lib.rs"),
+            r#"pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+pub fn multiply(a: i32, b: i32) -> i32 {
+    a * b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add() {
+        assert_eq!(add(2, 3), 5);
+    }
+}
+"#,
+        )
+        .expect("Failed to write lib.rs");
+
+        fs::write(
+            root_path.join("utils.py"),
+            r#"def format_error(msg: str) -> str:
+    return f"ERROR: {msg}"
+
+def format_warning(msg: str) -> str:
+    return f"WARNING: {msg}"
+"#,
+        )
+        .expect("Failed to write utils.py");
+
+        // Build index
+        crate::index::build::build_index(&root_path, false).expect("Failed to build index");
+
+        let reader = IndexReader::open(&root_path).expect("Failed to open index");
+
+        (temp_dir, root_path, reader)
+    }
+
+    #[test]
+    fn test_executor_simple_search() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        let query = parse_query("fn main");
+        let results = executor.execute(&query);
+
+        assert!(results.is_ok(), "Search should succeed");
+        let results = results.unwrap();
+        assert!(!results.is_empty(), "Should find matches for 'fn main'");
+
+        // Should find main.rs
+        assert!(
+            results.iter().any(|m| m.path.to_string_lossy().contains("main.rs")),
+            "Should find main.rs"
+        );
+    }
+
+    #[test]
+    fn test_executor_phrase_search() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        let query = parse_query("\"Hello, world\"");
+        let results = executor.execute(&query);
+
+        assert!(results.is_ok(), "Phrase search should succeed");
+        let results = results.unwrap();
+        assert!(!results.is_empty(), "Should find exact phrase");
+    }
+
+    #[test]
+    fn test_executor_no_results() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        let query = parse_query("xyznonexistent123abc");
+        let results = executor.execute(&query);
+
+        assert!(results.is_ok(), "Search should succeed even with no matches");
+        let results = results.unwrap();
+        assert!(results.is_empty(), "Should find no matches");
+    }
+
+    #[test]
+    fn test_executor_extension_filter() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        let query = parse_query("ext:rs fn");
+        let results = executor.execute(&query);
+
+        assert!(results.is_ok(), "Extension filter search should succeed");
+        let results = results.unwrap();
+
+        // All results should be .rs files
+        for result in &results {
+            assert!(
+                result.path.extension().map(|e| e == "rs").unwrap_or(false),
+                "All results should be .rs files"
+            );
+        }
+    }
+
+    #[test]
+    fn test_executor_language_filter() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        let query = parse_query("lang:python def");
+        let results = executor.execute(&query);
+
+        assert!(results.is_ok(), "Language filter search should succeed");
+        let results = results.unwrap();
+
+        // Should find Python files
+        assert!(
+            results.iter().any(|m| m.path.to_string_lossy().contains(".py")),
+            "Should find Python files"
+        );
+    }
+
+    #[test]
+    fn test_executor_with_limit() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        let mut query = parse_query("fn");
+        query.options.limit = 1;
+        let results = executor.execute(&query);
+
+        assert!(results.is_ok(), "Limited search should succeed");
+        let results = results.unwrap();
+        assert!(results.len() <= 1, "Should respect limit of 1");
+    }
+
+    #[test]
+    fn test_verify_content_literal() {
+        let content = "fn main() {\n    println!(\"hello\");\n}\n";
+        let verification = VerificationStep::Literal("println".to_string());
+
+        let matches = QueryExecutor::verify_content_static(content, &verification, 1);
+
+        assert!(!matches.is_empty(), "Should find literal match");
+        assert_eq!(matches[0].0, 2, "Match should be on line 2");
+    }
+
+    #[test]
+    fn test_verify_content_phrase() {
+        let content = "fn main() {\n    println!(\"hello world\");\n}\n";
+        let verification = VerificationStep::Phrase("hello world".to_string());
+
+        let matches = QueryExecutor::verify_content_static(content, &verification, 1);
+
+        assert!(!matches.is_empty(), "Should find phrase match");
+    }
+
+    #[test]
+    fn test_verify_content_regex() {
+        let content = "fn main() {\n    let x = 42;\n    let y = 123;\n}\n";
+        let verification = VerificationStep::Regex(r"\d+".to_string());
+
+        let matches = QueryExecutor::verify_content_static(content, &verification, 1);
+
+        assert!(matches.len() >= 2, "Should find at least 2 number matches");
+    }
+
+    #[test]
+    fn test_verify_content_and() {
+        let content = "fn main() {\n    println!(\"hello\");\n}\n";
+        let verification = VerificationStep::And(vec![
+            VerificationStep::Literal("fn".to_string()),
+            VerificationStep::Literal("main".to_string()),
+        ]);
+
+        let matches = QueryExecutor::verify_content_static(content, &verification, 1);
+
+        assert!(!matches.is_empty(), "Should find AND match");
+    }
+
+    #[test]
+    fn test_verify_content_or() {
+        let content = "fn helper() {\n    // nothing here\n}\n";
+        let verification = VerificationStep::Or(vec![
+            VerificationStep::Literal("main".to_string()),
+            VerificationStep::Literal("helper".to_string()),
+        ]);
+
+        let matches = QueryExecutor::verify_content_static(content, &verification, 1);
+
+        assert!(!matches.is_empty(), "Should find OR match (helper)");
+    }
+
+    #[test]
+    fn test_extract_context_lines() {
+        let content = "line1\nline2\nline3\nline4\nline5\n";
+
+        let (before, after) = QueryExecutor::extract_context_lines(content, 3, 1, 1);
+
+        assert_eq!(before.len(), 1, "Should have 1 line before");
+        assert_eq!(after.len(), 1, "Should have 1 line after");
+        assert!(before[0].1.contains("line2"), "Before should be line2");
+        assert!(after[0].1.contains("line4"), "After should be line4");
+    }
+
+    #[test]
+    fn test_extract_context_lines_at_start() {
+        let content = "line1\nline2\nline3\n";
+
+        let (before, after) = QueryExecutor::extract_context_lines(content, 1, 2, 1);
+
+        assert!(before.is_empty(), "Should have no lines before line 1");
+        assert_eq!(after.len(), 1, "Should have 1 line after");
+    }
+
+    #[test]
+    fn test_extract_context_lines_at_end() {
+        let content = "line1\nline2\nline3\n";
+
+        let (before, after) = QueryExecutor::extract_context_lines(content, 3, 1, 2);
+
+        assert_eq!(before.len(), 1, "Should have 1 line before");
+        assert!(after.is_empty(), "Should have no lines after line 3");
+    }
+
+    #[test]
+    fn test_parse_language() {
+        assert_eq!(parse_language("rust"), Language::Rust);
+        assert_eq!(parse_language("rs"), Language::Rust);
+        assert_eq!(parse_language("PYTHON"), Language::Python);
+        assert_eq!(parse_language("Py"), Language::Python);
+        assert_eq!(parse_language("javascript"), Language::JavaScript);
+        assert_eq!(parse_language("JS"), Language::JavaScript);
+        assert_eq!(parse_language("unknown_lang"), Language::Unknown);
+    }
+
+    #[test]
+    fn test_find_literal_matches_case_sensitive() {
+        let content = "Hello World\nhello world\nHELLO WORLD\n";
+
+        let matches = QueryExecutor::find_literal_matches_static(content, "Hello", true, 1);
+
+        assert_eq!(matches.len(), 1, "Case-sensitive should find exactly 1 match");
+        assert_eq!(matches[0].0, 1, "Match should be on line 1");
+    }
+
+    #[test]
+    fn test_find_literal_matches_case_insensitive() {
+        let content = "Hello World\nhello world\nHELLO WORLD\n";
+
+        let matches = QueryExecutor::find_literal_matches_static(content, "hello", false, 1);
+
+        assert_eq!(matches.len(), 3, "Case-insensitive should find all 3 matches");
     }
 }

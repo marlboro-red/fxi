@@ -348,7 +348,7 @@ impl<'a> QueryParser<'a> {
             }
             "near" => {
                 // Parse near:term1,term2,distance
-                return self.parse_near_query(&value);
+                self.parse_near_query(&value)
             }
             "sort" => {
                 self.parse_sort(&value);
@@ -368,14 +368,14 @@ impl<'a> QueryParser<'a> {
     }
 
     fn parse_size_filter(&mut self, value: &str) {
-        if let Some(rest) = value.strip_prefix('>') {
-            if let Ok(n) = rest.parse() {
-                self.filters.size_min = Some(n);
-            }
-        } else if let Some(rest) = value.strip_prefix('<') {
-            if let Ok(n) = rest.parse() {
-                self.filters.size_max = Some(n);
-            }
+        if let Some(rest) = value.strip_prefix('>')
+            && let Ok(n) = rest.parse()
+        {
+            self.filters.size_min = Some(n);
+        } else if let Some(rest) = value.strip_prefix('<')
+            && let Ok(n) = rest.parse()
+        {
+            self.filters.size_max = Some(n);
         }
     }
 
@@ -436,7 +436,7 @@ impl<'a> QueryParser<'a> {
 
             // Simple calculation: days since Unix epoch
             // Note: This is approximate, ignoring leap seconds
-            if year >= 1970 && month >= 1 && month <= 12 && day >= 1 && day <= 31 {
+            if year >= 1970 && (1..=12).contains(&month) && (1..=31).contains(&day) {
                 let days_since_epoch = (year - 1970) as u64 * 365
                     + ((year - 1969) / 4) as u64  // Leap years
                     + days_before_month(month, is_leap_year(year))

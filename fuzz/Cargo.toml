@@ -1,0 +1,29 @@
+[package]
+name = "fxi-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.fxi]
+path = ".."
+
+[[bin]]
+name = "fuzz_query_parser"
+path = "fuzz_targets/fuzz_query_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_trigram"
+path = "fuzz_targets/fuzz_trigram.rs"
+test = false
+doc = false
+bench = false

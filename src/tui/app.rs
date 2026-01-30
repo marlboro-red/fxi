@@ -364,38 +364,38 @@ impl App {
         self.selected = 0;
 
         // Use daemon if available (fast path)
-        if self.using_daemon {
-            if let Some(ref client) = self.client {
-                let client = Arc::clone(client);
-                let (tx, rx) = mpsc::channel();
-                let query = self.query.clone();
-                let query_for_thread = query.clone();
-                let root_path = self.root_path.clone();
+        if self.using_daemon
+            && let Some(ref client) = self.client
+        {
+            let client = Arc::clone(client);
+            let (tx, rx) = mpsc::channel();
+            let query = self.query.clone();
+            let query_for_thread = query.clone();
+            let root_path = self.root_path.clone();
 
-                self.status_message = "Searching (daemon)...".to_string();
-                self.search_state = SearchState::Searching {
-                    query: query.clone(),
-                    receiver: rx,
-                    start_time: Instant::now(),
+            self.status_message = "Searching (daemon)...".to_string();
+            self.search_state = SearchState::Searching {
+                query: query.clone(),
+                receiver: rx,
+                start_time: Instant::now(),
+            };
+
+            thread::spawn(move || {
+                let result = if let Ok(mut client) = client.lock() {
+                    match client.search(&query_for_thread, &root_path, 0) {
+                        Ok(sr) => Ok(sr.matches),
+                        Err(e) => Err(e.to_string()),
+                    }
+                } else {
+                    Err("Failed to lock client".to_string())
                 };
 
-                thread::spawn(move || {
-                    let result = if let Ok(mut client) = client.lock() {
-                        match client.search(&query_for_thread, &root_path, 0) {
-                            Ok(sr) => Ok(sr.matches),
-                            Err(e) => Err(e.to_string()),
-                        }
-                    } else {
-                        Err("Failed to lock client".to_string())
-                    };
-
-                    let _ = tx.send(SearchResult {
-                        matches: result,
-                        query: query_for_thread,
-                    });
+                let _ = tx.send(SearchResult {
+                    matches: result,
+                    query: query_for_thread,
                 });
-                return;
-            }
+            });
+            return;
         }
 
         // Fallback to direct index search
@@ -553,10 +553,10 @@ impl App {
             Ok(()) => {
                 // Notify daemon to reload if we're using it
                 if self.using_daemon {
-                    if let Some(ref client) = self.client {
-                        if let Ok(mut client) = client.lock() {
-                            let _ = client.reload(&self.root_path);
-                        }
+                    if let Some(ref client) = self.client
+                        && let Ok(mut client) = client.lock()
+                    {
+                        let _ = client.reload(&self.root_path);
                     }
                     self.status_message = "Index rebuilt (daemon notified)".to_string();
 
@@ -672,13 +672,14 @@ impl App {
         for idx in indices_to_prefetch {
             if let Some(result) = self.results.get(idx) {
                 let full_path = self.root_path.join(&result.path);
-                if !self.prefetch_cache.contains_key(&full_path) {
+                // Use entry API to avoid redundant lookups
+                if let std::collections::hash_map::Entry::Vacant(entry) = self.prefetch_cache.entry(full_path.clone()) {
                     // Read and cache synchronously for now (files are usually small)
                     // Could be made async for very large files
                     if let Ok(content) = std::fs::read_to_string(&full_path) {
                         // Only cache files under 1MB
                         if content.len() < 1024 * 1024 {
-                            self.prefetch_cache.insert(full_path, content);
+                            entry.insert(content);
                         }
                     }
                 }
@@ -716,7 +717,7 @@ fn expand_tabs(s: &str) -> String {
         match c {
             '\t' => {
                 let spaces = TAB_WIDTH - (column % TAB_WIDTH);
-                result.extend(std::iter::repeat(' ').take(spaces));
+                result.extend(std::iter::repeat_n(' ', spaces));
                 column += spaces;
             }
             '\n' | '\r' => {

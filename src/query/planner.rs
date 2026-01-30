@@ -116,19 +116,39 @@ impl QueryPlanner {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn plan_node(&mut self, node: &QueryNode) -> (Vec<PlanStep>, Option<VerificationStep>) {
         match node {
             QueryNode::Empty => (Vec::new(), None),
 
             QueryNode::Literal(text) => {
-                // For single-word queries, prefer direct token lookup over trigrams.
-                // Token lookup is O(1) vs trigram intersection which can hit stop-grams.
+                // For single-word queries, use BOTH token lookup (fast exact match)
+                // AND trigram search (substring match like ripgrep).
+                // This ensures we find both exact tokens AND substrings.
                 let is_single_word = !text.contains(char::is_whitespace) && text.len() >= 2;
 
                 if is_single_word {
-                    // Direct token lookup for single words (faster for common terms)
+                    let trigrams = query_trigrams(text);
+
+                    // Create sub-plans for both approaches
+                    let token_plan = QueryPlan {
+                        steps: vec![PlanStep::TokenLookup(text.to_lowercase())],
+                        verification: None,
+                    };
+
+                    let steps = if !trigrams.is_empty() {
+                        let trigram_plan = QueryPlan {
+                            steps: vec![PlanStep::TrigramIntersect(trigrams)],
+                            verification: None,
+                        };
+                        // Union token and trigram results for substring matching
+                        vec![PlanStep::Union(vec![token_plan, trigram_plan])]
+                    } else {
+                        vec![PlanStep::TokenLookup(text.to_lowercase())]
+                    };
+
                     (
-                        vec![PlanStep::TokenLookup(text.to_lowercase())],
+                        steps,
                         Some(VerificationStep::Literal(text.clone())),
                     )
                 } else {

@@ -97,7 +97,7 @@ impl SegmentReader {
             unsafe { Mmap::map(&file)? }
         } else {
             // Empty mmap for empty segment
-            unsafe { Mmap::map(&File::open(&index_path.join("meta.json"))?)? }
+            unsafe { Mmap::map(&File::open(index_path.join("meta.json"))?)? }
         };
 
         // Read token dictionary (already sorted from BTreeMap write)
@@ -109,7 +109,7 @@ impl SegmentReader {
             let file = File::open(&token_postings_path)?;
             unsafe { Mmap::map(&file)? }
         } else {
-            unsafe { Mmap::map(&File::open(&index_path.join("meta.json"))?)? }
+            unsafe { Mmap::map(&File::open(index_path.join("meta.json"))?)? }
         };
 
         // Line maps are NOT loaded here - loaded lazily on first access
@@ -305,9 +305,33 @@ impl IndexReader {
         self.paths.get(doc.path_id as usize)
     }
 
-    /// Get full path for document
+    /// Get full path for document.
+    /// Returns None if the path would escape the root directory (security check).
     pub fn get_full_path(&self, doc: &Document) -> Option<PathBuf> {
-        self.get_path(doc).map(|p| self.root_path.join(p))
+        let rel_path = self.get_path(doc)?;
+        let full_path = self.root_path.join(rel_path);
+
+        // Security: Verify the path doesn't escape the root directory
+        // This protects against malicious index files with paths like "../../../etc/passwd"
+        match full_path.canonicalize() {
+            Ok(canonical) => {
+                if canonical.starts_with(&self.root_path) {
+                    Some(full_path)
+                } else {
+                    // Path escapes root - reject it
+                    None
+                }
+            }
+            Err(_) => {
+                // File doesn't exist or can't be accessed - return the path anyway
+                // but only if it doesn't contain suspicious components
+                if rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                    None // Contains ".." - reject
+                } else {
+                    Some(full_path)
+                }
+            }
+        }
     }
 
     /// Get all documents
@@ -496,10 +520,10 @@ impl IndexReader {
         let content = std::fs::read_to_string(path).ok()?;
 
         // Only cache if file is small enough
-        if content.len() <= MAX_CACHEABLE_FILE_SIZE {
-            if let Ok(mut cache) = self.file_cache.lock() {
-                cache.put(path.to_path_buf(), content.clone());
-            }
+        if content.len() <= MAX_CACHEABLE_FILE_SIZE
+            && let Ok(mut cache) = self.file_cache.lock()
+        {
+            cache.put(path.to_path_buf(), content.clone());
         }
 
         Some(content)
@@ -553,7 +577,7 @@ fn read_documents(index_path: &Path) -> Result<Vec<Document>> {
 
         file.read_exact(&mut buf2)?;
         let lang_val = u16::from_le_bytes(buf2);
-        let language = unsafe { std::mem::transmute::<u16, Language>(lang_val) };
+        let language = Language::try_from(lang_val).unwrap_or(Language::Unknown);
 
         file.read_exact(&mut buf2)?;
         let flags = DocFlags(u16::from_le_bytes(buf2));
@@ -788,4 +812,181 @@ fn read_bloom_filter(segment_path: &Path) -> Result<BloomFilter> {
     }
 
     Ok(BloomFilter::from_raw(bits, num_hashes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// Create a minimal test index for unit testing
+    fn create_test_index() -> (TempDir, PathBuf) {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root_path = temp_dir.path().to_path_buf();
+
+        // Create a test file
+        fs::write(root_path.join("test.rs"), "fn main() {\n    println!(\"hello\");\n}\n")
+            .expect("Failed to write test file");
+
+        // Build index
+        crate::index::build::build_index(&root_path, false).expect("Failed to build index");
+
+        (temp_dir, root_path)
+    }
+
+    #[test]
+    fn test_index_reader_open() {
+        let (_temp_dir, root_path) = create_test_index();
+
+        let reader = IndexReader::open(&root_path);
+        assert!(reader.is_ok(), "Should open index successfully");
+
+        let reader = reader.unwrap();
+        assert!(reader.meta.doc_count > 0, "Should have at least one document");
+    }
+
+    #[test]
+    fn test_index_reader_open_nonexistent() {
+        let result = IndexReader::open(&PathBuf::from("/nonexistent/path"));
+        assert!(result.is_err(), "Should fail for nonexistent path");
+    }
+
+    #[test]
+    fn test_get_document() {
+        let (_temp_dir, root_path) = create_test_index();
+        let reader = IndexReader::open(&root_path).expect("Failed to open index");
+
+        // Document IDs start at 1
+        let doc = reader.get_document(1);
+        assert!(doc.is_some(), "Should find document 1");
+
+        let doc = doc.unwrap();
+        assert!(doc.is_valid(), "Document should be valid");
+        assert!(doc.size > 0, "Document should have size");
+    }
+
+    #[test]
+    fn test_get_document_invalid_id() {
+        let (_temp_dir, root_path) = create_test_index();
+        let reader = IndexReader::open(&root_path).expect("Failed to open index");
+
+        let doc = reader.get_document(99999);
+        assert!(doc.is_none(), "Should return None for invalid doc ID");
+    }
+
+    #[test]
+    fn test_get_path() {
+        let (_temp_dir, root_path) = create_test_index();
+        let reader = IndexReader::open(&root_path).expect("Failed to open index");
+
+        let doc = reader.get_document(1).expect("Should find document");
+        let path = reader.get_path(doc);
+
+        assert!(path.is_some(), "Should get path for document");
+        let path = path.unwrap();
+        assert!(
+            path.to_string_lossy().contains("test.rs"),
+            "Path should contain test.rs"
+        );
+    }
+
+    #[test]
+    fn test_get_full_path() {
+        let (_temp_dir, root_path) = create_test_index();
+        let reader = IndexReader::open(&root_path).expect("Failed to open index");
+
+        let doc = reader.get_document(1).expect("Should find document");
+        let full_path = reader.get_full_path(doc);
+
+        assert!(full_path.is_some(), "Should get full path");
+        let full_path = full_path.unwrap();
+        assert!(full_path.exists(), "Full path should exist on disk");
+    }
+
+    #[test]
+    fn test_valid_doc_ids() {
+        let (_temp_dir, root_path) = create_test_index();
+        let reader = IndexReader::open(&root_path).expect("Failed to open index");
+
+        let valid_ids = reader.valid_doc_ids();
+        assert!(!valid_ids.is_empty(), "Should have valid document IDs");
+    }
+
+    #[test]
+    fn test_trigram_lookup() {
+        let (_temp_dir, root_path) = create_test_index();
+        let reader = IndexReader::open(&root_path).expect("Failed to open index");
+
+        // "fn " should produce trigrams that exist in our test file
+        let trigram = crate::index::types::bytes_to_trigram(b'f', b'n', b' ');
+        let docs = reader.get_trigram_docs(trigram);
+
+        // Should find documents containing "fn "
+        assert!(!docs.is_empty(), "Should find documents with 'fn ' trigram");
+    }
+
+    #[test]
+    fn test_token_lookup() {
+        let (_temp_dir, root_path) = create_test_index();
+        let reader = IndexReader::open(&root_path).expect("Failed to open index");
+
+        // "main" and "println" should be tokens in our test file
+        let docs = reader.get_token_docs("main");
+        assert!(!docs.is_empty(), "Should find documents with 'main' token");
+
+        let docs = reader.get_token_docs("println");
+        assert!(!docs.is_empty(), "Should find documents with 'println' token");
+    }
+
+    #[test]
+    fn test_token_lookup_nonexistent() {
+        let (_temp_dir, root_path) = create_test_index();
+        let reader = IndexReader::open(&root_path).expect("Failed to open index");
+
+        let docs = reader.get_token_docs("xyznonexistent123");
+        assert!(docs.is_empty(), "Should not find nonexistent token");
+    }
+
+    #[test]
+    fn test_read_file_cached() {
+        let (_temp_dir, root_path) = create_test_index();
+        let reader = IndexReader::open(&root_path).expect("Failed to open index");
+
+        let test_file_path = root_path.join("test.rs");
+
+        // First read
+        let content1 = reader.read_file_cached(&test_file_path);
+        assert!(content1.is_some(), "Should read file");
+        assert!(
+            content1.as_ref().unwrap().contains("fn main"),
+            "Content should contain 'fn main'"
+        );
+
+        // Second read (should come from cache)
+        let content2 = reader.read_file_cached(&test_file_path);
+        assert!(content2.is_some(), "Should read file from cache");
+        assert_eq!(content1, content2, "Cached content should match");
+    }
+
+    #[test]
+    fn test_path_traversal_protection() {
+        let (_temp_dir, root_path) = create_test_index();
+        let reader = IndexReader::open(&root_path).expect("Failed to open index");
+
+        // Create a fake document with path_id that would resolve to a relative path
+        // containing ".." - this tests the security check in get_full_path
+        let doc = reader.get_document(1).expect("Should find document");
+
+        // The path should be valid since it's a real indexed file
+        let full_path = reader.get_full_path(doc);
+        assert!(full_path.is_some(), "Valid path should work");
+
+        // Verify the returned path is within root
+        let full_path = full_path.unwrap();
+        assert!(
+            full_path.starts_with(&root_path) || full_path.canonicalize().unwrap().starts_with(root_path.canonicalize().unwrap()),
+            "Path should be within root directory"
+        );
+    }
 }

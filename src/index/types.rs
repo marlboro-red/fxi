@@ -53,6 +53,48 @@ pub enum Language {
     Ocaml = 31,
 }
 
+impl TryFrom<u16> for Language {
+    type Error = ();
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Language::Unknown),
+            1 => Ok(Language::Rust),
+            2 => Ok(Language::Python),
+            3 => Ok(Language::JavaScript),
+            4 => Ok(Language::TypeScript),
+            5 => Ok(Language::Go),
+            6 => Ok(Language::C),
+            7 => Ok(Language::Cpp),
+            8 => Ok(Language::Java),
+            9 => Ok(Language::Ruby),
+            10 => Ok(Language::Shell),
+            11 => Ok(Language::Markdown),
+            12 => Ok(Language::Json),
+            13 => Ok(Language::Yaml),
+            14 => Ok(Language::Toml),
+            15 => Ok(Language::Html),
+            16 => Ok(Language::Css),
+            17 => Ok(Language::Sql),
+            18 => Ok(Language::Haskell),
+            19 => Ok(Language::Scala),
+            20 => Ok(Language::Kotlin),
+            21 => Ok(Language::Swift),
+            22 => Ok(Language::Php),
+            23 => Ok(Language::CSharp),
+            24 => Ok(Language::Elixir),
+            25 => Ok(Language::Clojure),
+            26 => Ok(Language::Lua),
+            27 => Ok(Language::Perl),
+            28 => Ok(Language::R),
+            29 => Ok(Language::Zig),
+            30 => Ok(Language::Nim),
+            31 => Ok(Language::Ocaml),
+            _ => Err(()),
+        }
+    }
+}
+
 impl Language {
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_lowercase().as_str() {

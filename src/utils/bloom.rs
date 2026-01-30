@@ -51,14 +51,14 @@ impl BloomFilter {
     pub fn new(expected_elements: usize, false_positive_rate: f64) -> Self {
         // Calculate optimal number of bits: m = -n * ln(p) / (ln(2)^2)
         let n = expected_elements.max(1) as f64;
-        let p = false_positive_rate.max(0.0001).min(0.5);
+        let p = false_positive_rate.clamp(0.0001, 0.5);
         let ln2_sq = std::f64::consts::LN_2 * std::f64::consts::LN_2;
 
         let num_bits = ((-n * p.ln()) / ln2_sq).ceil() as usize;
         let num_bits = num_bits.max(64); // Minimum 64 bits
 
         // Round up to nearest u64
-        let num_words = (num_bits + 63) / 64;
+        let num_words = num_bits.div_ceil(64);
         let num_bits = num_words * 64;
 
         // Calculate optimal number of hash functions: k = (m/n) * ln(2)
@@ -75,7 +75,7 @@ impl BloomFilter {
     /// Create a bloom filter with specific parameters (for loading from disk)
     #[allow(dead_code)]
     pub fn with_params(num_bits: usize, num_hashes: u8) -> Self {
-        let num_words = (num_bits + 63) / 64;
+        let num_words = num_bits.div_ceil(64);
         Self {
             bits: vec![0u64; num_words],
             num_bits: num_words * 64,

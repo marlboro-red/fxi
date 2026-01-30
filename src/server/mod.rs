@@ -103,12 +103,12 @@ pub fn is_daemon_running() -> bool {
     }
 
     // Read PID and check if process exists
-    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            // Check if process exists using kill(pid, 0)
-            unsafe {
-                return libc::kill(pid, 0) == 0;
-            }
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_path)
+        && let Ok(pid) = pid_str.trim().parse::<i32>()
+    {
+        // Check if process exists using kill(pid, 0)
+        unsafe {
+            return libc::kill(pid, 0) == 0;
         }
     }
 

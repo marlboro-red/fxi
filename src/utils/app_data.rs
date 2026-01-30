@@ -143,18 +143,16 @@ pub fn list_indexed_codebases() -> Result<Vec<IndexLocation>> {
 
         if path.is_dir() {
             let meta_path = path.join("meta.json");
-            if meta_path.exists() {
-                // Read the meta.json to get the root path
-                if let Ok(file) = fs::File::open(&meta_path) {
-                    if let Ok(meta) = serde_json::from_reader::<_, serde_json::Value>(file) {
-                        if let Some(root) = meta.get("root_path").and_then(|v| v.as_str()) {
-                            codebases.push(IndexLocation {
-                                root_path: PathBuf::from(root),
-                                index_dir: path,
-                            });
-                        }
-                    }
-                }
+            // Read the meta.json to get the root path
+            if meta_path.exists()
+                && let Ok(file) = fs::File::open(&meta_path)
+                && let Ok(meta) = serde_json::from_reader::<_, serde_json::Value>(file)
+                && let Some(root) = meta.get("root_path").and_then(|v| v.as_str())
+            {
+                codebases.push(IndexLocation {
+                    root_path: PathBuf::from(root),
+                    index_dir: path,
+                });
             }
         }
     }

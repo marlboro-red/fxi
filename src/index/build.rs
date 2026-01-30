@@ -162,13 +162,14 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
                 let entries = Arc::clone(&entries);
                 let root = root_clone.clone();
                 Box::new(move |result| {
-                    if let Ok(entry) = result {
-                        if entry.path().is_file() {
-                            if let Ok(rel_path) = entry.path().strip_prefix(&root) {
-                                let mut entries = entries.lock().unwrap();
-                                entries.push((entry.path().to_path_buf(), rel_path.to_path_buf()));
-                            }
-                        }
+                    if let Ok(entry) = result
+                        && entry.path().is_file()
+                        && let Ok(rel_path) = entry.path().strip_prefix(&root)
+                    {
+                        let mut entries = entries
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        entries.push((entry.path().to_path_buf(), rel_path.to_path_buf()));
                     }
                     ignore::WalkState::Continue
                 })
@@ -195,7 +196,7 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
     let error_count = Arc::new(AtomicUsize::new(0));
     let total_processed = Arc::new(AtomicUsize::new(0));
 
-    let num_chunks = if chunk_size == 0 { 1 } else { (total_files + chunk_size - 1) / chunk_size };
+    let num_chunks = if chunk_size == 0 { 1 } else { total_files.div_ceil(chunk_size) };
 
     if num_chunks > 1 && !silent {
         println!(
@@ -448,10 +449,10 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
     // Build map of indexed files: rel_path -> (doc_id, mtime)
     let mut indexed_files: HashMap<PathBuf, (u32, u64)> = HashMap::new();
     for doc_id in reader.valid_doc_ids().iter() {
-        if let Some(doc) = reader.get_document(doc_id) {
-            if let Some(path) = reader.get_path(doc) {
-                indexed_files.insert(path.clone(), (doc_id, doc.mtime));
-            }
+        if let Some(doc) = reader.get_document(doc_id)
+            && let Some(path) = reader.get_path(doc)
+        {
+            indexed_files.insert(path.clone(), (doc_id, doc.mtime));
         }
     }
 

@@ -8,7 +8,7 @@ use crate::server::protocol::{
 use crate::server::get_socket_path;
 use std::io::{BufReader, BufWriter};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Duration;
 
 /// Read/write timeout
@@ -93,12 +93,12 @@ impl IndexClient {
     pub fn search(
         &mut self,
         query: &str,
-        root_path: &PathBuf,
+        root_path: &Path,
         limit: usize,
     ) -> ClientResult<SearchResult> {
         let request = Request::Search {
             query: query.to_string(),
-            root_path: root_path.clone(),
+            root_path: root_path.to_path_buf(),
             limit,
         };
 
@@ -130,13 +130,13 @@ impl IndexClient {
     pub fn content_search(
         &mut self,
         pattern: &str,
-        root_path: &PathBuf,
+        root_path: &Path,
         limit: usize,
         options: ContentSearchOptions,
     ) -> ClientResult<ContentSearchResponse> {
         let request = Request::ContentSearch {
             pattern: pattern.to_string(),
-            root_path: root_path.clone(),
+            root_path: root_path.to_path_buf(),
             limit,
             options,
         };
@@ -166,9 +166,9 @@ impl IndexClient {
     }
 
     /// Request index reload
-    pub fn reload(&mut self, root_path: &PathBuf) -> ClientResult<(bool, String)> {
+    pub fn reload(&mut self, root_path: &Path) -> ClientResult<(bool, String)> {
         let request = Request::Reload {
-            root_path: root_path.clone(),
+            root_path: root_path.to_path_buf(),
         };
 
         write_message(&mut self.writer, &request)?;

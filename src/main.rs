@@ -7,7 +7,7 @@ mod utils;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
 pub enum ColorChoice {
@@ -145,6 +145,46 @@ enum DaemonAction {
     },
 }
 
+/// Options for grep-style content search (ripgrep-compatible)
+struct GrepOptions {
+    patterns: Vec<String>,
+    path: PathBuf,
+    after_context: u32,
+    before_context: u32,
+    context: Option<u32>,
+    ignore_case: bool,
+    invert_match: bool,
+    word_regexp: bool,
+    max_count: usize,
+    files_with_matches: bool,
+    count: bool,
+    color: ColorChoice,
+}
+
+impl GrepOptions {
+    fn from_cli(cli: &Cli) -> Self {
+        let mut patterns = cli.patterns.clone();
+        if let Some(ref p) = cli.pattern {
+            patterns.insert(0, p.clone());
+        }
+
+        Self {
+            patterns,
+            path: cli.path.clone(),
+            after_context: cli.after_context,
+            before_context: cli.before_context,
+            context: cli.context,
+            ignore_case: cli.ignore_case,
+            invert_match: cli.invert_match,
+            word_regexp: cli.word_regexp,
+            max_count: cli.max_count,
+            files_with_matches: cli.files_with_matches,
+            count: cli.count,
+            color: cli.color,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -174,28 +214,11 @@ fn main() -> Result<()> {
             handle_daemon_command(action)?;
         }
         None => {
-            // Collect all patterns: positional + -e flags
-            let mut all_patterns = cli.patterns;
-            if let Some(p) = cli.pattern {
-                all_patterns.insert(0, p);
-            }
+            let opts = GrepOptions::from_cli(&cli);
 
-            if !all_patterns.is_empty() {
+            if !opts.patterns.is_empty() {
                 // Direct content search (ripgrep-like)
-                handle_grep_command(
-                    all_patterns,
-                    cli.path,
-                    cli.after_context,
-                    cli.before_context,
-                    cli.context,
-                    cli.ignore_case,
-                    cli.invert_match,
-                    cli.word_regexp,
-                    cli.max_count,
-                    cli.files_with_matches,
-                    cli.count,
-                    cli.color,
-                )?;
+                handle_grep_command(opts)?;
             } else {
                 // Interactive TUI mode
                 tui::run(cli.path, None)?;
@@ -335,65 +358,51 @@ fn handle_daemon_command(action: DaemonAction) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn handle_grep_command(
-    patterns: Vec<String>,
-    path: PathBuf,
-    after_context: u32,
-    before_context: u32,
-    context: Option<u32>,
-    ignore_case: bool,
-    invert_match: bool,
-    word_regexp: bool,
-    max_count: usize,
-    files_with_matches: bool,
-    count: bool,
-    color_choice: ColorChoice,
-) -> Result<()> {
+fn handle_grep_command(opts: GrepOptions) -> Result<()> {
     use server::protocol::ContentSearchOptions;
     use std::io::IsTerminal;
 
     // -v (invert match) is not supported with indexed search
-    if invert_match {
+    if opts.invert_match {
         anyhow::bail!("--invert-match (-v) is not supported: indexed search only returns matching lines");
     }
 
     // Find codebase root
-    let root = utils::find_codebase_root(&path)?;
+    let root = utils::find_codebase_root(&opts.path)?;
 
     // Build combined pattern for multiple -e flags (OR them together)
-    let combined_pattern = build_pattern(&patterns, ignore_case, word_regexp);
+    let combined_pattern = build_pattern(&opts.patterns, opts.ignore_case, opts.word_regexp);
 
     // Resolve context flags (-C overrides -A and -B)
-    let (ctx_before, ctx_after) = if let Some(c) = context {
+    let (ctx_before, ctx_after) = if let Some(c) = opts.context {
         (c, c)
     } else {
-        (before_context, after_context)
+        (opts.before_context, opts.after_context)
     };
 
-    let options = ContentSearchOptions {
+    let search_options = ContentSearchOptions {
         context_before: ctx_before,
         context_after: ctx_after,
-        case_insensitive: ignore_case,
-        files_only: files_with_matches,  // Optimize for -l mode
+        case_insensitive: opts.ignore_case,
+        files_only: opts.files_with_matches,  // Optimize for -l mode
     };
 
     // Try to use daemon for warm search
     let matches = if let Some(mut client) = server::IndexClient::connect() {
-        match client.content_search(&combined_pattern, &root, max_count, options) {
+        match client.content_search(&combined_pattern, &root, opts.max_count, search_options) {
             Ok(response) => response.matches,
             Err(e) => {
                 eprintln!("Daemon search failed, falling back to direct search: {}", e);
-                do_direct_content_search(&combined_pattern, &root, max_count, ctx_before, ctx_after, ignore_case, word_regexp)?
+                do_direct_content_search(&combined_pattern, &root, opts.max_count, ctx_before, ctx_after, opts.ignore_case, opts.word_regexp)?
             }
         }
     } else {
         // Fall back to direct search without daemon
-        do_direct_content_search(&combined_pattern, &root, max_count, ctx_before, ctx_after, ignore_case, word_regexp)?
+        do_direct_content_search(&combined_pattern, &root, opts.max_count, ctx_before, ctx_after, opts.ignore_case, opts.word_regexp)?
     };
 
     // Output results
-    let color = match color_choice {
+    let color = match opts.color {
         ColorChoice::Always => true,
         ColorChoice::Never => false,
         ColorChoice::Auto => std::io::stdout().is_terminal(),
@@ -401,9 +410,9 @@ fn handle_grep_command(
     // Use heading style when results span multiple files
     let use_heading = matches.iter().map(|m| &m.path).collect::<std::collections::HashSet<_>>().len() > 1;
 
-    if files_with_matches {
+    if opts.files_with_matches {
         output::print_files_only(&matches, color)?;
-    } else if count {
+    } else if opts.count {
         output::print_match_counts(&matches, color)?;
     } else {
         output::print_content_matches(&matches, color, use_heading)?;
@@ -458,7 +467,7 @@ fn build_pattern(patterns: &[String], ignore_case: bool, word_regexp: bool) -> S
 /// Direct content search without daemon
 fn do_direct_content_search(
     pattern: &str,
-    root: &PathBuf,
+    root: &Path,
     limit: usize,
     context_before: u32,
     context_after: u32,

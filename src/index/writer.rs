@@ -228,8 +228,12 @@ impl ChunkedIndexWriter {
         }
 
         // Batch update shared frequency map (single lock acquisition)
+        // Use unwrap_or_else to handle poisoned locks gracefully - if another thread
+        // panicked while holding the lock, we recover by getting the inner data anyway
         {
-            let mut freq_map = job.trigram_frequencies.lock().unwrap();
+            let mut freq_map = job.trigram_frequencies
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             for (trigram, count) in local_frequencies {
                 *freq_map.entry(trigram).or_insert(0) += count;
             }
@@ -442,7 +446,9 @@ impl ChunkedIndexWriter {
 
     /// Compute stop-grams from accumulated frequencies
     fn compute_stop_grams(&self) -> HashSet<Trigram> {
-        let freq_map = self.trigram_frequencies.lock().unwrap();
+        let freq_map = self.trigram_frequencies
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut freq: Vec<_> = freq_map.iter()
             .map(|(&t, &count)| (t, count as usize))
             .collect();
@@ -877,7 +883,7 @@ impl IndexWriter {
             }
 
             // Sort and deduplicate doc_ids
-            let mut sorted_ids: Vec<_> = doc_ids.iter().copied().collect();
+            let mut sorted_ids = doc_ids.to_vec();
             sorted_ids.sort_unstable();
             sorted_ids.dedup();
 
@@ -916,7 +922,7 @@ impl IndexWriter {
 
         for (token, doc_ids) in &self.token_postings {
             // Sort and deduplicate
-            let mut sorted_ids: Vec<_> = doc_ids.iter().copied().collect();
+            let mut sorted_ids = doc_ids.to_vec();
             sorted_ids.sort_unstable();
             sorted_ids.dedup();
 
@@ -1019,34 +1025,24 @@ impl IndexWriter {
 
     /// Add a file with pre-processed data (for incremental updates)
     #[allow(dead_code)]
-    pub fn add_processed(
-        &mut self,
-        rel_path: PathBuf,
-        mtime: u64,
-        size: u64,
-        language: Language,
-        flags: DocFlags,
-        trigrams: Vec<u32>,
-        tokens: Vec<String>,
-        line_offsets: Vec<u32>,
-    ) -> Result<DocId> {
+    pub fn add_processed(&mut self, file: ProcessedFile) -> Result<DocId> {
         let doc_id = self.documents.len() as DocId + 1;
-        let path_id = self.add_path(&rel_path);
+        let path_id = self.add_path(&file.rel_path);
 
         // Create document entry
         let doc = Document {
             doc_id,
             path_id,
-            size,
-            mtime,
-            language,
-            flags,
+            size: file.size,
+            mtime: file.mtime,
+            language: file.language,
+            flags: file.flags,
             segment_id: self.segment_id,
         };
         self.documents.push(doc);
 
         // Add trigrams to postings
-        for trigram in trigrams {
+        for trigram in file.trigrams {
             self.trigram_postings
                 .entry(trigram)
                 .or_default()
@@ -1054,12 +1050,12 @@ impl IndexWriter {
         }
 
         // Add tokens to postings
-        for token in tokens {
+        for token in file.tokens {
             self.token_postings.entry(token).or_default().push(doc_id);
         }
 
         // Store line map
-        self.line_maps.insert(doc_id, line_offsets);
+        self.line_maps.insert(doc_id, file.line_offsets);
 
         Ok(doc_id)
     }

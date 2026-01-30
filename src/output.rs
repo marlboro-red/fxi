@@ -1,4 +1,31 @@
-//! Output formatting for ripgrep-like content search results
+//! Output formatting for search results.
+//!
+//! This module formats search results in a ripgrep-compatible style,
+//! providing familiar output for command-line users.
+//!
+//! ## Output Modes
+//!
+//! - **Default**: File path, line number, and highlighted matches
+//! - **Heading mode** (`--heading`): Group results by file
+//! - **Files only** (`-l`): Print only matching file names
+//! - **Count** (`-c`): Print match count per file
+//!
+//! ## Color Scheme
+//!
+//! - **Magenta**: File paths
+//! - **Green**: Line numbers
+//! - **Red (bold)**: Match highlights
+//! - **Cyan**: Context separators
+//!
+//! ## Example Output
+//!
+//! ```text
+//! src/main.rs
+//! 42:    let result = search_index("query");
+//! 43-    println!("{:?}", result);
+//! --
+//! 100:   search_index("another query");
+//! ```
 
 use crate::server::protocol::ContentMatch;
 use std::io::{self, Write};
