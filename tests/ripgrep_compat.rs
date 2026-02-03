@@ -907,6 +907,100 @@ fn test_multiple_flags_order() {
     assert_eq!(files1, files2, "Flag order should not affect results");
 }
 
+// ============================================================================
+// Binary File Exclusion Tests
+// ============================================================================
+
+/// Create a test directory with binary files for exclusion testing
+fn create_binary_test_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir()
+        .join("fxi_binary_test")
+        .join(format!("{}_{}", name, std::process::id()));
+
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("Failed to create test dir");
+
+    // Initialize git repo
+    Command::new("git")
+        .args(["init"])
+        .current_dir(&dir)
+        .output()
+        .expect("Failed to init git repo");
+
+    dir
+}
+
+#[test]
+fn test_binary_files_excluded_by_extension() {
+    let dir = create_binary_test_dir("ext");
+
+    // Create a text file with searchable content
+    fs::write(dir.join("code.rs"), "fn search_target() {}").unwrap();
+
+    // Create binary files with known extensions containing the same text
+    // These should be excluded based on extension alone
+    fs::write(dir.join("code.dll"), "fn search_target() {}").unwrap();
+    fs::write(dir.join("code.exe"), "fn search_target() {}").unwrap();
+    fs::write(dir.join("code.png"), "fn search_target() {}").unwrap();
+    fs::write(dir.join("code.zip"), "fn search_target() {}").unwrap();
+    fs::write(dir.join("code.pdf"), "fn search_target() {}").unwrap();
+
+    // Build index
+    let fxi = fxi_binary();
+    let output = Command::new(&fxi)
+        .args(["index", "--force"])
+        .arg(&dir)
+        .output()
+        .expect("Failed to run fxi index");
+    assert!(output.status.success(), "Index build should succeed");
+
+    // Search should only find the text file
+    let (stdout, _, success) = run_fxi(&["-l", "search_target"], &dir);
+    assert!(success, "Search should succeed");
+
+    let files = extract_files(&stdout);
+    assert_eq!(files.len(), 1, "Should find exactly one file");
+    assert!(
+        files.contains(&"code.rs".to_string()),
+        "Should find code.rs, got: {:?}",
+        files
+    );
+}
+
+#[test]
+fn test_binary_content_excluded() {
+    let dir = create_binary_test_dir("content");
+
+    // Create a text file
+    fs::write(dir.join("text.txt"), "findme in text file").unwrap();
+
+    // Create a file with binary content (null bytes) but text extension
+    let mut binary_content = b"findme in binary".to_vec();
+    binary_content.extend(vec![0u8; 1000]); // Add null bytes to trigger binary detection
+    fs::write(dir.join("binary.txt"), &binary_content).unwrap();
+
+    // Build index
+    let fxi = fxi_binary();
+    let output = Command::new(&fxi)
+        .args(["index", "--force"])
+        .arg(&dir)
+        .output()
+        .expect("Failed to run fxi index");
+    assert!(output.status.success(), "Index build should succeed");
+
+    // Search should only find the text file
+    let (stdout, _, success) = run_fxi(&["-l", "findme"], &dir);
+    assert!(success, "Search should succeed");
+
+    let files = extract_files(&stdout);
+    assert_eq!(files.len(), 1, "Should find exactly one file");
+    assert!(
+        files.contains(&"text.txt".to_string()),
+        "Should find text.txt, got: {:?}",
+        files
+    );
+}
+
 #[test]
 fn test_flag_multiple_patterns() {
     let dir = setup_fixtures();
