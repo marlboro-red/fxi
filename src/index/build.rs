@@ -231,11 +231,39 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
         let error_count_clone = error_count.clone();
         let total_processed_clone = total_processed.clone();
 
-        // Process chunk files in parallel using memory-mapped I/O
+        // Process chunk files in parallel
         let processed_files: Vec<ProcessedFile> = chunk
             .par_iter()
             .filter_map(|(full_path, rel_path)| {
-                // Use memory-mapped I/O for faster file reading
+                // Fast-path for known binary extensions - skip reading content entirely
+                let ext = rel_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let is_known_binary = matches!(ext.to_ascii_lowercase().as_str(),
+                    // Compiled/binary
+                    "dll" | "exe" | "pdb" | "so" | "dylib" | "a" | "lib" | "o" | "obj" |
+                    // Archives
+                    "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "nupkg" | "jar" | "war" | "ear" |
+                    // Images
+                    "png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "webp" | "tiff" | "tif" | "psd" |
+                    // Fonts
+                    "woff" | "woff2" | "ttf" | "eot" | "otf" |
+                    // Documents (binary formats)
+                    "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" |
+                    // Media
+                    "mp3" | "mp4" | "avi" | "mov" | "wav" | "ogg" | "flac" | "mkv" | "webm" |
+                    // Certificates/keys
+                    "snk" | "pfx" | "p12" | "cer" | "crt" | "p7s" | "p7b" |
+                    // Other binary/cache
+                    "cache" | "db" | "sqlite" | "mdb" | "ldf" | "mdf"
+                );
+
+                if is_known_binary {
+                    if let Some(ref pb) = pb_clone {
+                        pb.inc(1);
+                    }
+                    return None;
+                }
+
+                // Open file and get metadata
                 let file = match File::open(full_path) {
                     Ok(f) => f,
                     Err(_) => {
@@ -276,7 +304,7 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
                     return None;
                 }
 
-                // Use mmap for files, fall back to read for small files
+                // Use mmap for larger files, fall back to read for small files
                 let content: Vec<u8> = if file_size > 4096 {
                     match unsafe { Mmap::map(&file) } {
                         Ok(mmap) => mmap.to_vec(),
