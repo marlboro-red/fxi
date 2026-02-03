@@ -1,64 +1,96 @@
 use crate::index::types::{bytes_to_trigram, Trigram};
+use ahash::AHashSet;
 
-/// Bitset for tracking which trigrams have been seen.
-/// Uses 2MB to cover all 16M possible trigram values (24 bits).
-/// This is MUCH faster than HashSet for trigram deduplication.
-struct TrigramBitset {
-    bits: Vec<u64>,
+/// Fixed-size bitset for all possible trigrams (2^24 = 16M trigrams)
+/// Uses 2MB of memory but has O(1) insert/lookup with no hashing
+struct FullTrigramBitset {
+    bits: Vec<u64>, // 2^24 / 64 = 262144 u64s = 2MB
 }
 
-impl TrigramBitset {
-    /// Create a new bitset (2MB allocation, zeroed)
-    #[inline]
+impl FullTrigramBitset {
     fn new() -> Self {
-        // 16M trigrams / 64 bits per u64 = 262144 u64s = 2MB
         Self {
-            bits: vec![0u64; 262144],
+            bits: vec![0u64; 262144], // 2^24 / 64
         }
     }
 
-    /// Check if trigram is set and set it. Returns true if it was already set.
     #[inline]
-    fn test_and_set(&mut self, trigram: Trigram) -> bool {
-        let idx = (trigram >> 6) as usize; // divide by 64
-        let bit = 1u64 << (trigram & 63); // mod 64
-        let was_set = (self.bits[idx] & bit) != 0;
+    fn set(&mut self, trigram: Trigram) {
+        let idx = (trigram >> 6) as usize;
+        let bit = 1u64 << (trigram & 63);
         self.bits[idx] |= bit;
-        was_set
     }
 
-    /// Collect all set trigrams into a vector
-    fn collect(&self) -> Vec<Trigram> {
-        let mut result = Vec::with_capacity(8192); // reasonable initial capacity
-        for (word_idx, &word) in self.bits.iter().enumerate() {
-            if word == 0 {
-                continue;
-            }
-            let base = (word_idx as u32) << 6;
-            let mut w = word;
-            while w != 0 {
-                let bit_pos = w.trailing_zeros();
-                result.push(base | bit_pos);
-                w &= w - 1; // clear lowest set bit
+    fn collect(self) -> Vec<Trigram> {
+        let mut result = Vec::with_capacity(100_000);
+        for (idx, word) in self.bits.into_iter().enumerate() {
+            if word != 0 {
+                let base = (idx as u32) << 6;
+                let mut w = word;
+                while w != 0 {
+                    let bit_pos = w.trailing_zeros();
+                    result.push(base | bit_pos);
+                    w &= w - 1;
+                }
             }
         }
         result
     }
 }
 
-/// Extract unique trigrams from content using fast bitset deduplication.
-///
-/// OPTIMIZATION: Returns Vec<Trigram> instead of HashSet<Trigram> to avoid
-/// the overhead of hash table creation. Callers typically just iterate over
-/// the trigrams, so Vec is more efficient. The returned trigrams are unique
-/// but not sorted (unless using the small-file path which sorts for dedup).
+/// Sparse bitset for tracking which trigrams have been seen.
+/// Only allocates memory for 64-trigram blocks that are actually touched.
+/// Much faster than the old 2MB full bitset for typical source files.
+struct SparseTrigramBitset {
+    /// Map from block index to 64-bit word
+    blocks: ahash::AHashMap<u32, u64>,
+}
+
+impl SparseTrigramBitset {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            // Typical source files touch ~500-2000 unique 64-trigram blocks
+            blocks: ahash::AHashMap::with_capacity(512),
+        }
+    }
+
+    /// Check if trigram is set and set it. Returns true if it was already set.
+    #[inline]
+    fn test_and_set(&mut self, trigram: Trigram) -> bool {
+        let block_idx = trigram >> 6; // divide by 64
+        let bit = 1u64 << (trigram & 63); // mod 64
+        let word = self.blocks.entry(block_idx).or_insert(0);
+        let was_set = (*word & bit) != 0;
+        *word |= bit;
+        was_set
+    }
+
+    /// Collect all set trigrams into a vector
+    fn collect(self) -> Vec<Trigram> {
+        let mut result = Vec::with_capacity(self.blocks.len() * 32);
+        for (block_idx, word) in self.blocks {
+            let base = block_idx << 6;
+            let mut w = word;
+            while w != 0 {
+                let bit_pos = w.trailing_zeros();
+                result.push(base | bit_pos);
+                w &= w - 1;
+            }
+        }
+        result
+    }
+}
+
+/// Extract unique trigrams from content.
+/// Uses different strategies based on file size for optimal performance.
 pub fn extract_trigrams(content: &[u8]) -> Vec<Trigram> {
     if content.len() < 3 {
         return Vec::new();
     }
 
-    // For small files, use simple sort+dedup (more cache-friendly than bitset)
-    if content.len() < 1024 {
+    // For small files, use simple sort+dedup (more cache-friendly)
+    if content.len() < 4096 {
         let mut trigrams: Vec<Trigram> = content
             .windows(3)
             .map(|w| bytes_to_trigram(w[0], w[1], w[2]))
@@ -68,14 +100,34 @@ pub fn extract_trigrams(content: &[u8]) -> Vec<Trigram> {
         return trigrams;
     }
 
-    // For larger files, use bitset for O(1) dedup with no hashing overhead
-    let mut bitset = TrigramBitset::new();
-
-    for window in content.windows(3) {
-        let trigram = bytes_to_trigram(window[0], window[1], window[2]);
-        bitset.test_and_set(trigram);
+    // For medium files, use HashSet (tuned capacity for typical source files)
+    if content.len() < 100_000 {
+        // Tuned based on benchmarking - avoid over-allocation
+        let capacity = (content.len() / 8).min(8000);
+        let mut seen: AHashSet<Trigram> = AHashSet::with_capacity(capacity);
+        for window in content.windows(3) {
+            let trigram = bytes_to_trigram(window[0], window[1], window[2]);
+            seen.insert(trigram);
+        }
+        return seen.into_iter().collect();
     }
 
+    // For large files (<1MB), use sparse bitset
+    if content.len() < 1_000_000 {
+        let mut bitset = SparseTrigramBitset::new();
+        for window in content.windows(3) {
+            let trigram = bytes_to_trigram(window[0], window[1], window[2]);
+            bitset.test_and_set(trigram);
+        }
+        return bitset.collect();
+    }
+
+    // For very large files (>1MB), use full bitset - O(1) per trigram, no hashing
+    let mut bitset = FullTrigramBitset::new();
+    for window in content.windows(3) {
+        let trigram = bytes_to_trigram(window[0], window[1], window[2]);
+        bitset.set(trigram);
+    }
     bitset.collect()
 }
 
@@ -226,8 +278,8 @@ mod tests {
     }
 
     #[test]
-    fn test_trigram_bitset() {
-        let mut bitset = TrigramBitset::new();
+    fn test_trigram_sparse_bitset() {
+        let mut bitset = SparseTrigramBitset::new();
 
         // First insert should return false (wasn't set)
         assert!(!bitset.test_and_set(0x616263));
