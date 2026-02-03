@@ -4,6 +4,9 @@
 # Usage: .\scripts\benchmark-ab.ps1 -BaselineBranch main -TestBranch perf2 -Repo Glow
 #
 # Note: Copies release binary to vfp9.exe location to bypass Windows Defender scanning
+#
+# Tip: Set FXI_INDEXES to a Dev Drive path for faster I/O:
+#   $env:FXI_INDEXES = "D:\fxi\indexes"
 
 param(
     [string]$BaselineBranch = "main",
