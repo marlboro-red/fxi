@@ -15,7 +15,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Configuration
-$VFP9_PATH = "c:\git\OTHERS\dom\scoop\persist\rustup\.cargo\bin\vfp9.exe"
+$VFP9_PATH = (Get-Command vfp9).Source
 $REPOS = @{
     "Glow" = "C:\git\GitHub\WiseTechGlobal\Glow"
     "CargoWise" = "C:\git\GitHub\WiseTechGlobal\CargoWise"
