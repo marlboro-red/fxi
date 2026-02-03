@@ -34,7 +34,8 @@ if (-not (Test-Path $RepoPath)) {
 
 function Clear-Index {
     param([string]$RepoName)
-    $indexPattern = "$env:LOCALAPPDATA\fxi\indexes\$RepoName-*"
+    $indexesDir = if ($env:FXI_INDEXES) { $env:FXI_INDEXES } else { "$env:LOCALAPPDATA\fxi\indexes" }
+    $indexPattern = "$indexesDir\$RepoName-*"
     Remove-Item -Recurse -Force $indexPattern -ErrorAction SilentlyContinue
 }
 
@@ -107,15 +108,15 @@ Write-Host "Iterations: $Iterations"
 
 $originalBranch = git rev-parse --abbrev-ref HEAD
 
-# Run baseline
-Build-And-Deploy -Branch $BaselineBranch
-Write-Host "`n=== Benchmarking $BaselineBranch ===" -ForegroundColor Cyan
-$baselineResults = Run-Benchmark -Label $BaselineBranch -RepoPath $RepoPath -RepoName $Repo -Iterations $Iterations
-
-# Run test
+# Run test branch first
 Build-And-Deploy -Branch $TestBranch
 Write-Host "`n=== Benchmarking $TestBranch ===" -ForegroundColor Cyan
 $testResults = Run-Benchmark -Label $TestBranch -RepoPath $RepoPath -RepoName $Repo -Iterations $Iterations
+
+# Run baseline (main) after
+Build-And-Deploy -Branch $BaselineBranch
+Write-Host "`n=== Benchmarking $BaselineBranch ===" -ForegroundColor Cyan
+$baselineResults = Run-Benchmark -Label $BaselineBranch -RepoPath $RepoPath -RepoName $Repo -Iterations $Iterations
 
 # Restore original branch
 git checkout $originalBranch 2>$null
