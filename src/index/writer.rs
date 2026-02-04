@@ -196,54 +196,285 @@ impl ChunkedIndexWriter {
         fs::create_dir_all(&job.segment_path)?;
 
         let file_count = job.files.len();
+        let t_start = std::time::Instant::now();
 
-        // Use HashMap for O(1) insertion instead of BTreeMap's O(log n)
-        let mut trigram_postings: HashMap<Trigram, Vec<DocId>> = HashMap::with_capacity(file_count * 200);
-        let mut token_postings: HashMap<String, Vec<DocId>> = HashMap::with_capacity(file_count * 50);
-        let mut line_maps: HashMap<DocId, Vec<u32>> = HashMap::with_capacity(file_count);
+        // Flat vectors instead of HashMaps — just collect pairs, sort later
+        let mut trigram_pairs: Vec<(u32, u32)> = Vec::with_capacity(file_count * 500);
+        let mut token_pairs: Vec<(String, DocId)> = Vec::with_capacity(file_count * 50);
+        let mut line_maps: Vec<(DocId, Vec<u32>)> = Vec::with_capacity(file_count);
 
-        // Create bloom filter for this segment
-        let estimated_trigrams = file_count * 500;
-        let mut bloom_filter = BloomFilter::new(estimated_trigrams.max(10000), 0.01);
-
-        // Local frequency accumulator (batch update to shared map at end)
-        let mut local_frequencies: HashMap<Trigram, u32> = HashMap::with_capacity(file_count * 200);
-
-        // Process each file - collect postings
+        // Process each file - just append to flat vectors (no hashing)
         for file in job.files {
-            // Add trigrams to postings, bloom filter, and local frequencies
+            let doc_id = file.doc_id;
+
+            // Add trigram pairs
             for trigram in file.trigrams {
-                trigram_postings.entry(trigram).or_default().push(file.doc_id);
-                *local_frequencies.entry(trigram).or_insert(0) += 1;
-                bloom_filter.insert(trigram);
+                trigram_pairs.push((trigram, doc_id));
             }
 
-            // Add tokens to postings
+            // Add token pairs
             for token in file.tokens {
-                token_postings.entry(token).or_default().push(file.doc_id);
+                token_pairs.push((token, doc_id));
             }
 
             // Store line map
-            line_maps.insert(file.doc_id, file.line_offsets);
+            line_maps.push((doc_id, file.line_offsets));
         }
 
-        // Batch update shared frequency map (single lock acquisition)
-        // Use unwrap_or_else to handle poisoned locks gracefully - if another thread
-        // panicked while holding the lock, we recover by getting the inner data anyway
+        let t_collect = std::time::Instant::now();
+
+        // Sort flat pairs — par_sort is very cache-friendly on contiguous data
+        trigram_pairs.par_sort_unstable();
+        token_pairs.par_sort_unstable();
+
+        let t_sort = std::time::Instant::now();
+
+        // Build bloom filter from sorted unique trigrams only
+        let estimated_trigrams = file_count * 500;
+        let mut bloom_filter = BloomFilter::new(estimated_trigrams.max(10000), 0.01);
+        {
+            let mut prev: Option<u32> = None;
+            for &(trigram, _) in &trigram_pairs {
+                if prev != Some(trigram) {
+                    bloom_filter.insert(trigram);
+                    prev = Some(trigram);
+                }
+            }
+        }
+
+        let t_bloom = std::time::Instant::now();
+
+        // Derive frequencies from sorted pairs and batch update shared map
         {
             let mut freq_map = job.trigram_frequencies
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            for (trigram, count) in local_frequencies {
-                *freq_map.entry(trigram).or_insert(0) += count;
+            if !trigram_pairs.is_empty() {
+                let mut current = trigram_pairs[0].0;
+                let mut count: u32 = 1;
+                for &(trigram, _) in &trigram_pairs[1..] {
+                    if trigram == current {
+                        count += 1;
+                    } else {
+                        *freq_map.entry(current).or_insert(0) += count;
+                        current = trigram;
+                        count = 1;
+                    }
+                }
+                *freq_map.entry(current).or_insert(0) += count;
             }
         }
 
-        // Write all segment files (trigram and token indexes use parallel encoding)
-        Self::write_trigram_index_parallel(&job.segment_path, trigram_postings)?;
-        Self::write_token_index_parallel(&job.segment_path, token_postings)?;
-        Self::write_line_maps_static(&job.segment_path, &line_maps)?;
-        Self::write_bloom_filter(&job.segment_path, &bloom_filter)?;
+        let t_freq = std::time::Instant::now();
+
+        // Write all segment files concurrently
+        thread::scope(|s| {
+            let trigram_handle = s.spawn(|| {
+                Self::write_trigram_index_flat(&job.segment_path, &trigram_pairs)
+            });
+            let token_handle = s.spawn(|| {
+                Self::write_token_index_flat(&job.segment_path, &token_pairs)
+            });
+            let linemap_handle = s.spawn(|| {
+                Self::write_line_maps_flat(&job.segment_path, &line_maps)
+            });
+            let bloom_handle = s.spawn(|| {
+                Self::write_bloom_filter(&job.segment_path, &bloom_filter)
+            });
+
+            trigram_handle.join().unwrap()?;
+            token_handle.join().unwrap()?;
+            linemap_handle.join().unwrap()?;
+            bloom_handle.join().unwrap()?;
+            Ok::<(), anyhow::Error>(())
+        })?;
+
+        let t_write = std::time::Instant::now();
+
+        eprintln!(
+            "[seg{}] files={} pairs={} | collect={:?} sort={:?} bloom={:?} freq={:?} write={:?} TOTAL={:?}",
+            job.segment_id,
+            file_count,
+            trigram_pairs.len(),
+            t_collect - t_start,
+            t_sort - t_collect,
+            t_bloom - t_sort,
+            t_freq - t_bloom,
+            t_write - t_freq,
+            t_write - t_start,
+        );
+
+        Ok(())
+    }
+
+    /// Write trigram index from pre-sorted flat pairs
+    fn write_trigram_index_flat(segment_path: &Path, pairs: &[(u32, u32)]) -> Result<()> {
+        let dict_path = segment_path.join("grams.dict");
+        let postings_path = segment_path.join("grams.postings");
+
+        if pairs.is_empty() {
+            let mut dict_file = BufWriter::new(File::create(&dict_path)?);
+            let _ = File::create(&postings_path)?;
+            dict_file.write_all(&0u32.to_le_bytes())?;
+            return Ok(());
+        }
+
+        // Count unique trigrams and find group boundaries
+        let mut group_starts: Vec<usize> = Vec::with_capacity(pairs.len() / 10);
+        group_starts.push(0);
+        for i in 1..pairs.len() {
+            if pairs[i].0 != pairs[i - 1].0 {
+                group_starts.push(i);
+            }
+        }
+        let entry_count = group_starts.len();
+
+        // Parallel encode each group
+        let encoded: Vec<(u32, Vec<u8>, u32)> = group_starts
+            .par_iter()
+            .enumerate()
+            .map(|(idx, &start)| {
+                let end = group_starts.get(idx + 1).copied().unwrap_or(pairs.len());
+                let trigram = pairs[start].0;
+
+                // Collect unique doc_ids (already sorted by doc_id within group)
+                let mut doc_ids: Vec<u32> = Vec::with_capacity(end - start);
+                for &(_, doc_id) in &pairs[start..end] {
+                    if doc_ids.last() != Some(&doc_id) {
+                        doc_ids.push(doc_id);
+                    }
+                }
+
+                let doc_freq = doc_ids.len() as u32;
+                let mut enc = Vec::with_capacity(doc_ids.len() * 2);
+                delta_encode(&doc_ids, &mut enc);
+
+                (trigram, enc, doc_freq)
+            })
+            .collect();
+
+        // Pre-allocate buffers for single write
+        let total_postings: usize = encoded.iter().map(|(_, e, _)| e.len()).sum();
+        let mut dict_buf = Vec::with_capacity(4 + entry_count * 20);
+        let mut postings_buf = Vec::with_capacity(total_postings);
+
+        dict_buf.extend_from_slice(&(entry_count as u32).to_le_bytes());
+        let mut offset: u64 = 0;
+
+        for (trigram, enc, doc_freq) in &encoded {
+            dict_buf.extend_from_slice(&trigram.to_le_bytes());
+            dict_buf.extend_from_slice(&offset.to_le_bytes());
+            dict_buf.extend_from_slice(&(enc.len() as u32).to_le_bytes());
+            dict_buf.extend_from_slice(&doc_freq.to_le_bytes());
+            postings_buf.extend_from_slice(enc);
+            offset += enc.len() as u64;
+        }
+
+        // Single write per file
+        let mut dict_file = BufWriter::new(File::create(&dict_path)?);
+        let mut postings_file = BufWriter::new(File::create(&postings_path)?);
+        dict_file.write_all(&dict_buf)?;
+        postings_file.write_all(&postings_buf)?;
+
+        Ok(())
+    }
+
+    /// Write token index from pre-sorted flat pairs
+    fn write_token_index_flat(segment_path: &Path, pairs: &[(String, DocId)]) -> Result<()> {
+        let dict_path = segment_path.join("tokens.dict");
+        let postings_path = segment_path.join("tokens.postings");
+
+        if pairs.is_empty() {
+            let mut dict_file = BufWriter::new(File::create(&dict_path)?);
+            let _ = File::create(&postings_path)?;
+            dict_file.write_all(&0u32.to_le_bytes())?;
+            return Ok(());
+        }
+
+        // Find group boundaries
+        let mut group_starts: Vec<usize> = Vec::with_capacity(pairs.len() / 10);
+        group_starts.push(0);
+        for i in 1..pairs.len() {
+            if pairs[i].0 != pairs[i - 1].0 {
+                group_starts.push(i);
+            }
+        }
+        let entry_count = group_starts.len();
+
+        // Parallel encode
+        let encoded: Vec<(&str, Vec<u8>, u32)> = group_starts
+            .par_iter()
+            .enumerate()
+            .map(|(idx, &start)| {
+                let end = group_starts.get(idx + 1).copied().unwrap_or(pairs.len());
+                let token = pairs[start].0.as_str();
+
+                let mut doc_ids: Vec<u32> = Vec::with_capacity(end - start);
+                for (_, doc_id) in &pairs[start..end] {
+                    if doc_ids.last() != Some(doc_id) {
+                        doc_ids.push(*doc_id);
+                    }
+                }
+
+                let doc_freq = doc_ids.len() as u32;
+                let mut enc = Vec::with_capacity(doc_ids.len() * 2);
+                delta_encode(&doc_ids, &mut enc);
+
+                (token, enc, doc_freq)
+            })
+            .collect();
+
+        // Pre-allocate and build buffers
+        let total_postings: usize = encoded.iter().map(|(_, e, _)| e.len()).sum();
+        let total_dict: usize = 4 + encoded.iter().map(|(t, _, _)| 2 + t.len() + 16).sum::<usize>();
+        let mut dict_buf = Vec::with_capacity(total_dict);
+        let mut postings_buf = Vec::with_capacity(total_postings);
+
+        dict_buf.extend_from_slice(&(entry_count as u32).to_le_bytes());
+        let mut offset: u64 = 0;
+
+        for (token, enc, doc_freq) in &encoded {
+            let token_bytes = token.as_bytes();
+            dict_buf.extend_from_slice(&(token_bytes.len() as u16).to_le_bytes());
+            dict_buf.extend_from_slice(token_bytes);
+            dict_buf.extend_from_slice(&offset.to_le_bytes());
+            dict_buf.extend_from_slice(&(enc.len() as u32).to_le_bytes());
+            dict_buf.extend_from_slice(&doc_freq.to_le_bytes());
+            postings_buf.extend_from_slice(enc);
+            offset += enc.len() as u64;
+        }
+
+        let mut dict_file = BufWriter::new(File::create(&dict_path)?);
+        let mut postings_file = BufWriter::new(File::create(&postings_path)?);
+        dict_file.write_all(&dict_buf)?;
+        postings_file.write_all(&postings_buf)?;
+
+        Ok(())
+    }
+
+    /// Write line maps from flat vec
+    fn write_line_maps_flat(segment_path: &Path, line_maps: &[(DocId, Vec<u32>)]) -> Result<()> {
+        let path = segment_path.join("linemap.bin");
+
+        // Pre-allocate buffer
+        let estimated_size = 4 + line_maps.len() * 20;
+        let mut buf = Vec::with_capacity(estimated_size);
+        let mut encoded = Vec::with_capacity(1024);
+
+        buf.extend_from_slice(&(line_maps.len() as u32).to_le_bytes());
+
+        for (doc_id, offsets) in line_maps {
+            buf.extend_from_slice(&doc_id.to_le_bytes());
+            buf.extend_from_slice(&(offsets.len() as u32).to_le_bytes());
+
+            encoded.clear();
+            delta_encode(offsets, &mut encoded);
+            buf.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&encoded);
+        }
+
+        let mut file = BufWriter::new(File::create(&path)?);
+        file.write_all(&buf)?;
 
         Ok(())
     }
