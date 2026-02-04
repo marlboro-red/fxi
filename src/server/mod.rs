@@ -18,7 +18,9 @@ mod client_windows;
 #[cfg(windows)]
 pub mod daemon_windows;
 
+pub mod debouncer;
 pub mod protocol;
+pub mod watcher;
 
 #[cfg(unix)]
 pub use client_unix::IndexClient;

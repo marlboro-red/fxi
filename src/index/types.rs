@@ -217,6 +217,17 @@ pub struct IndexMeta {
     pub stop_grams: Vec<Trigram>,
     pub created_at: u64,
     pub updated_at: u64,
+    /// Number of tombstoned documents (for fragmentation tracking)
+    #[serde(default)]
+    pub tombstone_count: u32,
+    /// Number of valid (non-tombstone, non-stale) documents
+    #[serde(default)]
+    pub valid_doc_count: u32,
+    /// Baseline delta segment count (set after initial creation or merge).
+    /// New deltas from file watching = delta_segments.len() - delta_baseline.
+    /// This allows chunked initial indexes to not immediately trigger merging.
+    #[serde(default)]
+    pub delta_baseline: usize,
 }
 
 impl Default for IndexMeta {
@@ -231,6 +242,9 @@ impl Default for IndexMeta {
             stop_grams: Vec::new(),
             created_at: 0,
             updated_at: 0,
+            tombstone_count: 0,
+            valid_doc_count: 0,
+            delta_baseline: 0,
         }
     }
 }

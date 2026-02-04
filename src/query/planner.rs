@@ -48,13 +48,19 @@ pub enum VerificationStep {
     /// Literal substring match
     Literal(String),
     /// Literal with boost factor for scoring
-    BoostedLiteral { text: String, boost: f32 },
+    BoostedLiteral {
+        text: String,
+        boost: f32,
+    },
     /// Exact phrase match
     Phrase(String),
     /// Regex match
     Regex(String),
     /// Proximity search: terms must appear within distance lines
-    Near { terms: Vec<String>, distance: u32 },
+    Near {
+        terms: Vec<String>,
+        distance: u32,
+    },
     /// Compound verification
     And(Vec<VerificationStep>),
     Or(Vec<VerificationStep>),
@@ -147,10 +153,7 @@ impl QueryPlanner {
                         vec![PlanStep::TokenLookup(text.to_lowercase())]
                     };
 
-                    (
-                        steps,
-                        Some(VerificationStep::Literal(text.clone())),
-                    )
+                    (steps, Some(VerificationStep::Literal(text.clone())))
                 } else {
                     let trigrams = query_trigrams(text);
 
@@ -166,10 +169,7 @@ impl QueryPlanner {
                             return (Vec::new(), Some(VerificationStep::Literal(text.clone())));
                         }
 
-                        let steps: Vec<_> = tokens
-                            .into_iter()
-                            .map(PlanStep::TokenLookup)
-                            .collect();
+                        let steps: Vec<_> = tokens.into_iter().map(PlanStep::TokenLookup).collect();
 
                         (steps, Some(VerificationStep::Literal(text.clone())))
                     } else {
@@ -214,10 +214,7 @@ impl QueryPlanner {
                             );
                         }
 
-                        let steps: Vec<_> = tokens
-                            .into_iter()
-                            .map(PlanStep::TokenLookup)
-                            .collect();
+                        let steps: Vec<_> = tokens.into_iter().map(PlanStep::TokenLookup).collect();
 
                         (
                             steps,
@@ -244,6 +241,8 @@ impl QueryPlanner {
                 for term in terms {
                     all_trigrams.extend(query_trigrams(term));
                 }
+                all_trigrams.sort_unstable();
+                all_trigrams.dedup();
 
                 let steps = if all_trigrams.is_empty() {
                     // Use token lookups for short terms

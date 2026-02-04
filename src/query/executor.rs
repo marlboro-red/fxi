@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use regex::Regex;
 use roaring::RoaringBitmap;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,6 +24,22 @@ type FileMatch = (u32, String, usize, usize);
 
 /// Collected file matches with metadata: (doc_id, rel_path, mtime, matches)
 type FileMatchResult = (DocId, PathBuf, u64, Vec<FileMatch>);
+
+/// Precompiled filename filter matcher to avoid per-document recompilation.
+enum FilenameMatcher {
+    Exact(String),
+    Glob(globset::GlobMatcher),
+}
+
+impl FilenameMatcher {
+    #[inline]
+    fn is_match(&self, filename_lower: &str) -> bool {
+        match self {
+            Self::Exact(exact) => filename_lower == exact,
+            Self::Glob(glob) => glob.is_match(filename_lower),
+        }
+    }
+}
 
 /// Get the number of available CPU threads (cached for performance)
 fn get_num_threads() -> usize {
@@ -187,9 +203,10 @@ impl<'a> QueryExecutor<'a> {
 
         // Also find files whose names match the search terms
         if let Some(ref verification) = plan.verification {
-            let search_terms = Self::extract_search_terms(verification);
-            if !search_terms.is_empty() {
-                let filename_matches = self.find_filename_matches(&search_terms, query.options.limit)?;
+            let search_terms_lower = Self::extract_search_terms(verification);
+            if !search_terms_lower.is_empty() {
+                let filename_matches =
+                    self.find_filename_matches(&search_terms_lower, query.options.limit)?;
 
                 // Merge filename matches, avoiding duplicates
                 let existing_paths: std::collections::HashSet<PathBuf> =
@@ -289,8 +306,12 @@ impl<'a> QueryExecutor<'a> {
                         continue;
                     }
 
-                    let (ctx_before, ctx_after) =
-                        Self::extract_context_lines(&content, line_num, context_before, context_after);
+                    let (ctx_before, ctx_after) = Self::extract_context_lines(
+                        &content,
+                        line_num,
+                        context_before,
+                        context_after,
+                    );
 
                     all_results.push(ContentMatchResult {
                         path: rel_path.clone(),
@@ -329,8 +350,12 @@ impl<'a> QueryExecutor<'a> {
                             continue;
                         }
 
-                        let (ctx_before, ctx_after) =
-                            Self::extract_context_lines(&content, line_num, context_before, context_after);
+                        let (ctx_before, ctx_after) = Self::extract_context_lines(
+                            &content,
+                            line_num,
+                            context_before,
+                            context_after,
+                        );
 
                         matches.push(ContentMatchResult {
                             path: rel_path.clone(),
@@ -357,11 +382,9 @@ impl<'a> QueryExecutor<'a> {
         }
 
         // Sort by path and line number
-        all_results.sort_by(|a, b| {
-            match a.path.cmp(&b.path) {
-                std::cmp::Ordering::Equal => a.line_number.cmp(&b.line_number),
-                other => other,
-            }
+        all_results.sort_by(|a, b| match a.path.cmp(&b.path) {
+            std::cmp::Ordering::Equal => a.line_number.cmp(&b.line_number),
+            other => other,
         });
 
         Ok(all_results)
@@ -383,11 +406,15 @@ impl<'a> QueryExecutor<'a> {
                 let paths: Vec<PathBuf> = candidates
                     .iter()
                     .filter_map(|doc_id| {
-                        self.reader.get_document(doc_id).and_then(|doc| {
-                            self.reader.get_path(doc).cloned()
-                        })
+                        self.reader
+                            .get_document(doc_id)
+                            .and_then(|doc| self.reader.get_path(doc).cloned())
                     })
-                    .take(if file_limit == 0 { usize::MAX } else { file_limit })
+                    .take(if file_limit == 0 {
+                        usize::MAX
+                    } else {
+                        file_limit
+                    })
                     .collect();
                 return Ok(paths);
             }
@@ -407,7 +434,11 @@ impl<'a> QueryExecutor<'a> {
             .collect();
 
         let candidate_count = candidate_infos.len();
-        let effective_limit = if file_limit == 0 { usize::MAX } else { file_limit };
+        let effective_limit = if file_limit == 0 {
+            usize::MAX
+        } else {
+            file_limit
+        };
 
         // For files-only, we use parallel processing with early termination
         // Each file only needs to find ONE match to be included
@@ -470,30 +501,8 @@ impl<'a> QueryExecutor<'a> {
     /// Returns immediately on first match found
     fn has_match(content: &str, verification: &VerificationStep) -> bool {
         match verification {
-            VerificationStep::Literal(text) => {
-                // Case-insensitive search using memchr
-                use memchr::memmem;
-                let needle_lower = text.to_lowercase();
-                let finder = memmem::Finder::new(needle_lower.as_bytes());
-
-                for line in content.lines() {
-                    if line.is_ascii() && text.is_ascii() {
-                        // Fast ASCII path
-                        if line.to_ascii_lowercase().contains(&needle_lower) {
-                            return true;
-                        }
-                    } else {
-                        let line_lower = line.to_lowercase();
-                        if finder.find(line_lower.as_bytes()).is_some() {
-                            return true;
-                        }
-                    }
-                }
-                false
-            }
-            VerificationStep::BoostedLiteral { text, .. } => {
-                Self::has_match(content, &VerificationStep::Literal(text.clone()))
-            }
+            VerificationStep::Literal(text) => Self::has_literal_match(content, text),
+            VerificationStep::BoostedLiteral { text, .. } => Self::has_literal_match(content, text),
             VerificationStep::Phrase(text) => {
                 // Exact phrase match (case-sensitive)
                 content.contains(text)
@@ -505,19 +514,15 @@ impl<'a> QueryExecutor<'a> {
                     false
                 }
             }
-            VerificationStep::And(steps) => {
-                steps.iter().all(|step| Self::has_match(content, step))
-            }
-            VerificationStep::Or(steps) => {
-                steps.iter().any(|step| Self::has_match(content, step))
-            }
-            VerificationStep::Not(inner) => {
-                !Self::has_match(content, inner)
-            }
+            VerificationStep::And(steps) => steps.iter().all(|step| Self::has_match(content, step)),
+            VerificationStep::Or(steps) => steps.iter().any(|step| Self::has_match(content, step)),
+            VerificationStep::Not(inner) => !Self::has_match(content, inner),
             VerificationStep::Near { terms, distance } => {
                 // Simplified check for proximity - just verify all terms exist
                 let content_lower = content.to_lowercase();
-                let terms_exist = terms.iter().all(|t| content_lower.contains(&t.to_lowercase()));
+                let terms_exist = terms
+                    .iter()
+                    .all(|t| content_lower.contains(&t.to_lowercase()));
                 if !terms_exist {
                     return false;
                 }
@@ -525,6 +530,30 @@ impl<'a> QueryExecutor<'a> {
                 !Self::find_proximity_matches_static(content, terms, *distance, 0).is_empty()
             }
         }
+    }
+
+    /// Fast literal presence check for files-only mode.
+    #[inline]
+    fn has_literal_match(content: &str, text: &str) -> bool {
+        use memchr::memmem;
+
+        let needle_lower = text.to_lowercase();
+        let finder = memmem::Finder::new(needle_lower.as_bytes());
+
+        for line in content.lines() {
+            if line.is_ascii() && text.is_ascii() {
+                if line.to_ascii_lowercase().contains(&needle_lower) {
+                    return true;
+                }
+            } else {
+                let line_lower = line.to_lowercase();
+                if finder.find(line_lower.as_bytes()).is_some() {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
     /// Extract context lines around a match.
@@ -584,11 +613,13 @@ impl<'a> QueryExecutor<'a> {
             match step {
                 PlanStep::TrigramIntersect(trigrams) => {
                     // Filter out stop-grams
-                    let filtered_trigrams: Vec<_> = trigrams
+                    let mut filtered_trigrams: Vec<_> = trigrams
                         .iter()
                         .filter(|&&t| !self.reader.is_stop_gram(t))
                         .copied()
                         .collect();
+                    filtered_trigrams.sort_unstable();
+                    filtered_trigrams.dedup();
 
                     if !filtered_trigrams.is_empty() {
                         // Use bloom filter optimized path for multi-trigram queries
@@ -653,6 +684,12 @@ impl<'a> QueryExecutor<'a> {
                     candidates = Some(filtered);
                 }
             }
+
+            // Once candidates are empty, later intersections/unions in this plan
+            // cannot produce new matches, so exit early.
+            if candidates.as_ref().is_some_and(|c| c.is_empty()) {
+                break;
+            }
         }
 
         // Remove excluded documents using bitmap difference
@@ -670,115 +707,122 @@ impl<'a> QueryExecutor<'a> {
         filter: &FilterStep,
         candidates: Option<&RoaringBitmap>,
     ) -> Result<RoaringBitmap> {
-        // Get the set of doc_ids to filter
-        let owned_valid_docs;
-        let doc_ids: Vec<u32> = if let Some(cands) = candidates {
-            cands.iter().collect()
-        } else {
-            owned_valid_docs = self.reader.valid_doc_ids();
-            owned_valid_docs.iter().collect()
-        };
-
         let path_matcher = filter.path_glob.as_ref().map(|g| {
             Glob::new(g)
                 .unwrap_or_else(|_| Glob::new("*").unwrap())
                 .compile_matcher()
         });
 
-        // For filename filter, store the pattern for case-insensitive matching
-        let filename_pattern = filter.filename.clone();
+        let filename_matcher = filter.filename.as_ref().map(|pattern| {
+            let pattern_lower = pattern.to_lowercase();
+            if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
+                match Glob::new(&pattern_lower) {
+                    Ok(glob) => FilenameMatcher::Glob(glob.compile_matcher()),
+                    Err(_) => FilenameMatcher::Exact(pattern_lower),
+                }
+            } else {
+                FilenameMatcher::Exact(pattern_lower)
+            }
+        });
+
+        let language_filter = filter.language.as_deref().map(parse_language);
+        let needs_path =
+            path_matcher.is_some() || filename_matcher.is_some() || filter.extension.is_some();
 
         let mut result = RoaringBitmap::new();
 
-        for doc_id in doc_ids {
+        let mut check_doc = |doc_id: u32| {
             if let Some(doc) = self.reader.get_document(doc_id) {
                 // Skip stale/tombstone
                 if !doc.is_valid() {
-                    continue;
+                    return;
                 }
+
+                let path = if needs_path {
+                    self.reader.get_path(doc)
+                } else {
+                    None
+                };
 
                 // Path filter
                 if let Some(ref matcher) = path_matcher
-                    && let Some(path) = self.reader.get_path(doc)
-                    && !matcher.is_match(path)
+                    && !path.map(|p| matcher.is_match(p)).unwrap_or(false)
                 {
-                    continue;
+                    return;
                 }
 
                 // Filename filter (case-insensitive, exact match unless glob pattern)
-                if let Some(ref pattern) = filename_pattern {
-                    if let Some(path) = self.reader.get_path(doc) {
-                        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                        let filename_lower = filename.to_lowercase();
-                        let pattern_lower = pattern.to_lowercase();
+                if let Some(ref matcher) = filename_matcher {
+                    let filename_lower = path
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_lowercase());
 
-                        // Support glob patterns or exact matching
-                        let matches = if pattern.contains('*') || pattern.contains('?') {
-                            // Glob pattern: use glob matching
-                            Glob::new(&pattern_lower)
-                                .map(|g| g.compile_matcher().is_match(&filename_lower))
-                                .unwrap_or(false)
-                        } else {
-                            // Exact match: filename must equal pattern exactly
-                            filename_lower == pattern_lower
-                        };
-
-                        if !matches {
-                            continue;
-                        }
-                    } else {
-                        continue;
+                    if !filename_lower
+                        .as_deref()
+                        .map(|name| matcher.is_match(name))
+                        .unwrap_or(false)
+                    {
+                        return;
                     }
                 }
 
                 // Extension filter
                 if let Some(ref ext) = filter.extension {
-                    if let Some(path) = self.reader.get_path(doc) {
-                        let file_ext = path
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .unwrap_or("");
+                    if let Some(path) = path {
+                        let file_ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                         if !file_ext.eq_ignore_ascii_case(ext) {
-                            continue;
+                            return;
                         }
                     } else {
-                        continue;
+                        return;
                     }
                 }
 
                 // Language filter
-                if let Some(ref lang) = filter.language {
-                    let lang_enum = parse_language(lang);
-                    if doc.language != lang_enum {
-                        continue;
-                    }
+                if language_filter
+                    .map(|lang| doc.language != lang)
+                    .unwrap_or(false)
+                {
+                    return;
                 }
 
                 // Size filters
                 if let Some(min) = filter.size_min
                     && doc.size < min
                 {
-                    continue;
+                    return;
                 }
                 if let Some(max) = filter.size_max
                     && doc.size > max
                 {
-                    continue;
+                    return;
                 }
 
                 // Modification time filters
                 if let Some(min) = filter.mtime_min
                     && doc.mtime < min
                 {
-                    continue;
+                    return;
                 }
                 if let Some(max) = filter.mtime_max
                     && doc.mtime > max
                 {
-                    continue;
+                    return;
                 }
 
                 result.insert(doc_id);
+            }
+        };
+
+        if let Some(cands) = candidates {
+            for doc_id in cands.iter() {
+                check_doc(doc_id);
+            }
+        } else {
+            let valid_docs = self.reader.valid_doc_ids();
+            for doc_id in valid_docs.iter() {
+                check_doc(doc_id);
             }
         }
 
@@ -809,17 +853,26 @@ impl<'a> QueryExecutor<'a> {
         Ok(matches)
     }
 
+    /// Check if filename contains any search term (all terms must already be lowercase).
+    #[inline]
+    fn filename_matches_terms(path: &Path, terms_lower: &[String]) -> bool {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|filename| {
+                let filename_lower = filename.to_lowercase();
+                terms_lower.iter().any(|term| filename_lower.contains(term))
+            })
+            .unwrap_or(false)
+    }
+
     /// Find files whose names contain any of the search terms
     fn find_filename_matches(
         &self,
-        search_terms: &[String],
+        search_terms_lower: &[String],
         limit: usize,
     ) -> Result<Vec<SearchMatch>> {
         let mut matches = Vec::new();
         let valid_docs = self.reader.valid_doc_ids();
-
-        // Convert search terms to lowercase for case-insensitive matching
-        let terms_lower: Vec<String> = search_terms.iter().map(|t| t.to_lowercase()).collect();
 
         for doc_id in valid_docs.iter() {
             if matches.len() >= limit {
@@ -829,16 +882,7 @@ impl<'a> QueryExecutor<'a> {
             if let Some(doc) = self.reader.get_document(doc_id)
                 && let Some(path) = self.reader.get_path(doc)
             {
-                let filename = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-
-                // Check if filename contains any search term
-                let matches_term = terms_lower.iter().any(|term| filename.contains(term));
-
-                if matches_term {
+                if Self::filename_matches_terms(path, search_terms_lower) {
                     matches.push(SearchMatch {
                         doc_id,
                         path: path.clone(),
@@ -870,7 +914,7 @@ impl<'a> QueryExecutor<'a> {
         };
 
         // Extract search terms for filename matching
-        let search_terms = Arc::new(Self::extract_search_terms(verification));
+        let search_terms_lower = Self::extract_search_terms(verification);
 
         // Extract boost factor from verification steps
         let boost = Self::extract_boost(verification);
@@ -919,8 +963,7 @@ impl<'a> QueryExecutor<'a> {
                 };
 
                 // Find matches
-                let mut file_matches =
-                    Self::verify_content_static(&content, verification, doc_id);
+                let mut file_matches = Self::verify_content_static(&content, verification, doc_id);
 
                 // Apply line filter if specified
                 if line_start.is_some() || line_end.is_some() {
@@ -984,9 +1027,7 @@ impl<'a> QueryExecutor<'a> {
 
         for (doc_id, path, mtime, file_matches) in all_matches {
             // Build score context
-            let filename_match = search_terms
-                .iter()
-                .any(|term| Scorer::term_in_filename(&path, term));
+            let filename_match = Self::filename_matches_terms(&path, &search_terms_lower);
 
             let score_ctx = ScoreContext {
                 match_count: file_matches.len(),
@@ -1043,7 +1084,18 @@ impl<'a> QueryExecutor<'a> {
     fn extract_search_terms(verification: &VerificationStep) -> Vec<String> {
         let mut terms = Vec::new();
         Self::collect_terms(verification, &mut terms);
-        terms
+
+        // Normalize to lowercase and de-duplicate while preserving insertion order.
+        let mut seen = HashSet::with_capacity(terms.len());
+        let mut normalized = Vec::with_capacity(terms.len());
+        for term in terms {
+            let lower = term.to_lowercase();
+            if seen.insert(lower.clone()) {
+                normalized.push(lower);
+            }
+        }
+
+        normalized
     }
 
     /// Recursively collect terms from verification steps
@@ -1075,7 +1127,9 @@ impl<'a> QueryExecutor<'a> {
                     terms.push(literal);
                 }
             }
-            VerificationStep::Near { terms: near_terms, .. } => {
+            VerificationStep::Near {
+                terms: near_terms, ..
+            } => {
                 // Include all proximity search terms
                 for term in near_terms {
                     if term.len() >= 2 {
@@ -1163,7 +1217,6 @@ impl<'a> QueryExecutor<'a> {
         }
     }
 
-
     /// Find proximity matches: all terms must appear within distance lines of each other (static)
     ///
     /// OPTIMIZATION: Uses lazy lowercasing - only lowercases lines that might contain
@@ -1211,9 +1264,10 @@ impl<'a> QueryExecutor<'a> {
                     if line_bytes.len() >= term_bytes.len() {
                         // Check if lowercased bytes match anywhere
                         (0..=(line_bytes.len() - term_bytes.len())).any(|i| {
-                            term_bytes.iter().enumerate().all(|(j, &tb)| {
-                                line_bytes[i + j].to_ascii_lowercase() == tb
-                            })
+                            term_bytes
+                                .iter()
+                                .enumerate()
+                                .all(|(j, &tb)| line_bytes[i + j].to_ascii_lowercase() == tb)
                         })
                     } else {
                         false
@@ -1246,9 +1300,9 @@ impl<'a> QueryExecutor<'a> {
 
             // Check if all other terms have a match within distance
             for other_term_lines in term_lines.iter().skip(1) {
-                let has_nearby = other_term_lines.iter().any(|&other_line| {
-                    first_line.abs_diff(other_line) <= distance
-                });
+                let has_nearby = other_term_lines
+                    .iter()
+                    .any(|&other_line| first_line.abs_diff(other_line) <= distance);
 
                 if !has_nearby {
                     all_within_distance = false;
@@ -1262,12 +1316,7 @@ impl<'a> QueryExecutor<'a> {
                 if let Some(&line) = lines.get(line_idx) {
                     let line_lower = line.to_lowercase();
                     if let Some(pos) = line_lower.find(&terms_lower[0]) {
-                        matches.push((
-                            first_line,
-                            line.to_string(),
-                            pos,
-                            pos + terms[0].len(),
-                        ));
+                        matches.push((first_line, line.to_string(), pos, pos + terms[0].len()));
                     }
                 }
             }
@@ -1275,7 +1324,6 @@ impl<'a> QueryExecutor<'a> {
 
         matches
     }
-
 
     /// Find literal string matches using memchr for fast search (static)
     /// Optimized single-pass iteration for both case-sensitive and case-insensitive modes
@@ -1362,7 +1410,6 @@ impl<'a> QueryExecutor<'a> {
         matches
     }
 
-
     /// Find regex matches (static)
     fn find_regex_matches_static(
         content: &str,
@@ -1373,18 +1420,12 @@ impl<'a> QueryExecutor<'a> {
 
         for (line_num, line) in content.lines().enumerate() {
             if let Some(m) = regex.find(line) {
-                matches.push((
-                    (line_num + 1) as u32,
-                    line.to_string(),
-                    m.start(),
-                    m.end(),
-                ));
+                matches.push(((line_num + 1) as u32, line.to_string(), m.start(), m.end()));
             }
         }
 
         matches
     }
-
 
     /// Sort results by the specified order
     fn sort_results(&self, results: &mut [SearchMatch], order: SortOrder) {
@@ -1519,7 +1560,9 @@ def format_warning(msg: str) -> str:
 
         // Should find main.rs
         assert!(
-            results.iter().any(|m| m.path.to_string_lossy().contains("main.rs")),
+            results
+                .iter()
+                .any(|m| m.path.to_string_lossy().contains("main.rs")),
             "Should find main.rs"
         );
     }
@@ -1545,7 +1588,10 @@ def format_warning(msg: str) -> str:
         let query = parse_query("xyznonexistent123abc");
         let results = executor.execute(&query);
 
-        assert!(results.is_ok(), "Search should succeed even with no matches");
+        assert!(
+            results.is_ok(),
+            "Search should succeed even with no matches"
+        );
         let results = results.unwrap();
         assert!(results.is_empty(), "Should find no matches");
     }
@@ -1583,7 +1629,9 @@ def format_warning(msg: str) -> str:
 
         // Should find Python files
         assert!(
-            results.iter().any(|m| m.path.to_string_lossy().contains(".py")),
+            results
+                .iter()
+                .any(|m| m.path.to_string_lossy().contains(".py")),
             "Should find Python files"
         );
     }
@@ -1708,7 +1756,11 @@ def format_warning(msg: str) -> str:
 
         let matches = QueryExecutor::find_literal_matches_static(content, "Hello", true, 1);
 
-        assert_eq!(matches.len(), 1, "Case-sensitive should find exactly 1 match");
+        assert_eq!(
+            matches.len(),
+            1,
+            "Case-sensitive should find exactly 1 match"
+        );
         assert_eq!(matches[0].0, 1, "Match should be on line 1");
     }
 
@@ -1718,6 +1770,10 @@ def format_warning(msg: str) -> str:
 
         let matches = QueryExecutor::find_literal_matches_static(content, "hello", false, 1);
 
-        assert_eq!(matches.len(), 3, "Case-insensitive should find all 3 matches");
+        assert_eq!(
+            matches.len(),
+            3,
+            "Case-insensitive should find all 3 matches"
+        );
     }
 }

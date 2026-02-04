@@ -145,8 +145,7 @@ impl SegmentReader {
 
     /// Get documents matching a token in this segment as a RoaringBitmap
     fn get_token_docs(&self, token: &str) -> RoaringBitmap {
-        let lower = token.to_lowercase();
-        if let Some(entry) = self.token_dict.lookup(&lower) {
+        if let Some(entry) = self.token_dict.lookup(token) {
             let start = entry.offset as usize;
             let end = start + entry.length as usize;
 
@@ -160,9 +159,9 @@ impl SegmentReader {
 
     /// Get line map for a document in this segment (lazy loads on first access)
     fn get_line_map(&self, doc_id: DocId) -> Option<&Vec<u32>> {
-        let line_maps = self.line_maps.get_or_init(|| {
-            read_line_maps(&self.segment_path).unwrap_or_default()
-        });
+        let line_maps = self
+            .line_maps
+            .get_or_init(|| read_line_maps(&self.segment_path).unwrap_or_default());
         line_maps.get(&doc_id)
     }
 
@@ -210,6 +209,9 @@ impl IndexReader {
         if !index_path.exists() {
             anyhow::bail!("No index found. Run 'fxi index' first.");
         }
+
+        // Cleanup stale .tmp files from interrupted operations (crash safety)
+        cleanup_tmp_files(&index_path);
 
         // Read metadata first (needed for segment IDs)
         let meta_path = index_path.join("meta.json");
@@ -309,29 +311,23 @@ impl IndexReader {
     /// Returns None if the path would escape the root directory (security check).
     pub fn get_full_path(&self, doc: &Document) -> Option<PathBuf> {
         let rel_path = self.get_path(doc)?;
-        let full_path = self.root_path.join(rel_path);
-
-        // Security: Verify the path doesn't escape the root directory
-        // This protects against malicious index files with paths like "../../../etc/passwd"
-        match full_path.canonicalize() {
-            Ok(canonical) => {
-                if canonical.starts_with(&self.root_path) {
-                    Some(full_path)
-                } else {
-                    // Path escapes root - reject it
-                    None
-                }
-            }
-            Err(_) => {
-                // File doesn't exist or can't be accessed - return the path anyway
-                // but only if it doesn't contain suspicious components
-                if rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-                    None // Contains ".." - reject
-                } else {
-                    Some(full_path)
-                }
-            }
+        // Fast lexical validation instead of per-query canonicalize() syscalls.
+        // Indexed paths should always be relative; reject suspicious components.
+        if rel_path.is_absolute() {
+            return None;
         }
+        if rel_path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        }) {
+            return None;
+        }
+
+        Some(self.root_path.join(rel_path))
     }
 
     /// Get all documents
@@ -360,18 +356,18 @@ impl IndexReader {
         }
     }
 
-
     /// Get documents matching a token (queries all segments in parallel) as a RoaringBitmap
     pub fn get_token_docs(&self, token: &str) -> RoaringBitmap {
+        let token_lower = token.to_lowercase();
         if self.segments.len() <= 1 {
             self.segments
                 .first()
-                .map(|s| s.get_token_docs(token))
+                .map(|s| s.get_token_docs(&token_lower))
                 .unwrap_or_default()
         } else {
             self.segments
                 .par_iter()
-                .map(|segment| segment.get_token_docs(token))
+                .map(|segment| segment.get_token_docs(&token_lower))
                 .reduce(RoaringBitmap::new, |mut a, b| {
                     a |= b;
                     a
@@ -420,7 +416,9 @@ impl IndexReader {
             return true;
         }
         // If any segment might contain all trigrams, return true
-        self.segments.iter().any(|s| s.might_contain_trigrams(trigrams))
+        self.segments
+            .iter()
+            .any(|s| s.might_contain_trigrams(trigrams))
     }
 
     /// Get documents matching trigrams, but only from segments that pass bloom filter.
@@ -548,7 +546,7 @@ impl IndexReader {
 }
 
 /// Read documents from docs.bin
-fn read_documents(index_path: &Path) -> Result<Vec<Document>> {
+pub fn read_documents(index_path: &Path) -> Result<Vec<Document>> {
     let docs_path = index_path.join("docs.bin");
     let mut file = BufReader::new(File::open(&docs_path)?);
 
@@ -600,7 +598,7 @@ fn read_documents(index_path: &Path) -> Result<Vec<Document>> {
 }
 
 /// Read paths from paths.bin
-fn read_paths(index_path: &Path) -> Result<Vec<PathBuf>> {
+pub fn read_paths(index_path: &Path) -> Result<Vec<PathBuf>> {
     let paths_path = index_path.join("paths.bin");
     let mut file = BufReader::new(File::open(&paths_path)?);
 
@@ -704,8 +702,12 @@ fn read_token_dict(segment_path: &Path) -> Result<TokenDict> {
 
     for i in 0..count {
         // token length (u16)
-        file.read_exact(&mut buf2)
-            .with_context(|| format!("Token dictionary truncated at entry {}/{} - index may be corrupted", i, count))?;
+        file.read_exact(&mut buf2).with_context(|| {
+            format!(
+                "Token dictionary truncated at entry {}/{} - index may be corrupted",
+                i, count
+            )
+        })?;
         let token_len = u16::from_le_bytes(buf2) as usize;
 
         // token bytes
@@ -814,6 +816,39 @@ fn read_bloom_filter(segment_path: &Path) -> Result<BloomFilter> {
     Ok(BloomFilter::from_raw(bits, num_hashes))
 }
 
+/// Cleanup stale .tmp files from interrupted operations (crash safety).
+/// This removes leftover temporary files that may exist from a crashed/interrupted
+/// merge or delta segment write operation.
+fn cleanup_tmp_files(index_path: &Path) {
+    // Clean up .tmp files in the index directory
+    let tmp_patterns = ["docs.bin.tmp", "paths.bin.tmp", "meta.json.tmp"];
+
+    for pattern in &tmp_patterns {
+        let tmp_path = index_path.join(pattern);
+        if tmp_path.exists() {
+            if let Err(e) = std::fs::remove_file(&tmp_path) {
+                eprintln!("Warning: failed to cleanup {}: {}", tmp_path.display(), e);
+            }
+        }
+    }
+
+    // Clean up any .tmp segment directories in segments/
+    let segments_path = index_path.join("segments");
+    if segments_path.exists() {
+        if let Ok(entries) = std::fs::read_dir(&segments_path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.ends_with(".tmp") {
+                    if let Err(e) = std::fs::remove_dir_all(entry.path()) {
+                        eprintln!("Warning: failed to cleanup {}: {}", entry.path().display(), e);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,8 +861,11 @@ mod tests {
         let root_path = temp_dir.path().to_path_buf();
 
         // Create a test file
-        fs::write(root_path.join("test.rs"), "fn main() {\n    println!(\"hello\");\n}\n")
-            .expect("Failed to write test file");
+        fs::write(
+            root_path.join("test.rs"),
+            "fn main() {\n    println!(\"hello\");\n}\n",
+        )
+        .expect("Failed to write test file");
 
         // Build index
         crate::index::build::build_index(&root_path, false).expect("Failed to build index");
@@ -843,7 +881,10 @@ mod tests {
         assert!(reader.is_ok(), "Should open index successfully");
 
         let reader = reader.unwrap();
-        assert!(reader.meta.doc_count > 0, "Should have at least one document");
+        assert!(
+            reader.meta.doc_count > 0,
+            "Should have at least one document"
+        );
     }
 
     #[test]
@@ -936,7 +977,10 @@ mod tests {
         assert!(!docs.is_empty(), "Should find documents with 'main' token");
 
         let docs = reader.get_token_docs("println");
-        assert!(!docs.is_empty(), "Should find documents with 'println' token");
+        assert!(
+            !docs.is_empty(),
+            "Should find documents with 'println' token"
+        );
     }
 
     #[test]
@@ -985,7 +1029,11 @@ mod tests {
         // Verify the returned path is within root
         let full_path = full_path.unwrap();
         assert!(
-            full_path.starts_with(&root_path) || full_path.canonicalize().unwrap().starts_with(root_path.canonicalize().unwrap()),
+            full_path.starts_with(&root_path)
+                || full_path
+                    .canonicalize()
+                    .unwrap()
+                    .starts_with(root_path.canonicalize().unwrap()),
             "Path should be within root directory"
         );
     }

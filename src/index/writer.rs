@@ -577,6 +577,12 @@ impl ChunkedIndexWriter {
             (Some(self.segment_ids[0]), self.segment_ids[1..].to_vec())
         };
 
+        // Compute valid doc count (no tombstones in fresh index)
+        let valid_doc_count = self.all_documents.len() as u32;
+
+        // Set delta_baseline to current delta count so chunked indexes don't immediately trigger merge
+        let delta_baseline = delta_segments.len();
+
         let meta = IndexMeta {
             version: 1,
             root_path: self.root_path.clone(),
@@ -587,6 +593,9 @@ impl ChunkedIndexWriter {
             stop_grams: stop_grams.iter().copied().collect(),
             created_at: now,
             updated_at: now,
+            tombstone_count: 0, // Fresh index has no tombstones
+            valid_doc_count,
+            delta_baseline,
         };
 
         let meta_path = self.index_path.join("meta.json");
@@ -985,6 +994,8 @@ impl IndexWriter {
             .unwrap()
             .as_secs();
 
+        let valid_doc_count = self.documents.len() as u32;
+
         let meta = IndexMeta {
             version: 1,
             root_path: self.root_path.clone(),
@@ -995,6 +1006,9 @@ impl IndexWriter {
             stop_grams: stop_grams.iter().copied().collect(),
             created_at: now,
             updated_at: now,
+            tombstone_count: 0, // Fresh index has no tombstones
+            valid_doc_count,
+            delta_baseline: 0, // No delta segments in single-segment index
         };
 
         let meta_path = self.index_path.join("meta.json");
@@ -1168,6 +1182,437 @@ fn build_line_map(content: &[u8]) -> Vec<u32> {
     }
 
     offsets
+}
+
+// =============================================================================
+// Delta Segment Writer - For incremental index updates
+// =============================================================================
+
+/// Maximum number of delta segments before forcing a full rebuild
+
+/// Delta segment writer for incremental index updates.
+/// Loads existing index data and writes a new delta segment containing only changed files.
+pub struct DeltaSegmentWriter {
+    #[allow(dead_code)]
+    root_path: PathBuf,
+    index_path: PathBuf,
+    segment_id: SegmentId,
+
+    // Loaded from existing index
+    existing_documents: Vec<Document>,
+    existing_paths: Vec<PathBuf>,
+    path_to_id: HashMap<PathBuf, PathId>,
+
+    // New data for this delta
+    new_documents: Vec<Document>,
+    new_paths: Vec<PathBuf>,
+    next_doc_id: DocId,
+    next_path_id: PathId,
+    trigram_postings: BTreeMap<Trigram, Vec<DocId>>,
+    token_postings: BTreeMap<String, Vec<DocId>>,
+    line_maps: HashMap<DocId, Vec<u32>>,
+
+    // Docs to mark as tombstones
+    tombstone_doc_ids: Vec<DocId>,
+}
+
+impl DeltaSegmentWriter {
+    /// Create a new delta segment writer.
+    /// Loads existing documents and paths from the index.
+    pub fn new(root_path: &Path, segment_id: SegmentId) -> Result<Self> {
+        let root_path = root_path.canonicalize()?;
+        let index_path = get_index_dir(&root_path)?;
+
+        // Load existing documents and paths
+        let existing_documents = crate::index::reader::read_documents(&index_path)?;
+        let existing_paths = crate::index::reader::read_paths(&index_path)?;
+
+        // Build path lookup map
+        let mut path_to_id: HashMap<PathBuf, PathId> = HashMap::new();
+        for (idx, path) in existing_paths.iter().enumerate() {
+            path_to_id.insert(path.clone(), idx as PathId);
+        }
+
+        // Calculate next IDs
+        let next_doc_id = existing_documents.iter().map(|d| d.doc_id).max().unwrap_or(0) + 1;
+        let next_path_id = existing_paths.len() as PathId;
+
+        Ok(Self {
+            root_path,
+            index_path,
+            segment_id,
+            existing_documents,
+            existing_paths,
+            path_to_id,
+            new_documents: Vec::new(),
+            new_paths: Vec::new(),
+            next_doc_id,
+            next_path_id,
+            trigram_postings: BTreeMap::new(),
+            token_postings: BTreeMap::new(),
+            line_maps: HashMap::new(),
+            tombstone_doc_ids: Vec::new(),
+        })
+    }
+
+    /// Mark a document as a tombstone by its relative path.
+    /// The document will be marked as deleted in docs.bin but its segment data remains.
+    pub fn mark_tombstone(&mut self, rel_path: &Path) {
+        // Find the path_id for this path
+        if let Some(&path_id) = self.path_to_id.get(rel_path) {
+            // Find the doc_id for this path_id (most recent non-tombstone)
+            for doc in self.existing_documents.iter().rev() {
+                if doc.path_id == path_id && doc.is_valid() {
+                    self.tombstone_doc_ids.push(doc.doc_id);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Get or create a path ID for the given relative path
+    fn get_or_create_path_id(&mut self, rel_path: &Path) -> PathId {
+        if let Some(&path_id) = self.path_to_id.get(rel_path) {
+            return path_id;
+        }
+
+        // New path - assign next ID
+        let path_id = self.next_path_id;
+        self.next_path_id += 1;
+        self.new_paths.push(rel_path.to_path_buf());
+        self.path_to_id.insert(rel_path.to_path_buf(), path_id);
+        path_id
+    }
+
+    /// Add a processed file to the delta segment
+    pub fn add_file(&mut self, processed: ProcessedFile) {
+        let doc_id = self.next_doc_id;
+        self.next_doc_id += 1;
+
+        let path_id = self.get_or_create_path_id(&processed.rel_path);
+
+        // Create document entry
+        let doc = Document {
+            doc_id,
+            path_id,
+            size: processed.size,
+            mtime: processed.mtime,
+            language: processed.language,
+            flags: processed.flags,
+            segment_id: self.segment_id,
+        };
+        self.new_documents.push(doc);
+
+        // Add trigrams to postings
+        for trigram in processed.trigrams {
+            self.trigram_postings.entry(trigram).or_default().push(doc_id);
+        }
+
+        // Add tokens to postings
+        for token in processed.tokens {
+            self.token_postings.entry(token).or_default().push(doc_id);
+        }
+
+        // Store line map
+        self.line_maps.insert(doc_id, processed.line_offsets);
+    }
+
+    /// Check if there are any changes to write
+    pub fn has_changes(&self) -> bool {
+        !self.new_documents.is_empty() || !self.tombstone_doc_ids.is_empty()
+    }
+
+    /// Finalize the delta segment - write all data atomically.
+    /// Returns the updated IndexMeta.
+    pub fn finalize(self, meta: &mut IndexMeta) -> Result<()> {
+        // If no changes, nothing to do
+        if !self.has_changes() {
+            return Ok(());
+        }
+
+        // Create segment directory if we have new documents
+        if !self.new_documents.is_empty() {
+            let segment_path = self.index_path
+                .join("segments")
+                .join(format!("seg_{:04}", self.segment_id));
+            fs::create_dir_all(&segment_path)?;
+
+            // Write segment files
+            self.write_segment_files(&segment_path)?;
+        }
+
+        // Merge existing and new documents, applying tombstones
+        let tombstone_set: HashSet<DocId> = self.tombstone_doc_ids.iter().copied().collect();
+        let mut all_documents: Vec<Document> = self.existing_documents
+            .into_iter()
+            .map(|mut doc| {
+                if tombstone_set.contains(&doc.doc_id) {
+                    doc.flags.set_tombstone();
+                }
+                doc
+            })
+            .collect();
+        all_documents.extend(self.new_documents);
+
+        // Merge paths
+        let mut all_paths = self.existing_paths;
+        all_paths.extend(self.new_paths);
+
+        // Write atomically: segment → docs.bin → paths.bin → meta.json
+        // (Segment already written above)
+
+        // Update docs.bin atomically
+        write_documents_atomic(&self.index_path, &all_documents)?;
+
+        // Update paths.bin atomically
+        write_paths_atomic(&self.index_path, &all_paths)?;
+
+        // Update meta
+        meta.doc_count = all_documents.len() as u32;
+        meta.delta_segments.push(self.segment_id);
+        meta.segment_count = 1 + meta.delta_segments.len() as u16;
+        meta.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Track fragmentation metrics
+        meta.tombstone_count = all_documents
+            .iter()
+            .filter(|d| d.flags.is_tombstone())
+            .count() as u32;
+        meta.valid_doc_count = all_documents
+            .iter()
+            .filter(|d| d.is_valid())
+            .count() as u32;
+
+        // Write meta.json atomically (commits the transaction)
+        write_meta_atomic(&self.index_path, meta)?;
+
+        Ok(())
+    }
+
+    /// Write segment files (trigrams, tokens, line maps, bloom filter)
+    fn write_segment_files(&self, segment_path: &Path) -> Result<()> {
+        // Compute bloom filter
+        let estimated_trigrams = self.trigram_postings.len();
+        let mut bloom_filter = BloomFilter::new(estimated_trigrams.max(1000), 0.01);
+        for &trigram in self.trigram_postings.keys() {
+            bloom_filter.insert(trigram);
+        }
+
+        // Write trigram index
+        self.write_trigram_index(segment_path)?;
+
+        // Write token index
+        self.write_token_index(segment_path)?;
+
+        // Write line maps
+        self.write_line_maps(segment_path)?;
+
+        // Write bloom filter
+        Self::write_bloom_filter_static(segment_path, &bloom_filter)?;
+
+        Ok(())
+    }
+
+    /// Write trigram index
+    fn write_trigram_index(&self, segment_path: &Path) -> Result<()> {
+        let dict_path = segment_path.join("grams.dict");
+        let postings_path = segment_path.join("grams.postings");
+
+        let mut dict_file = BufWriter::with_capacity(65536, File::create(&dict_path)?);
+        let mut postings_file = BufWriter::with_capacity(65536, File::create(&postings_path)?);
+
+        // Write entry count
+        dict_file.write_all(&(self.trigram_postings.len() as u32).to_le_bytes())?;
+
+        let mut postings_offset: u64 = 0;
+
+        for (&trigram, doc_ids) in &self.trigram_postings {
+            // Sort and deduplicate
+            let mut sorted_ids = doc_ids.clone();
+            sorted_ids.sort_unstable();
+            sorted_ids.dedup();
+
+            // Delta-encode
+            let mut encoded = Vec::new();
+            delta_encode(&sorted_ids, &mut encoded);
+
+            // Write dictionary entry
+            dict_file.write_all(&trigram.to_le_bytes())?;
+            dict_file.write_all(&postings_offset.to_le_bytes())?;
+            dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
+            dict_file.write_all(&(sorted_ids.len() as u32).to_le_bytes())?;
+
+            // Write postings
+            postings_file.write_all(&encoded)?;
+            postings_offset += encoded.len() as u64;
+        }
+
+        dict_file.flush()?;
+        postings_file.flush()?;
+        Ok(())
+    }
+
+    /// Write token index
+    fn write_token_index(&self, segment_path: &Path) -> Result<()> {
+        let dict_path = segment_path.join("tokens.dict");
+        let postings_path = segment_path.join("tokens.postings");
+
+        let mut dict_file = BufWriter::with_capacity(65536, File::create(&dict_path)?);
+        let mut postings_file = BufWriter::with_capacity(65536, File::create(&postings_path)?);
+
+        // Write entry count
+        dict_file.write_all(&(self.token_postings.len() as u32).to_le_bytes())?;
+
+        let mut postings_offset: u64 = 0;
+
+        for (token, doc_ids) in &self.token_postings {
+            // Sort and deduplicate
+            let mut sorted_ids = doc_ids.clone();
+            sorted_ids.sort_unstable();
+            sorted_ids.dedup();
+
+            // Delta-encode
+            let mut encoded = Vec::new();
+            delta_encode(&sorted_ids, &mut encoded);
+
+            // Write token (length-prefixed)
+            let token_bytes = token.as_bytes();
+            dict_file.write_all(&(token_bytes.len() as u16).to_le_bytes())?;
+            dict_file.write_all(token_bytes)?;
+
+            // Write offset, length, freq
+            dict_file.write_all(&postings_offset.to_le_bytes())?;
+            dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
+            dict_file.write_all(&(sorted_ids.len() as u32).to_le_bytes())?;
+
+            // Write postings
+            postings_file.write_all(&encoded)?;
+            postings_offset += encoded.len() as u64;
+        }
+
+        dict_file.flush()?;
+        postings_file.flush()?;
+        Ok(())
+    }
+
+    /// Write line maps
+    fn write_line_maps(&self, segment_path: &Path) -> Result<()> {
+        let linemap_path = segment_path.join("linemap.bin");
+        let mut file = BufWriter::with_capacity(65536, File::create(&linemap_path)?);
+
+        // Write count
+        file.write_all(&(self.line_maps.len() as u32).to_le_bytes())?;
+
+        // Sort by doc_id
+        let mut sorted: Vec<_> = self.line_maps.iter().collect();
+        sorted.sort_by_key(|(id, _)| *id);
+
+        for (&doc_id, offsets) in sorted {
+            file.write_all(&doc_id.to_le_bytes())?;
+            file.write_all(&(offsets.len() as u32).to_le_bytes())?;
+
+            let mut encoded = Vec::new();
+            delta_encode(offsets, &mut encoded);
+            file.write_all(&(encoded.len() as u32).to_le_bytes())?;
+            file.write_all(&encoded)?;
+        }
+
+        file.flush()?;
+        Ok(())
+    }
+
+    /// Write bloom filter
+    fn write_bloom_filter_static(segment_path: &Path, bloom_filter: &BloomFilter) -> Result<()> {
+        let bloom_path = segment_path.join("bloom.bin");
+        let mut file = BufWriter::with_capacity(65536, File::create(&bloom_path)?);
+
+        file.write_all(&[bloom_filter.num_hashes()])?;
+        let bits = bloom_filter.bits();
+        file.write_all(&(bits.len() as u32).to_le_bytes())?;
+        for &word in bits {
+            file.write_all(&word.to_le_bytes())?;
+        }
+
+        file.flush()?;
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Atomic Write Helpers
+// =============================================================================
+
+/// Write documents to docs.bin atomically using temp file + rename
+pub fn write_documents_atomic(index_path: &Path, documents: &[Document]) -> Result<()> {
+    let docs_path = index_path.join("docs.bin");
+    let tmp_path = index_path.join("docs.bin.tmp");
+
+    {
+        let mut file = BufWriter::with_capacity(65536, File::create(&tmp_path)?);
+
+        // Write document count
+        file.write_all(&(documents.len() as u32).to_le_bytes())?;
+
+        for doc in documents {
+            file.write_all(&doc.doc_id.to_le_bytes())?;
+            file.write_all(&doc.path_id.to_le_bytes())?;
+            file.write_all(&doc.size.to_le_bytes())?;
+            file.write_all(&doc.mtime.to_le_bytes())?;
+            file.write_all(&(doc.language as u16).to_le_bytes())?;
+            file.write_all(&doc.flags.0.to_le_bytes())?;
+            file.write_all(&doc.segment_id.to_le_bytes())?;
+        }
+
+        file.flush()?;
+    }
+
+    // Atomic rename
+    fs::rename(&tmp_path, &docs_path)?;
+    Ok(())
+}
+
+/// Write paths to paths.bin atomically using temp file + rename
+pub fn write_paths_atomic(index_path: &Path, paths: &[PathBuf]) -> Result<()> {
+    let paths_path = index_path.join("paths.bin");
+    let tmp_path = index_path.join("paths.bin.tmp");
+
+    {
+        let mut file = BufWriter::with_capacity(65536, File::create(&tmp_path)?);
+
+        // Write count
+        file.write_all(&(paths.len() as u32).to_le_bytes())?;
+
+        for path in paths {
+            let path_str = path.to_string_lossy();
+            let bytes = path_str.as_bytes();
+            file.write_all(&(bytes.len() as u32).to_le_bytes())?;
+            file.write_all(bytes)?;
+        }
+
+        file.flush()?;
+    }
+
+    // Atomic rename
+    fs::rename(&tmp_path, &paths_path)?;
+    Ok(())
+}
+
+/// Write meta.json atomically using temp file + rename
+pub fn write_meta_atomic(index_path: &Path, meta: &IndexMeta) -> Result<()> {
+    let meta_path = index_path.join("meta.json");
+    let tmp_path = index_path.join("meta.json.tmp");
+
+    {
+        let file = File::create(&tmp_path)?;
+        serde_json::to_writer_pretty(file, meta)?;
+    }
+
+    // Atomic rename - this commits the transaction
+    fs::rename(&tmp_path, &meta_path)?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -429,9 +429,6 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
 /// Threshold for incremental vs full rebuild (percentage of files changed)
 const INCREMENTAL_THRESHOLD_PERCENT: usize = 30;
 
-/// Maximum number of delta segments before forcing compaction/rebuild
-const MAX_DELTA_SEGMENTS: usize = 10;
-
 /// Result of comparing index with filesystem
 #[derive(Debug)]
 struct IndexDiff {
@@ -463,13 +460,6 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
     let meta: IndexMeta = serde_json::from_reader(
         File::open(&meta_path).context("Failed to open meta.json")?
     )?;
-
-    // Check if too many delta segments - force rebuild
-    if meta.delta_segments.len() >= MAX_DELTA_SEGMENTS {
-        println!("Too many delta segments ({}), performing full rebuild...", meta.delta_segments.len());
-        build_index(&root, true)?;
-        return Ok(false);
-    }
 
     // Open existing index to get file list
     let reader = IndexReader::open(&root)?;

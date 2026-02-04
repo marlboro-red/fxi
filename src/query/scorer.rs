@@ -133,14 +133,6 @@ impl Scorer {
         self.weights.max_recency_bonus * decay
     }
 
-    /// Check if a search term appears in the filename
-    pub fn term_in_filename(path: &Path, term: &str) -> bool {
-        path.file_name()
-            .and_then(|f| f.to_str())
-            .map(|name| name.to_lowercase().contains(&term.to_lowercase()))
-            .unwrap_or(false)
-    }
-
     /// Calculate directory depth from a path
     pub fn path_depth(path: &Path) -> usize {
         path.components().count()
@@ -220,14 +212,6 @@ mod tests {
 
         // Shallower paths should have higher scores
         assert!(score_shallow > score_deep);
-    }
-
-    #[test]
-    fn test_term_in_filename() {
-        let path = PathBuf::from("src/query/executor.rs");
-        assert!(Scorer::term_in_filename(&path, "executor"));
-        assert!(Scorer::term_in_filename(&path, "EXECUTOR")); // case insensitive
-        assert!(!Scorer::term_in_filename(&path, "parser"));
     }
 
     #[test]
