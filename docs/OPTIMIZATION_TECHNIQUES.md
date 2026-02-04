@@ -47,19 +47,19 @@ fxi is designed to run as a **persistent daemon** (`fxid`) that keeps indexes wa
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         FXI DAEMON ARCHITECTURE                              │
+│                         FXI DAEMON ARCHITECTURE                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │  CLIENT PROCESSES                           DAEMON PROCESS (fxid)           │
 │  ─────────────────                          ─────────────────────           │
-│                                                                              │
+│                                                                             │
 │  ┌─────────────┐                           ┌─────────────────────────────┐  │
 │  │  Terminal 1 │──┐                        │      INDEX SERVER           │  │
 │  │  fxi "query"│  │                        │                             │  │
 │  └─────────────┘  │    Unix Socket         │  ┌─────────────────────┐    │  │
 │                   │    (or Named Pipe)     │  │   Warm Index Cache  │    │  │
 │  ┌─────────────┐  │   ┌──────────────┐     │  │                     │    │  │
-│  │  Terminal 2 │──┼──▶│ fxi.sock     │────▶│  │  ┌─────────────┐    │    │  │
+│  │  Terminal 2 │──┼──▶│ fxi.sock     │────▶│  │  ┌────────────┐    │    │  │
 │  │  fxi "foo"  │  │   └──────────────┘     │  │  │ Index A     │    │    │  │
 │  └─────────────┘  │                        │  │  │ (150K docs) │    │    │  │
 │                   │                        │  │  └─────────────┘    │    │  │
@@ -69,7 +69,7 @@ fxi is designed to run as a **persistent daemon** (`fxid`) that keeps indexes wa
 │  └─────────────┘                           │  │  └─────────────┘    │    │  │
 │                                            │  └─────────────────────┘    │  │
 │  ┌─────────────┐                           │                             │  │
-│  │    TUI      │◀─────────────────────────▶│  ┌─────────────────────┐    │  │
+│  │    TUI      │◀─────────────────────────▶│  ┌────────────────────┐    │  │
 │  │  (ratatui)  │   Persistent Connection   │  │   Query Cache (LRU) │    │  │
 │  └─────────────┘                           │  │   128 entries/index │    │  │
 │                                            │  └─────────────────────┘    │  │
@@ -81,7 +81,7 @@ fxi is designed to run as a **persistent daemon** (`fxid`) that keeps indexes wa
 │                                            │  │  • uptime           │    │  │
 │                                            │  └─────────────────────┘    │  │
 │                                            └─────────────────────────────┘  │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -219,50 +219,50 @@ The daemon (`fxid`) is the **primary mode of operation** for fxi. It eliminates 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    COLD START vs WARM DAEMON                                 │
+│                    COLD START vs WARM DAEMON                                │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   WITHOUT DAEMON (cold start every query):                                  │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  User runs: fxi "pattern"                                          │    │
-│   │                                                                     │    │
-│   │  Timeline:                                                          │    │
+│   │                                                                    │    │
+│   │  Timeline:                                                         │    │
 │   │  0ms ─────── 150ms ─────── 300ms ─────── 350ms ─────── 400ms       │    │
-│   │  │           │             │             │             │            │    │
-│   │  │ Load      │ Load        │ Parse       │ Execute     │ Done       │    │
-│   │  │ docs.bin  │ segments    │ query       │ search      │            │    │
-│   │  │           │             │             │             │            │    │
-│   │  └───────────┴─────────────┴─────────────┴─────────────┘            │    │
-│   │     INDEX LOADING: 300ms        ACTUAL SEARCH: 50ms                 │    │
-│   │                                                                     │    │
+│   │  │           │             │             │             │           │    │
+│   │  │ Load      │ Load        │ Parse       │ Execute     │ Done      │    │
+│   │  │ docs.bin  │ segments    │ query       │ search      │           │    │
+│   │  │           │             │             │             │           │    │
+│   │  └───────────┴─────────────┴─────────────┴─────────────┘           │    │
+│   │     INDEX LOADING: 300ms        ACTUAL SEARCH: 50ms                │    │
+│   │                                                                    │    │
 │   │  Total: ~350ms (85% spent loading!)                                │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   WITH DAEMON (index always warm):                                          │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  User runs: fxi "pattern"                                          │    │
-│   │                                                                     │    │
-│   │  Timeline:                                                          │    │
+│   │                                                                    │    │
+│   │  Timeline:                                                         │    │
 │   │  0ms ── 2ms ── 5ms ── 15ms ── 20ms                                 │    │
-│   │  │      │      │       │       │                                    │    │
-│   │  │ IPC  │ Parse│ Exec  │ IPC   │ Done                               │    │
-│   │  │ send │ query│ search│ recv  │                                    │    │
-│   │  │      │      │       │       │                                    │    │
-│   │  └──────┴──────┴───────┴───────┘                                    │    │
-│   │                                                                     │    │
+│   │  │      │      │       │       │                                   │    │
+│   │  │ IPC  │ Parse│ Exec  │ IPC   │ Done                              │    │
+│   │  │ send │ query│ search│ recv  │                                   │    │
+│   │  │      │      │       │       │                                   │    │
+│   │  └──────┴──────┴───────┴───────┘                                   │    │
+│   │                                                                    │    │
 │   │  Total: ~20ms (17x faster!)                                        │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   CACHE HIT (repeated query):                                               │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  0ms ── 1ms ── 2ms                                                 │    │
-│   │  │      │      │                                                    │    │
-│   │  │ IPC  │ Cache│ Done                                               │    │
-│   │  │      │ hit! │                                                    │    │
-│   │                                                                     │    │
+│   │  │      │      │                                                   │    │
+│   │  │ IPC  │ Cache│ Done                                              │    │
+│   │  │      │ hit! │                                                   │    │
+│   │                                                                    │    │
 │   │  Total: ~2ms (sub-millisecond search!)                             │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -270,44 +270,44 @@ The daemon (`fxid`) is the **primary mode of operation** for fxi. It eliminates 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         INDEX SERVER INTERNALS                               │
+│                         INDEX SERVER INTERNALS                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   struct IndexServer {                                                       │
+│                                                                             │
+│   struct IndexServer {                                                      │
 │       indexes: RwLock<HashMap<PathBuf, CachedIndex>>,  // Multi-codebase    │
-│       stats: ServerStats,                               // Metrics           │
-│       shutdown: AtomicBool,                             // Graceful stop     │
-│   }                                                                          │
-│                                                                              │
+│       stats: ServerStats,                               // Metrics          │
+│       shutdown: AtomicBool,                             // Graceful stop    │
+│   }                                                                         │
+│                                                                             │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │                        CachedIndex                                   │   │
+│   │                        CachedIndex                                  │   │
 │   ├─────────────────────────────────────────────────────────────────────┤   │
-│   │                                                                      │   │
-│   │   reader: Arc<IndexReader>          ← Shared across threads          │   │
-│   │                                                                      │   │
-│   │   query_cache: Mutex<LruCache<      ← Per-index result cache         │   │
-│   │       String,                          Query string                  │   │
-│   │       Vec<SearchMatchData>             Cached results                │   │
-│   │   >>                                                                 │   │
-│   │   Capacity: 128 entries                                              │   │
-│   │                                                                      │   │
-│   │   last_used: Mutex<Instant>         ← For future LRU eviction        │   │
-│   │                                                                      │   │
+│   │                                                                     │   │
+│   │   reader: Arc<IndexReader>          ← Shared across threads         │   │
+│   │                                                                     │   │
+│   │   query_cache: Mutex<LruCache<      ← Per-index result cache        │   │
+│   │       String,                          Query string                 │   │
+│   │       Vec<SearchMatchData>             Cached results               │   │
+│   │   >>                                                                │   │
+│   │   Capacity: 128 entries                                             │   │
+│   │                                                                     │   │
+│   │   last_used: Mutex<Instant>         ← For future LRU eviction       │   │
+│   │                                                                     │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
+│                                                                             │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │                        ServerStats                                   │   │
+│   │                        ServerStats                                  │   │
 │   ├─────────────────────────────────────────────────────────────────────┤   │
-│   │                                                                      │   │
-│   │   start_time: Instant               ← Uptime tracking                │   │
-│   │   queries_served: AtomicU64         ← Total query count              │   │
-│   │   cache_hits: AtomicU64             ← For hit rate calculation       │   │
-│   │   cache_misses: AtomicU64                                            │   │
-│   │                                                                      │   │
-│   │   cache_hit_rate() = hits / (hits + misses)                          │   │
-│   │                                                                      │   │
+│   │                                                                     │   │
+│   │   start_time: Instant               ← Uptime tracking               │   │
+│   │   queries_served: AtomicU64         ← Total query count             │   │
+│   │   cache_hits: AtomicU64             ← For hit rate calculation      │   │
+│   │   cache_misses: AtomicU64                                           │   │
+│   │                                                                     │   │
+│   │   cache_hit_rate() = hits / (hits + misses)                         │   │
+│   │                                                                     │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -317,14 +317,14 @@ Communication uses a **length-prefixed JSON protocol** over Unix sockets (or nam
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                          MESSAGE FORMAT                                      │
+│                          MESSAGE FORMAT                                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   ┌──────────────┬──────────────────────────────────────────────────────┐   │
 │   │  Length (4B) │  JSON Payload (N bytes)                              │   │
 │   │  Little-end  │                                                      │   │
 │   └──────────────┴──────────────────────────────────────────────────────┘   │
-│                                                                              │
+│                                                                             │
 │   REQUEST TYPES:                                                            │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Search        { query, root_path, limit }                         │    │
@@ -334,7 +334,7 @@ Communication uses a **length-prefixed JSON protocol** over Unix sockets (or nam
 │   │  Shutdown      (no params)                                         │    │
 │   │  Ping          (no params)                                         │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   RESPONSE TYPES:                                                           │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Search        { matches, duration_ms, cached }                    │    │
@@ -345,18 +345,18 @@ Communication uses a **length-prefixed JSON protocol** over Unix sockets (or nam
 │   │  Pong                                                              │    │
 │   │  Error         { message }                                         │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│   EXAMPLE EXCHANGE:                                                          │
+│                                                                             │
+│   EXAMPLE EXCHANGE:                                                         │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Client → Server:                                                  │    │
 │   │  [45 00 00 00] {"type":"Search","query":"fn main","root_path":...} │    │
 │   │   └─ 69 bytes                                                      │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Server → Client:                                                  │    │
 │   │  [A3 01 00 00] {"type":"Search","matches":[...],"duration_ms":8.5} │    │
 │   │   └─ 419 bytes                                                     │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -364,18 +364,18 @@ Communication uses a **length-prefixed JSON protocol** over Unix sockets (or nam
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    THREAD-PER-CONNECTION MODEL                               │
+│                    THREAD-PER-CONNECTION MODEL                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   Main Thread                          Worker Threads                       │
 │   ───────────                          ──────────────                       │
-│                                                                              │
+│                                                                             │
 │   ┌─────────────┐                                                           │
 │   │   accept()  │ ←── UnixListener::incoming()                              │
 │   └──────┬──────┘                                                           │
-│          │                                                                   │
+│          │                                                                  │
 │          │ New connection                                                   │
-│          ▼                                                                   │
+│          ▼                                                                  │
 │   ┌─────────────┐        ┌─────────────────────────────────────┐            │
 │   │   spawn()   │───────▶│  Worker Thread                      │            │
 │   └──────┬──────┘        │                                     │            │
@@ -386,24 +386,24 @@ Communication uses a **length-prefixed JSON protocol** over Unix sockets (or nam
 │          │               │      if shutdown { break }          │            │
 │          │               │  }                                  │            │
 │          │               └─────────────────────────────────────┘            │
-│          │                                                                   │
+│          │                                                                  │
 │          │ Another connection                                               │
-│          ▼                                                                   │
+│          ▼                                                                  │
 │   ┌─────────────┐        ┌─────────────────────────────────────┐            │
 │   │   spawn()   │───────▶│  Worker Thread                      │            │
 │   └─────────────┘        │  (handles concurrent client)        │            │
 │                          └─────────────────────────────────────┘            │
-│                                                                              │
+│                                                                             │
 │   CONCURRENCY:                                                              │
 │   • Multiple clients can query simultaneously                               │
 │   • IndexReader is Arc<> shared across threads                              │
 │   • Query cache uses Mutex (brief lock)                                     │
 │   • Read-heavy workload: RwLock on indexes HashMap                          │
-│                                                                              │
+│                                                                             │
 │   TIMEOUTS:                                                                 │
 │   • Connection timeout: 30 seconds                                          │
 │   • Prevents hung clients from holding resources                            │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -411,30 +411,30 @@ Communication uses a **length-prefixed JSON protocol** over Unix sockets (or nam
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        DAEMON LIFECYCLE                                      │
+│                        DAEMON LIFECYCLE                                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   STARTUP (fxi daemon start):                                                   │
+│                                                                             │
+│   STARTUP (fxi daemon start):                                               │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │   1. Double-fork (Unix daemonization)                              │    │
 │   │      ┌────────┐     ┌────────┐     ┌────────┐                      │    │
-│   │      │ Parent │────▶│ Child  │────▶│Grandchild                     │    │
-│   │      │ exits  │     │ exits  │     │ = daemon │                     │    │
+│   │      │ Parent │────▶│ Child  │────▶│Grandchild                    │    │
+│   │      │ exits  │     │ exits  │     │ = daemon │                    │    │
 │   │      └────────┘     └────────┘     └────────┘                      │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │   2. Create new session (setsid)                                   │    │
 │   │   3. Close stdin/stdout/stderr → /dev/null                         │    │
 │   │   4. Write PID to ~/.local/run/fxi.pid                             │    │
 │   │   5. Create Unix socket at ~/.local/run/fxi.sock                   │    │
 │   │   6. Set socket permissions to 0600 (user only)                    │    │
 │   │   7. Enter accept() loop                                           │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   LAZY INDEX LOADING:                                                       │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │   First query for /path/to/codebase:                               │    │
 │   │   1. Check indexes HashMap (read lock) → not found                 │    │
 │   │   2. Acquire write lock                                            │    │
@@ -442,36 +442,36 @@ Communication uses a **length-prefixed JSON protocol** over Unix sockets (or nam
 │   │   4. IndexReader::open(/path/to/codebase)                          │    │
 │   │   5. Insert into HashMap                                           │    │
 │   │   6. Release write lock                                            │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │   Subsequent queries: read lock only (fast path)                   │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│   SHUTDOWN (fxi daemon stop or SIGTERM):                                         │
+│                                                                             │
+│   SHUTDOWN (fxi daemon stop or SIGTERM):                                    │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │   1. Set shutdown flag (AtomicBool)                                │    │
 │   │   2. Accept loop breaks                                            │    │
 │   │   3. Existing connections finish current request                   │    │
 │   │   4. Remove socket file                                            │    │
 │   │   5. Remove PID file                                               │    │
 │   │   6. Exit cleanly                                                  │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │   If graceful shutdown times out (1.5s):                           │    │
 │   │   → SIGKILL sent to force termination                              │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│   SOCKET LOCATIONS:                                                          │
+│                                                                             │
+│   SOCKET LOCATIONS:                                                         │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Platform   │ Primary Location                                     │    │
 │   │  ─────────  │ ────────────────                                     │    │
-│   │  Linux      │ $XDG_RUNTIME_DIR/fxi.sock (tmpfs, secure)           │    │
-│   │  macOS      │ ~/.local/run/fxi.sock                               │    │
-│   │  Windows    │ \\.\pipe\fxi-{username} (named pipe)                │    │
-│   │  Fallback   │ /tmp/fxi-{uid}.sock                                 │    │
+│   │  Linux      │ $XDG_RUNTIME_DIR/fxi.sock (tmpfs, secure)            │    │
+│   │  macOS      │ ~/.local/run/fxi.sock                                │    │
+│   │  Windows    │ \\.\pipe\fxi-{username} (named pipe)                 │    │
+│   │  Fallback   │ /tmp/fxi-{uid}.sock                                  │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -479,33 +479,33 @@ Communication uses a **length-prefixed JSON protocol** over Unix sockets (or nam
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                      QUERY RESULT CACHE                                      │
+│                      QUERY RESULT CACHE                                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   Each loaded index has its own LRU cache:                                  │
-│                                                                              │
+│                                                                             │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Cache Key (String)          │  Cache Value (Vec<SearchMatchData>) │    │
-│   │  ────────────────────        │  ──────────────────────────────────  │    │
+│   │  ────────────────────        │  ─────────────────────────────────  │    │
 │   │  "fn main"                   │  [match1, match2, match3, ...]      │    │
 │   │  "ext:rs error"              │  [match1, match2, ...]              │    │
 │   │  "TODO"                      │  [match1, match2, match3, ...]      │    │
-│   │  ...                         │  ...                                 │    │
-│   │                              │                                      │    │
-│   │  Capacity: 128 entries       │                                      │    │
-│   │  Eviction: LRU               │                                      │    │
+│   │  ...                         │  ...                                │    │
+│   │                              │                                     │    │
+│   │  Capacity: 128 entries       │                                     │    │
+│   │  Eviction: LRU               │                                     │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   CACHE FLOW:                                                               │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │   Query arrives: "fn main"                                         │    │
 │   │         │                                                          │    │
 │   │         ▼                                                          │    │
 │   │   ┌─────────────┐                                                  │    │
 │   │   │ Cache check │                                                  │    │
 │   │   └──────┬──────┘                                                  │    │
-│   │          │                                                          │    │
+│   │          │                                                         │    │
 │   │    ┌─────┴─────┐                                                   │    │
 │   │    │           │                                                   │    │
 │   │   HIT         MISS                                                 │    │
@@ -515,22 +515,22 @@ Communication uses a **length-prefixed JSON protocol** over Unix sockets (or nam
 │   │  cached     │                                                      │    │
 │   │  results    ▼                                                      │    │
 │   │  (< 1ms)  Store in cache                                           │    │
-│   │           │                                                         │    │
-│   │           ▼                                                         │    │
+│   │           │                                                        │    │
+│   │           ▼                                                        │    │
 │   │         Return results                                             │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   CACHE INVALIDATION:                                                       │
-│   • Manual: `fxi daemon reload` clears cache for a codebase                     │
-│   • No automatic invalidation (user must reload after file changes)        │
-│   • Future: File watcher for automatic invalidation                        │
-│                                                                              │
+│   • Manual: `fxi daemon reload` clears cache for a codebase                 │
+│   • No automatic invalidation (user must reload after file changes)         │
+│   • Future: File watcher for automatic invalidation                         │
+│                                                                             │
 │   STATISTICS:                                                               │
-│   • cache_hit_rate tracked per server                                      │
-│   • Exposed via `fxi daemon status` command                                     │
-│   • Typical hit rates: 40-60% for interactive use                          │
-│                                                                              │
+│   • cache_hit_rate tracked per server                                       │
+│   • Exposed via `fxi daemon status` command                                 │
+│   • Typical hit rates: 40-60% for interactive use                           │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -538,41 +538,41 @@ Communication uses a **length-prefixed JSON protocol** over Unix sockets (or nam
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    MULTIPLE CODEBASE SUPPORT                                 │
+│                    MULTIPLE CODEBASE SUPPORT                                │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   Single daemon serves multiple codebases simultaneously:                   │
-│                                                                              │
+│                                                                             │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │                         IndexServer                                  │   │
-│   │                                                                      │   │
+│   │                         IndexServer                                 │   │
+│   │                                                                     │   │
 │   │   indexes: HashMap<PathBuf, CachedIndex>                            │   │
 │   │   ┌──────────────────────────────────────────────────────────────┐  │   │
-│   │   │                                                               │  │   │
+│   │   │                                                              │  │   │
 │   │   │  "/home/user/project-a"  →  CachedIndex { 150K docs }        │  │   │
 │   │   │  "/home/user/project-b"  →  CachedIndex { 80K docs }         │  │   │
 │   │   │  "/home/user/monorepo"   →  CachedIndex { 500K docs }        │  │   │
-│   │   │                                                               │  │   │
+│   │   │                                                              │  │   │
 │   │   └──────────────────────────────────────────────────────────────┘  │   │
-│   │                                                                      │   │
+│   │                                                                     │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-│   USAGE:                                                                     │
+│                                                                             │
+│   USAGE:                                                                    │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  # From different directories, same daemon serves both:            │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  cd ~/project-a && fxi "pattern"   # Uses project-a index          │    │
 │   │  cd ~/project-b && fxi "pattern"   # Uses project-b index          │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  # First query for each codebase loads its index (lazy loading)    │    │
 │   │  # Subsequent queries are instant                                  │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   MEMORY MANAGEMENT:                                                        │
-│   • Each index stays loaded until daemon restart                           │
-│   • Future: LRU eviction for indexes not used in X hours                   │
-│   • Status command shows all loaded indexes and memory usage               │
-│                                                                              │
+│   • Each index stays loaded until daemon restart                            │
+│   • Future: LRU eviction for indexes not used in X hours                    │
+│   • Status command shows all loaded indexes and memory usage                │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -819,11 +819,11 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                      EXECUTION PLAN GENERATION                               │
+│                      EXECUTION PLAN GENERATION                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   Input Query: "fn main ext:rs"                                             │
-│                                                                              │
+│                                                                             │
 │   Step 1: Parse → AST                                                       │
 │   ┌───────────────────────────────────────┐                                 │
 │   │            And                        │                                 │
@@ -831,10 +831,10 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │     Literal   Filter                  │                                 │
 │   │    "fn main"  (ext=rs)                │                                 │
 │   └───────────────────────────────────────┘                                 │
-│                                                                              │
+│                                                                             │
 │   Step 2: Extract trigrams                                                  │
 │   "fn main" → ["fn ", "n m", " ma", "mai", "ain"]                           │
-│                                                                              │
+│                                                                             │
 │   Step 3: Check stop-grams                                                  │
 │   ┌───────────────────────────────────────┐                                 │
 │   │  "fn " → NOT in stop-grams → KEEP     │                                 │
@@ -843,7 +843,7 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │  "mai" → NOT in stop-grams → KEEP     │                                 │
 │   │  "ain" → NOT in stop-grams → KEEP     │                                 │
 │   └───────────────────────────────────────┘                                 │
-│                                                                              │
+│                                                                             │
 │   Step 4: Order by selectivity (doc frequency ascending)                    │
 │   ┌───────────────────────────────────────┐                                 │
 │   │  "mai" → 5,000 docs   ← Process first │                                 │
@@ -852,7 +852,7 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │  "fn " → 45,000 docs                  │                                 │
 │   │  " ma" → 50,000 docs  ← Process last  │                                 │
 │   └───────────────────────────────────────┘                                 │
-│                                                                              │
+│                                                                             │
 │   Step 5: Generate execution plan                                           │
 │   ┌───────────────────────────────────────────────────────────────────────┐ │
 │   │  ExecutionPlan {                                                      │ │
@@ -866,7 +866,7 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │    scoring: ScoreConfig { ... },                                      │ │
 │   │  }                                                                    │ │
 │   └───────────────────────────────────────────────────────────────────────┘ │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -874,12 +874,12 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    SELECTIVITY OPTIMIZATION                                  │
+│                    SELECTIVITY OPTIMIZATION                                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   PROBLEM: Naive intersection processes huge intermediate sets              │
-│                                                                              │
-│   Query trigrams for "configuration":                                        │
+│                                                                             │
+│   Query trigrams for "configuration":                                       │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Trigram    Doc Count    Processing Order                          │    │
 │   │  ───────    ─────────    ────────────────                          │    │
@@ -896,11 +896,11 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │  "ion"      120,000                                                │    │
 │   │  "ura"        2,000      ← FIRST (rarest)                          │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   NAIVE ORDER (alphabetical):                                               │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │  "ati" ∩ "con" ∩ "fig" ∩ "gur" ∩ "igu" ∩ "ion" ∩ ...              │    │
-│   │                                                                     │    │
+│   │  "ati" ∩ "con" ∩ "fig" ∩ "gur" ∩ "igu" ∩ "ion" ∩ ...               │    │
+│   │                                                                    │    │
 │   │  Step 1: Load 40,000 docs  ───┐                                    │    │
 │   │  Step 2: Load 150,000 docs    │                                    │    │
 │   │          Intersect → 35,000 ──┤ Large intermediate sets!           │    │
@@ -908,11 +908,11 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │          Intersect → 6,000 ───┘                                    │    │
 │   │  ...                                                               │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   SELECTIVITY ORDER (rarest first):                                         │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │  "ura" ∩ "gur" ∩ "igu" ∩ "nfi" ∩ "fig" ∩ ...                      │    │
-│   │                                                                     │    │
+│   │  "ura" ∩ "gur" ∩ "igu" ∩ "nfi" ∩ "fig" ∩ ...                       │    │
+│   │                                                                    │    │
 │   │  Step 1: Load 2,000 docs  ────┐                                    │    │
 │   │  Step 2: Load 2,500 docs      │                                    │    │
 │   │          Intersect → 800 ─────┤ Small intermediate sets!           │    │
@@ -921,7 +921,7 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │  ...                                                               │    │
 │   │  Final: 50 docs (10x faster!)                                      │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -929,11 +929,11 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                      STOP-GRAM OPTIMIZATION                                  │
+│                      STOP-GRAM OPTIMIZATION                                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   PROBLEM: Some trigrams appear in 90%+ of files, providing no filtering    │
-│                                                                              │
+│                                                                             │
 │   Top stop-grams (computed during indexing):                                │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Rank   Trigram     Appears In    Description                      │    │
@@ -946,20 +946,20 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │  ...                                                               │    │
 │   │  512    "for"       45%           Loop keyword                     │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   SOLUTION: Skip stop-grams during query execution                          │
-│                                                                              │
+│                                                                             │
 │   Query: "the error"                                                        │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Trigrams: ["the", "he ", "e e", " er", "err", "rro", "ror"]       │    │
 │   │                ↑                                                   │    │
 │   │                └── SKIP (stop-gram)                                │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Used trigrams: ["he ", "e e", " er", "err", "rro", "ror"]         │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Candidate reduction: 150,000 → 2,500 (60x smaller!)               │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -971,11 +971,11 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│              TIERED TRIGRAM EXTRACTION (Commit #39 Optimization)             │
+│              TIERED TRIGRAM EXTRACTION (Commit #39 Optimization)            │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   PROBLEM: One-size-fits-all approach is suboptimal                         │
-│                                                                              │
+│                                                                             │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  File Size    Best Strategy    Why                                 │    │
 │   │  ─────────    ─────────────    ───                                 │    │
@@ -984,7 +984,7 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │  100KB-1MB    Sparse Bitset    Reduced memory, fast operations     │    │
 │   │  > 1MB        Full Bitset      O(1) everything, worth 2MB alloc    │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   TIER 1: TINY FILES (< 4KB) - Sort + Dedup                                 │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  fn extract_tiny(content: &[u8]) -> Vec<Trigram> {                 │    │
@@ -996,13 +996,13 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │      trigrams.dedup();          // Remove duplicates               │    │
 │   │      trigrams                                                      │    │
 │   │  }                                                                 │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Characteristics:                                                  │    │
 │   │  • Memory: ~4KB (same as input)                                    │    │
 │   │  • Time: O(n log n) but very fast due to cache locality            │    │
 │   │  • No hash table overhead                                          │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   TIER 2: SMALL FILES (4KB-100KB) - HashSet                                 │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  fn extract_small(content: &[u8]) -> Vec<Trigram> {                │    │
@@ -1013,19 +1013,19 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │      }                                                             │    │
 │   │      seen.into_iter().collect()                                    │    │
 │   │  }                                                                 │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Characteristics:                                                  │    │
 │   │  • Memory: ~capacity × 8 bytes                                     │    │
 │   │  • Time: O(n) average                                              │    │
 │   │  • Good for moderate unique trigram counts                         │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   TIER 3: MEDIUM FILES (100KB-1MB) - Sparse Bitset                          │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  struct SparseTrigramBitset {                                      │    │
 │   │      blocks: AHashMap<u32, u64>,  // block_index → 64 bits         │    │
 │   │  }                                                                 │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  impl SparseTrigramBitset {                                        │    │
 │   │      fn insert(&mut self, trigram: u32) {                          │    │
 │   │          let block_idx = trigram >> 6;       // Divide by 64       │    │
@@ -1033,19 +1033,19 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │          *self.blocks.entry(block_idx).or_insert(0) |= 1 << bit_pos│    │
 │   │      }                                                             │    │
 │   │  }                                                                 │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Characteristics:                                                  │    │
 │   │  • Memory: ~8KB-64KB (only non-zero blocks)                        │    │
 │   │  • Time: O(n) with fast hash lookups                               │    │
 │   │  • Much smaller than 2MB full bitset                               │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   TIER 4: LARGE FILES (> 1MB) - Full Bitset                                 │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  struct FullTrigramBitset {                                        │    │
 │   │      bits: Vec<u64>,  // 2^24 / 64 = 262,144 words = 2MB           │    │
 │   │  }                                                                 │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  impl FullTrigramBitset {                                          │    │
 │   │      fn insert(&mut self, trigram: u32) {                          │    │
 │   │          let word_idx = (trigram >> 6) as usize;                   │    │
@@ -1053,13 +1053,13 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │          self.bits[word_idx] |= 1 << bit_pos;                      │    │
 │   │      }                                                             │    │
 │   │  }                                                                 │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Characteristics:                                                  │    │
 │   │  • Memory: 2MB fixed                                               │    │
 │   │  • Time: O(1) per trigram (no hashing!)                            │    │
 │   │  • Best for files with many unique trigrams                        │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   PERFORMANCE COMPARISON:                                                   │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  File Size   Before (one strategy)   After (tiered)   Improvement  │    │
@@ -1068,10 +1068,10 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │  50KB        1.2ms (full bitset)     0.9ms (HashSet)  25% faster   │    │
 │   │  500KB       8ms (full bitset)       3ms (sparse)     63% faster   │    │
 │   │  5MB         45ms (full bitset)      40ms (full)      11% faster   │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Overall indexing: 30-40% faster                                   │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1083,20 +1083,20 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    POSTING LIST COMPRESSION                                  │
+│                    POSTING LIST COMPRESSION                                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   RAW ENCODING (naive):                                                      │
+│                                                                             │
+│   RAW ENCODING (naive):                                                     │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │  Doc IDs: [1, 5, 10, 15, 100, 105, 200, 250, 1000]                  │    │
-│   │                                                                     │    │
-│   │  As u32: [00000001, 00000005, 0000000A, ...]                        │    │
-│   │          │         │         │                                      │    │
+│   │  Doc IDs: [1, 5, 10, 15, 100, 105, 200, 250, 1000]                 │    │
+│   │                                                                    │    │
+│   │  As u32: [00000001, 00000005, 0000000A, ...]                       │    │
+│   │          │         │         │                                     │    │
 │   │          4 bytes   4 bytes   4 bytes                               │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Total: 9 × 4 = 36 bytes                                           │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   DELTA ENCODING:                                                           │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Original: [1,   5,  10,  15, 100, 105, 200, 250, 1000]            │    │
@@ -1104,10 +1104,10 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │             ↑    ↑    ↑    ↑    ↑    ↑    ↑    ↑    ↑              │    │
 │   │             │    │    │    │    │    │    │    │    │              │    │
 │   │            first 5-1  10-5      105-100                            │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Observation: Most deltas are small numbers!                       │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   VARINT ENCODING:                                                          │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Encoding scheme (like protobuf):                                  │    │
@@ -1115,26 +1115,26 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │    • If value < 16384: 2 bytes (1xxxxxxx 0xxxxxxx)                 │    │
 │   │    • If value < 2M: 3 bytes (1xxxxxxx 1xxxxxxx 0xxxxxxx)           │    │
 │   │    • etc.                                                          │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Example:                                                          │    │
 │   │    Delta 5   → 0x05          (1 byte)                              │    │
 │   │    Delta 85  → 0x55          (1 byte)                              │    │
 │   │    Delta 750 → 0xEE 0x05     (2 bytes: 750 = 0x2EE)                │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Result for our example:                                           │    │
 │   │  [01, 04, 05, 05, 55, 05, 5F, 32, EE 05]                           │    │
 │   │   1B  1B  1B  1B  1B  1B  1B  1B   2B   = 11 bytes                 │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Compression ratio: 36 → 11 bytes (69% reduction!)                 │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   DECOMPRESSION (fast path):                                                │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  fn delta_decode(bytes: &[u8]) -> Vec<u32> {                       │    │
-│   │      let mut result = Vec::with_capacity(bytes.len());  // Pre-alloc│    │
+│   │      let mut result = Vec::with_capacity(bytes.len()); // Pre-alloc│    │
 │   │      let mut pos = 0;                                              │    │
 │   │      let mut prev = 0u32;                                          │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │      while pos < bytes.len() {                                     │    │
 │   │          let (delta, consumed) = decode_varint(&bytes[pos..]);     │    │
 │   │          prev += delta;                                            │    │
@@ -1144,7 +1144,7 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │      result                                                        │    │
 │   │  }                                                                 │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1152,11 +1152,11 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    HYBRID FILE READING STRATEGY                              │
+│                    HYBRID FILE READING STRATEGY                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   Decision flow:                                                            │
-│                                                                              │
+│                                                                             │
 │                     ┌─────────────────┐                                     │
 │                     │  Read file for  │                                     │
 │                     │  verification   │                                     │
@@ -1180,37 +1180,37 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │     │ Data copied to  │           │ Virtual mapping │                       │
 │     │ heap (owned)    │           │ (zero-copy)     │                       │
 │     └─────────────────┘           └─────────────────┘                       │
-│                                                                              │
-│   WHY THIS MATTERS:                                                          │
+│                                                                             │
+│   WHY THIS MATTERS:                                                         │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Small file (< 4KB):                                               │    │
 │   │  ├─ read() syscall: ~2µs                                           │    │
 │   │  ├─ Memory allocation: ~0.5µs                                      │    │
 │   │  └─ Total: ~2.5µs                                                  │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  vs. mmap for small file:                                          │    │
 │   │  ├─ mmap() syscall: ~5µs                                           │    │
 │   │  ├─ Page table setup: ~3µs                                         │    │
 │   │  ├─ Page fault on access: ~2µs                                     │    │
 │   │  └─ Total: ~10µs (4x slower!)                                      │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  ────────────────────────────────────────────────────────────────  │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Large file (1MB):                                                 │    │
 │   │  ├─ read() syscall: ~500µs                                         │    │
 │   │  ├─ Memory allocation: ~50µs (1MB heap!)                           │    │
 │   │  ├─ Copy from kernel: ~200µs                                       │    │
 │   │  └─ Total: ~750µs                                                  │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  vs. mmap for large file:                                          │    │
 │   │  ├─ mmap() syscall: ~5µs                                           │    │
 │   │  ├─ Page table setup: ~10µs                                        │    │
 │   │  ├─ Demand paging: OS handles                                      │    │
 │   │  └─ Total: ~15µs + incremental faults (50x faster startup!)        │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1218,9 +1218,9 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                  DOCUMENT TABLE LAYOUT (30 bytes per entry)                  │
+│                  DOCUMENT TABLE LAYOUT (30 bytes per entry)                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
 │   │ Offset │ Field      │ Type │ Size │ Description                     │   │
 │   │ ────── │ ─────      │ ──── │ ──── │ ───────────                     │   │
@@ -1234,25 +1234,25 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │ ────── │ ─────      │ ──── │ ──── │                                 │   │
 │   │ Total  │            │      │ 30B  │                                 │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
+│                                                                             │
 │   BENEFITS:                                                                 │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  1. Direct memory mapping: No deserialization needed               │    │
 │   │     - Cast byte slice to Document slice: O(1)                      │    │
 │   │     - get_document(doc_id) = docs[doc_id_to_index[doc_id]]         │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  2. Cache-friendly: Predictable memory layout                      │    │
 │   │     - CPU prefetcher works efficiently                             │    │
 │   │     - 30 bytes fits in cache line                                  │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  3. Compact: 150,000 docs × 30B = 4.5MB                            │    │
 │   │     - Fits in L3 cache on most CPUs                                │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  4. No pointers: Safe for mmap                                     │    │
 │   │     - Can be loaded directly from disk                             │    │
 │   │     - No pointer fixup required                                    │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   FLAGS BITFIELD:                                                           │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Bit │ Name      │ Description                                     │    │
@@ -1263,7 +1263,7 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │  3   │ BINARY    │ Binary file detected                            │    │
 │   │  4   │ GENERATED │ Auto-generated code (lower priority)            │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1275,16 +1275,16 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    PARALLEL EXECUTION MODEL                                  │
+│                    PARALLEL EXECUTION MODEL                                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   INDEXING PARALLELISM:                                                     │
-│                                                                              │
+│                                                                             │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │                                                                      │   │
+│   │                                                                     │   │
 │   │   Main Thread              Worker Pool (rayon)                      │   │
 │   │   ───────────              ───────────────────                      │   │
-│   │                                                                      │   │
+│   │                                                                     │   │
 │   │   ┌─────────┐              ┌─────────┐  ┌─────────┐                 │   │
 │   │   │ Walk    │─────────────▶│ Worker 1│  │ Worker 2│                 │   │
 │   │   │ Builder │  file paths  │ Process │  │ Process │                 │   │
@@ -1310,51 +1310,51 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │                              │ Background Write │                   │   │
 │   │                              │     Thread       │                   │   │
 │   │                              └──────────────────┘                   │   │
-│   │                                                                      │   │
+│   │                                                                     │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
+│                                                                             │
 │   QUERY PARALLELISM:                                                        │
-│                                                                              │
+│                                                                             │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │                                                                      │   │
+│   │                                                                     │   │
 │   │   Query: "fn main"                                                  │   │
-│   │                                                                      │   │
+│   │                                                                     │   │
 │   │   Phase 1: Parallel Segment Scanning                                │   │
 │   │   ┌─────────────────────────────────────────────────────────────┐   │   │
-│   │   │                                                              │   │   │
+│   │   │                                                             │   │   │
 │   │   │  Segment 1    Segment 2    Segment 3    Segment 4           │   │   │
 │   │   │  ─────────    ─────────    ─────────    ─────────           │   │   │
-│   │   │  │ Bloom ✗│   │ Bloom ✓│   │ Bloom ✓│   │ Bloom ✗│           │   │   │
-│   │   │  │ SKIP   │   │ Lookup │   │ Lookup │   │ SKIP   │           │   │   │
-│   │   │  └────────┘   │ 500docs│   │ 200docs│   └────────┘           │   │   │
-│   │   │               └────┬───┘   └────┬───┘                        │   │   │
-│   │   │                    └─────┬──────┘                            │   │   │
-│   │   │                          ▼                                   │   │   │
-│   │   │                   RoaringBitmap                              │   │   │
-│   │   │                   (700 candidates)                           │   │   │
-│   │   │                                                              │   │   │
+│   │   │  │ Bloom ✗│   │ Bloom ✓│   │ Bloom ✓│   │ Bloom ✗│        │   │   │
+│   │   │  │ SKIP   │   │ Lookup │   │ Lookup │   │ SKIP   │          │   │   │
+│   │   │  └────────┘   │ 500docs│   │ 200docs│   └────────┘          │   │   │
+│   │   │               └────┬───┘   └────┬───┘                       │   │   │
+│   │   │                    └─────┬──────┘                           │   │   │
+│   │   │                          ▼                                  │   │   │
+│   │   │                   RoaringBitmap                             │   │   │
+│   │   │                   (700 candidates)                          │   │   │
+│   │   │                                                             │   │   │
 │   │   └─────────────────────────────────────────────────────────────┘   │   │
-│   │                                                                      │   │
+│   │                                                                     │   │
 │   │   Phase 2: Adaptive Parallel Verification                           │   │
 │   │   ┌─────────────────────────────────────────────────────────────┐   │   │
-│   │   │                                                              │   │   │
-│   │   │  Decision: candidates (700) > threshold (num_cpus × 4)?      │   │   │
-│   │   │                                                              │   │   │
+│   │   │                                                             │   │   │
+│   │   │  Decision: candidates (700) > threshold (num_cpus × 4)?     │   │   │
+│   │   │                                                             │   │   │
 │   │   │  YES (700 > 32) → Use parallel iterator                     │   │   │
-│   │   │                                                              │   │   │
+│   │   │                                                             │   │   │
 │   │   │   candidates.par_iter()                                     │   │   │
-│   │   │      .with_min_len(4)    // Work-stealing granularity        │   │   │
+│   │   │      .with_min_len(4)    // Work-stealing granularity       │   │   │
 │   │   │      .filter_map(|doc| {                                    │   │   │
 │   │   │          let content = read_file(doc.path);                 │   │   │
 │   │   │          search_literal(content, "fn main")                 │   │   │
-│   │   │      })                                                      │   │   │
+│   │   │      })                                                     │   │   │
 │   │   │      .take_any_while(|_| !limit_reached())                  │   │   │
 │   │   │      .collect()                                             │   │   │
-│   │   │                                                              │   │   │
+│   │   │                                                             │   │   │
 │   │   └─────────────────────────────────────────────────────────────┘   │   │
-│   │                                                                      │   │
+│   │                                                                     │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1362,13 +1362,13 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                   PARALLEL INDEX STARTUP                                     │
+│                   PARALLEL INDEX STARTUP                                    │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   SEQUENTIAL LOADING (naive):                                               │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Time: ───────────────────────────────────────────────────────▶    │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  ┌─────────┐                                                       │    │
 │   │  │ docs.bin│ 100ms                                                 │    │
 │   │  └─────────┘                                                       │    │
@@ -1378,14 +1378,14 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │                       ┌─────────────────────────────────────────┐  │    │
 │   │                       │ segments (12 × 50ms = 600ms)            │  │    │
 │   │                       └─────────────────────────────────────────┘  │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Total: 780ms                                                      │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   PARALLEL LOADING (optimized):                                             │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Time: ───────────────────────────────────────────────────────▶    │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  ┌─────────┐                                                       │    │
 │   │  │ docs.bin│ 100ms    ─┐                                           │    │
 │   │  └─────────┘           │                                           │    │
@@ -1396,11 +1396,11 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │  │seg1││seg2││seg3│... ├─ par_iter (12 segments)                   │    │
 │   │  │50ms││50ms││50ms│    │                                           │    │
 │   │  └────┘└────┘└────┘... ─┘                                          │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Total: ~150ms (5x faster!)                                        │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│   CODE:                                                                      │
+│                                                                             │
+│   CODE:                                                                     │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  let (documents_result, (paths_result, segments)) = rayon::join(   │    │
 │   │      || read_documents(index_path),     // Thread 1                │    │
@@ -1412,7 +1412,7 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │      )                                                             │    │
 │   │  );                                                                │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1420,23 +1420,23 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                  ASYNC SEGMENT WRITING                                       │
+│                  ASYNC SEGMENT WRITING                                      │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   PROBLEM: Segment writing blocks indexing progress                         │
-│                                                                              │
+│                                                                             │
 │   SOLUTION: Dedicated background thread for I/O                             │
-│                                                                              │
+│                                                                             │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │                                                                      │   │
+│   │                                                                     │   │
 │   │   Main Thread                      Background Thread                │   │
 │   │   ───────────                      ─────────────────                │   │
-│   │                                                                      │   │
+│   │                                                                     │   │
 │   │   ┌───────────────┐                                                 │   │
 │   │   │ Process chunk │                                                 │   │
 │   │   │ 1 (1000 files)│                                                 │   │
 │   │   └───────┬───────┘                                                 │   │
-│   │           │                                                          │   │
+│   │           │                                                         │   │
 │   │           │ send(SegmentWriteJob)                                   │   │
 │   │           │ ────────────────────▶   ┌──────────────────┐            │   │
 │   │           │ (non-blocking)          │ Receive job      │            │   │
@@ -1444,7 +1444,7 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │   │ Process chunk │                 │ Encode postings  │            │   │
 │   │   │ 2 (1000 files)│                 │ Write to disk    │            │   │
 │   │   └───────┬───────┘                 └──────────────────┘            │   │
-│   │           │                                                          │   │
+│   │           │                                                         │   │
 │   │           │ send(SegmentWriteJob)                                   │   │
 │   │           │ ────────────────────▶   ┌──────────────────┐            │   │
 │   │           │                         │ Receive job      │            │   │
@@ -1452,12 +1452,12 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │   │ Process chunk │                 │ Encode postings  │            │   │
 │   │   │ 3 (1000 files)│                 │ Write to disk    │            │   │
 │   │   └───────────────┘                 └──────────────────┘            │   │
-│   │                                                                      │   │
+│   │                                                                     │   │
 │   │   OVERLAP: Main thread processes next chunk while background        │   │
 │   │            thread writes previous chunk                             │   │
-│   │                                                                      │   │
+│   │                                                                     │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
+│                                                                             │
 │   MEMORY MANAGEMENT:                                                        │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  • Chunk size: 1000-5000 files (configurable)                      │    │
@@ -1465,7 +1465,7 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │  • Background thread consumes and frees memory as it writes        │    │
 │   │  • Bounded memory usage even for multi-million file codebases      │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1477,136 +1477,136 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                       FILE CONTENT CACHE                                     │
+│                       FILE CONTENT CACHE                                    │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   Configuration:                                                            │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  MAX_CACHED_FILES = 256                                            │    │
 │   │  MAX_FILE_SIZE = 512KB                                             │    │
 │   │  Total max memory: 256 × 512KB = 128MB                             │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   Cache structure:                                                          │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  file_cache: Mutex<LruCache<PathBuf, String>>                      │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  LRU eviction: Least recently used files evicted first             │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  ┌─────────────────────────────────────────────────────────────┐   │    │
 │   │  │ MRU ←───────────────────────────────────────────────→ LRU   │   │    │
-│   │  │                                                              │   │    │
+│   │  │                                                             │   │    │
 │   │  │ [main.rs] [lib.rs] [utils.rs] [config.rs] ... [old_file.rs] │   │    │
-│   │  │     ↑                                              ↑         │   │    │
-│   │  │  accessed                                       evicted      │   │    │
-│   │  │  recently                                       when full    │   │    │
+│   │  │     ↑                                              ↑        │   │    │
+│   │  │  accessed                                       evicted     │   │    │
+│   │  │  recently                                       when full   │   │    │
 │   │  └─────────────────────────────────────────────────────────────┘   │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   When cache is beneficial:                                                 │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  1. Interactive TUI: Same files re-queried rapidly                 │    │
 │   │  2. Context extraction: File read multiple times for context       │    │
-│   │  3. Proximity search: Multiple passes over same file              │    │
-│   │  4. Boolean queries: File checked for multiple terms              │    │
+│   │  3. Proximity search: Multiple passes over same file               │    │
+│   │  4. Boolean queries: File checked for multiple terms               │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   Sequential vs. Parallel access:                                           │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Sequential (small result set):                                    │    │
 │   │    • Uses cache (Mutex lock acceptable)                            │    │
 │   │    • Cache hits avoid file I/O entirely                            │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Parallel (large result set):                                      │    │
 │   │    • Bypasses cache (lock contention would hurt)                   │    │
 │   │    • Uses memory-mapped I/O instead                                │    │
 │   │    • Relies on OS page cache                                       │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 9.2 Regex Compilation Cache
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       REGEX CACHE                                            │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   PROBLEM: Regex compilation is expensive (~100µs-1ms per pattern)          │
-│                                                                              │
-│   SOLUTION: Global thread-safe regex cache                                  │
-│                                                                              │
-│   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │  static REGEX_CACHE: OnceLock<RegexCache> = OnceLock::new();       │    │
-│   │                                                                     │    │
-│   │  struct RegexCache {                                               │    │
-│   │      cache: RwLock<HashMap<String, Arc<Regex>>>,                   │    │
-│   │      max_size: 64,                                                 │    │
-│   │  }                                                                 │    │
-│   │                                                                     │    │
-│   │  impl RegexCache {                                                 │    │
-│   │      fn get_or_compile(&self, pattern: &str) -> Arc<Regex> {       │    │
-│   │          // Fast path: read lock for cache hit                     │    │
-│   │          if let Some(regex) = self.cache.read().get(pattern) {     │    │
-│   │              return Arc::clone(regex);                             │    │
-│   │          }                                                         │    │
-│   │                                                                     │    │
-│   │          // Slow path: write lock for compilation                  │    │
-│   │          let regex = Arc::new(Regex::new(pattern)?);               │    │
-│   │          self.cache.write().insert(pattern.to_string(), regex);    │    │
-│   │          regex                                                     │    │
-│   │      }                                                             │    │
-│   │  }                                                                 │    │
-│   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│   CONCURRENCY:                                                              │
-│   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │                                                                     │    │
-│   │  Thread 1 ──▶ cache.read() ──▶ HIT ──▶ return Arc<Regex>          │    │
-│   │  Thread 2 ──▶ cache.read() ──▶ HIT ──▶ return Arc<Regex>          │    │
-│   │  Thread 3 ──▶ cache.read() ──▶ HIT ──▶ return Arc<Regex>          │    │
-│   │                    ▲                                               │    │
-│   │                    │ All readers concurrent (RwLock)               │    │
-│   │                                                                     │    │
-│   │  Thread 4 ──▶ cache.read() ──▶ MISS ──▶ compile ──▶ cache.write() │    │
-│   │                                              │                      │    │
-│   │                                              └─ Exclusive access    │    │
-│   │                                                                     │    │
-│   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────────┐
+│                       REGEX CACHE                                             │
+├───────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│   PROBLEM: Regex compilation is expensive (~100µs-1ms per pattern)            │
+│                                                                               │
+│   SOLUTION: Global thread-safe regex cache                                    │
+│                                                                               │
+│   ┌──────────────────────────────────────────────────────────────────────┐    │
+│   │  static REGEX_CACHE: OnceLock<RegexCache> = OnceLock::new();         │    │
+│   │                                                                      │    │
+│   │  struct RegexCache {                                                 │    │
+│   │      cache: RwLock<HashMap<String, Arc<Regex>>>,                     │    │
+│   │      max_size: 64,                                                   │    │
+│   │  }                                                                   │    │
+│   │                                                                      │    │
+│   │  impl RegexCache {                                                   │    │
+│   │      fn get_or_compile(&self, pattern: &str) -> Arc<Regex> {         │    │
+│   │          // Fast path: read lock for cache hit                       │    │
+│   │          if let Some(regex) = self.cache.read().get(pattern) {       │    │
+│   │              return Arc::clone(regex);                               │    │
+│   │          }                                                           │    │
+│   │                                                                      │    │
+│   │          // Slow path: write lock for compilation                    │    │
+│   │          let regex = Arc::new(Regex::new(pattern)?);                 │    │
+│   │          self.cache.write().insert(pattern.to_string(), regex);      │    │
+│   │          regex                                                       │    │
+│   │      }                                                               │    │
+│   │  }                                                                   │    │
+│   └──────────────────────────────────────────────────────────────────────┘    │
+│                                                                               │
+│   CONCURRENCY:                                                                │
+│   ┌──────────────────────────────────────────────────────────────────────┐    │
+│   │                                                                      │    │
+│   │  Thread 1 ──▶ cache.read() ──▶ HIT ──▶ return Arc<Regex>            │    │
+│   │  Thread 2 ──▶ cache.read() ──▶ HIT ──▶ return Arc<Regex>            │    │
+│   │  Thread 3 ──▶ cache.read() ──▶ HIT ──▶ return Arc<Regex>            │    │
+│   │                    ▲                                                 │    │
+│   │                    │ All readers concurrent (RwLock)                 │    │
+│   │                                                                      │    │
+│   │  Thread 4 ──▶ cache.read() ──▶ MISS ──▶ compile ──▶ cache.write()  │    │
+│   │                                              │                       │    │
+│   │                                              └─ Exclusive access     │    │
+│   │                                                                      │    │
+│   └──────────────────────────────────────────────────────────────────────┘    │
+│                                                                               │
+└───────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 9.3 Lazy Line Map Loading
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    LAZY LOADING OPTIMIZATION                                 │
+│                    LAZY LOADING OPTIMIZATION                                │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   OBSERVATION: Most queries don't need line numbers                         │
-│                                                                              │
+│                                                                             │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Query Type              Line Numbers Needed?                      │    │
-│   │  ──────────              ─────────────────────                      │    │
+│   │  ──────────              ─────────────────────                     │    │
 │   │  fxi -l "pattern"        NO (file list only)                       │    │
 │   │  fxi "pattern"           YES (show matches with line numbers)      │    │
 │   │  fxi -c "pattern"        NO (count only)                           │    │
 │   │  fxi -l                  NO (list all files)                       │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   IMPLEMENTATION:                                                           │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  struct IndexReader {                                              │    │
 │   │      documents: Vec<Document>,                                     │    │
 │   │      paths: PathStore,                                             │    │
 │   │      segments: Vec<SegmentReader>,                                 │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │      // Only loaded when first accessed                            │    │
 │   │      line_maps: OnceLock<HashMap<DocId, Vec<u32>>>,                │    │
 │   │  }                                                                 │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  impl IndexReader {                                                │    │
 │   │      fn get_line_map(&self, doc_id: DocId) -> &Vec<u32> {          │    │
 │   │          self.line_maps                                            │    │
@@ -1616,21 +1616,21 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │      }                                                             │    │
 │   │  }                                                                 │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   MEMORY SAVINGS:                                                           │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Index with 150,000 files:                                         │    │
 │   │    • Average 500 lines per file                                    │    │
 │   │    • Line map: 500 × 4 bytes = 2KB per file                        │    │
 │   │    • Total: 150,000 × 2KB = 300MB                                  │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  With lazy loading:                                                │    │
 │   │    • -l queries: 0 bytes                                           │    │
 │   │    • Content queries: 300MB (only when needed)                     │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Most interactive usage never loads line maps!                     │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1642,11 +1642,11 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                      RELEVANCE SCORING                                       │
+│                      RELEVANCE SCORING                                      │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   FINAL SCORE = Σ (factor × weight) × boost                                 │
-│                                                                              │
+│                                                                             │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Factor           │ Formula                     │ Weight │ Max     │    │
 │   │  ─────────────    │ ─────────                   │ ────── │ ───     │    │
@@ -1656,44 +1656,44 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │  Recency          │ e^(-age_days / 7)           │ 0.5    │ 0.5     │    │
 │   │  User Boost       │ ^N syntax multiplier        │ N      │ 10      │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│   EXAMPLE CALCULATION:                                                       │
+│                                                                             │
+│   EXAMPLE CALCULATION:                                                      │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Query: "error" in file src/utils/error_handler.rs                 │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Matches: 15 occurrences                                           │    │
 │   │  Path depth: 2 (src/utils/)                                        │    │
 │   │  Modified: 3 days ago                                              │    │
 │   │  Term "error" appears in filename                                  │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Score breakdown:                                                  │    │
 │   │  ┌──────────────────────────────────────────────────────────────┐  │    │
 │   │  │  Match count:   log2(15 + 1) × 1.0           = 4.0           │  │    │
-│   │  │  Filename:      2.0 × 2.0                     = 4.0           │  │    │
-│   │  │  Depth:         -0.05 × 2                     = -0.1          │  │    │
+│   │  │  Filename:      2.0 × 2.0                     = 4.0          │  │    │
+│   │  │  Depth:         -0.05 × 2                     = -0.1         │  │    │
 │   │  │  Recency:       e^(-3/7) × 0.5               = 0.32          │  │    │
 │   │  │  ────────────────────────────────────────────────────────    │  │    │
-│   │  │  TOTAL:                                       = 8.22          │  │    │
+│   │  │  TOTAL:                                       = 8.22         │  │    │
 │   │  └──────────────────────────────────────────────────────────────┘  │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   LOGARITHMIC MATCH WEIGHTING:                                              │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  WHY: Prevents huge files from dominating results                  │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Matches    Linear Score    Log Score                              │    │
 │   │  ───────    ────────────    ─────────                              │    │
 │   │  1          1               1.0                                    │    │
 │   │  10         10              3.5                                    │    │
 │   │  100        100             6.7                                    │    │
 │   │  1000       1000            10.0                                   │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Effect: File with 1000 matches scores only 3x higher than         │    │
 │   │          file with 10 matches (instead of 100x)                    │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1701,66 +1701,66 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    EARLY TERMINATION                                         │
+│                    EARLY TERMINATION                                        │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   OBSERVATION: Users rarely need ALL matches                                │
-│                                                                              │
+│                                                                             │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Default limit: 100 results                                        │    │
 │   │  User-specified: fxi -m 20 "pattern" (20 results)                  │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   TERMINATION STRATEGIES:                                                   │
-│                                                                              │
+│                                                                             │
 │   1. File-only mode (-l):                                                   │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  // Atomic counter tracks matching files                           │    │
 │   │  let match_count = AtomicUsize::new(0);                            │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  candidates.par_iter().for_each(|doc| {                            │    │
 │   │      // Early exit check                                           │    │
 │   │      if match_count.load(Ordering::Relaxed) >= limit {             │    │
 │   │          return;  // Don't process more files                      │    │
 │   │      }                                                             │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │      if file_matches(doc) {                                        │    │
 │   │          match_count.fetch_add(1, Ordering::Relaxed);              │    │
 │   │      }                                                             │    │
 │   │  });                                                               │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   2. Content search with ranking:                                           │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  // Collect 1.5x limit for better ranking                          │    │
 │   │  let target = limit + (limit / 2);                                 │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  let results = candidates                                          │    │
 │   │      .par_iter()                                                   │    │
 │   │      .filter_map(|doc| search_file(doc))                           │    │
 │   │      .take_any_while(|_| results.len() < target)  // Early exit    │    │
 │   │      .collect::<Vec<_>>();                                         │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  // Sort by score and take top `limit`                             │    │
 │   │  results.sort_by(|a, b| b.score.partial_cmp(&a.score));            │    │
 │   │  results.truncate(limit);                                          │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│   PERFORMANCE IMPACT:                                                        │
+│                                                                             │
+│   PERFORMANCE IMPACT:                                                       │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Query: "import" (very common)                                     │    │
 │   │  Codebase: 150,000 files                                           │    │
 │   │  Matches in: 100,000 files                                         │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Without early termination:                                        │    │
 │   │    • Process all 100,000 matching files                            │    │
 │   │    • Time: ~10 seconds                                             │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  With early termination (limit=100):                               │    │
 │   │    • Process ~150 files (1.5x for ranking)                         │    │
 │   │    • Time: ~15ms (670x faster!)                                    │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1772,51 +1772,51 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                      PERFORMANCE BENCHMARKS                                  │
+│                      PERFORMANCE BENCHMARKS                                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   TEST ENVIRONMENT:                                                         │
 │   • CPU: Apple M1 Pro (8 cores)                                             │
 │   • RAM: 16GB                                                               │
 │   • SSD: NVMe                                                               │
 │   • Codebase: Linux kernel (80,000 files, 30M LOC)                          │
-│                                                                              │
+│                                                                             │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │                       SEARCH PERFORMANCE                            │    │
+│   │                       SEARCH PERFORMANCE                           │    │
 │   ├────────────────────────────────────────────────────────────────────┤    │
 │   │  Query Type              fxi         ripgrep      Speedup          │    │
 │   │  ──────────              ───         ───────      ───────          │    │
 │   │  Common literal          8ms         3,200ms      400x             │    │
 │   │  (e.g., "return")                                                  │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Rare literal            3ms         3,200ms      1,067x           │    │
 │   │  (e.g., "xyzzy123")                                                │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Regex with prefix       45ms        4,500ms      100x             │    │
 │   │  (e.g., "error.*hand")                                             │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  File list (-l)          5ms         2,800ms      560x             │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Extension filter        12ms        800ms        67x              │    │
 │   │  (ext:c error)                                                     │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │                      INDEXING PERFORMANCE                           │    │
+│   │                      INDEXING PERFORMANCE                          │    │
 │   ├────────────────────────────────────────────────────────────────────┤    │
-│   │  Phase                   Time         Rate                          │    │
-│   │  ─────                   ────         ────                          │    │
-│   │  File discovery          8s           10,000 files/s                │    │
-│   │  Trigram extraction      25s          3,200 files/s                 │    │
-│   │  Segment writing         15s          5,300 files/s                 │    │
-│   │  ─────────────────────────────────────────────────────────────────  │    │
-│   │  Total                   48s          1,667 files/s                 │    │
-│   │                                                                     │    │
+│   │  Phase                   Time         Rate                         │    │
+│   │  ─────                   ────         ────                         │    │
+│   │  File discovery          8s           10,000 files/s               │    │
+│   │  Trigram extraction      25s          3,200 files/s                │    │
+│   │  Segment writing         15s          5,300 files/s                │    │
+│   │  ────────────────────────────────────────────────────────────────  │    │
+│   │  Total                   48s          1,667 files/s                │    │
+│   │                                                                    │    │
 │   │  Index size: 2.1GB (7% of source size)                             │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │                       MEMORY USAGE                                  │    │
+│   │                       MEMORY USAGE                                 │    │
 │   ├────────────────────────────────────────────────────────────────────┤    │
 │   │  Component                          Size                           │    │
 │   │  ─────────                          ────                           │    │
@@ -1824,10 +1824,10 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │  Index reader (warm, all segments)  450MB                          │    │
 │   │  Query execution (typical)          50-100MB                       │    │
 │   │  File cache (when used)             up to 128MB                    │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Peak during indexing:              1.2GB                          │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1835,9 +1835,9 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                     TIME COMPLEXITY ANALYSIS                                 │
+│                     TIME COMPLEXITY ANALYSIS                                │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   INDEXING:                                                                 │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Operation                 Complexity      Notes                   │    │
@@ -1846,10 +1846,10 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │  Trigram extraction        O(F × S)        S = avg file size       │    │
 │   │  Dictionary building       O(T log T)      T = unique trigrams     │    │
 │   │  Posting encoding          O(P)            P = total postings      │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Total: O(F × S + T log T)                                         │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   QUERY EXECUTION:                                                          │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Operation                 Complexity      Notes                   │    │
@@ -1858,12 +1858,12 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │  Posting decode            O(P)            P = posting list size   │    │
 │   │  Bitmap intersection       O(min(P1,P2))   Roaring optimization    │    │
 │   │  Content verification      O(C × M)        C = candidates, M = match│   │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Total: O(log D + P + C × M)                                       │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  With early termination: O(log D + L × M)  L = limit               │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 │   SPACE COMPLEXITY:                                                         │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Component                 Size Formula                            │    │
@@ -1872,10 +1872,10 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │   │  Trigram dictionary        O(T × 20 bytes)                         │    │
 │   │  Posting lists             O(P × ~2.5 bytes) (compressed)          │    │
 │   │  Bloom filters             O(T × 1.2 bytes)                        │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Total index: ~5-10% of source code size                           │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1883,37 +1883,37 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                       DESIGN TRADE-OFFS                                      │
+│                       DESIGN TRADE-OFFS                                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │   ┌────────────────────────────────────────────────────────────────────┐    │
 │   │  Trade-off                  Benefit               Cost             │    │
 │   │  ──────────                 ───────               ────             │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Persistent index           100-400x faster       Disk space       │    │
 │   │                             searches              (5-10% of src)   │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Stop-gram filtering        Smaller candidate     May miss some    │    │
 │   │                             sets                  very common terms│    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Bloom filters              Fast segment skip     1% false positive│    │
 │   │                                                   (still correct)  │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Early termination          2-10x faster for      May miss better  │    │
-│   │                             limited queries       matches           │    │
-│   │                                                                     │    │
+│   │                             limited queries       matches          │    │
+│   │                                                                    │    │
 │   │  Tiered trigram extraction  30-40% faster index   Code complexity  │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Token index                Exact word matches    Additional index │    │
 │   │                                                   space            │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Delta encoding             60-70% smaller index  Decode overhead  │    │
 │   │                                                   (minimal)        │    │
-│   │                                                                     │    │
+│   │                                                                    │    │
 │   │  Memory-mapped I/O          Zero-copy for large   Page fault cost  │    │
 │   │                             files                 for small files  │    │
 │   └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1923,22 +1923,22 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        QUERY SYNTAX                                          │
+│                        QUERY SYNTAX                                         │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │  LITERALS                                                                   │
 │  ────────                                                                   │
 │  foo              Substring match for "foo"                                 │
 │  "foo bar"        Exact phrase match                                        │
 │  /pattern/        Regular expression                                        │
-│                                                                              │
+│                                                                             │
 │  BOOLEAN OPERATORS                                                          │
 │  ─────────────────                                                          │
 │  foo bar          AND: both must match                                      │
 │  foo | bar        OR: either can match                                      │
 │  -foo             NOT: exclude matches                                      │
 │  (foo | bar) baz  Grouping                                                  │
-│                                                                              │
+│                                                                             │
 │  FIELD FILTERS                                                              │
 │  ─────────────                                                              │
 │  ext:rs           Extension filter                                          │
@@ -1948,13 +1948,13 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │  size:>1000       File size (bytes)                                         │
 │  mtime:>2024-01   Modified after date                                       │
 │  line:100-200     Line range                                                │
-│                                                                              │
+│                                                                             │
 │  ADVANCED                                                                   │
 │  ────────                                                                   │
 │  near:foo,bar,5   Proximity: terms within 5 lines                           │
 │  term^2.0         Boost: multiply term score by 2                           │
 │  case:foo         Case-sensitive match                                      │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1964,9 +1964,9 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    SUPPORTED LANGUAGES (31 total)                            │
+│                    SUPPORTED LANGUAGES (31 total)                           │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
+│                                                                             │
 │  Language      Extensions            Language       Extensions              │
 │  ────────      ──────────            ────────       ──────────              │
 │  Rust          .rs                   TypeScript     .ts, .tsx               │
@@ -1985,7 +1985,7 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 │  YAML          .yml, .yaml           TOML           .toml                   │
 │  XML           .xml                  Markdown       .md, .markdown          │
 │  Protobuf      .proto                                                       │
-│                                                                              │
+│                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
