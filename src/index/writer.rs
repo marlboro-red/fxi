@@ -255,7 +255,8 @@ impl ChunkedIndexWriter {
 
         // Convert to vec for parallel processing and sort by trigram for consistent output
         let mut entries: Vec<_> = trigram_postings.into_iter().collect();
-        entries.sort_unstable_by_key(|(trigram, _)| *trigram);
+        // Use parallel sort - faster for large entry counts
+        entries.par_sort_unstable_by_key(|(trigram, _)| *trigram);
 
         let entry_count = entries.len();
 
@@ -326,7 +327,8 @@ impl ChunkedIndexWriter {
 
         // Convert to vec for parallel processing and sort by token for consistent output
         let mut entries: Vec<_> = token_postings.into_iter().collect();
-        entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        // Use parallel sort - string comparison is expensive
+        entries.par_sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
 
         let entry_count = entries.len();
 
