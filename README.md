@@ -21,6 +21,35 @@ A terminal-first, ultra-fast code search engine built in Rust.
 cargo build --release
 ```
 
+## VS Code Extension
+
+A VS Code extension is available in the `vscode-extension/` directory.
+
+### Building and Installing
+
+```bash
+cd vscode-extension
+npm install
+npm run build
+code --install-extension .
+```
+
+Alternatively, package it as a `.vsix` file:
+
+```bash
+npm install -g @vscode/vsce
+npm run package
+code --install-extension fxi-0.1.0.vsix
+```
+
+### Features
+
+- Sidebar search panel with real-time results
+- Click to open files at matching lines
+- Context lines and files-only mode
+- Daemon status indicator
+- Commands for starting daemon and building index
+
 ## Usage
 
 ### Build Index
