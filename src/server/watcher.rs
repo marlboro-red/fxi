@@ -4,15 +4,95 @@
 //! when files change in watched directories. Changes are debounced and batched for
 //! efficient processing.
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::Deserialize;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::utils::app_data::get_app_data_dir;
+
+/// Directories that should always be ignored by the file watcher.
+/// Matches the filter_entry list in build.rs for consistency.
+pub const IGNORED_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    ".codesearch",
+    "__pycache__",
+    ".venv",
+    "venv",
+];
+
+/// Build a gitignore matcher for the given root directory.
+///
+/// Loads patterns from:
+/// - `<root>/.gitignore`
+/// - `<root>/.git/info/exclude`
+/// - Global gitignore (`~/.config/git/ignore` or `~/.gitignore_global`)
+///
+/// Returns `Gitignore::empty()` on errors.
+pub fn build_gitignore_matcher(root: &Path) -> Gitignore {
+    let mut builder = GitignoreBuilder::new(root);
+
+    // Load root .gitignore
+    let gitignore_path = root.join(".gitignore");
+    if gitignore_path.exists() {
+        let _ = builder.add(&gitignore_path);
+    }
+
+    // Load .git/info/exclude
+    let exclude_path = root.join(".git").join("info").join("exclude");
+    if exclude_path.exists() {
+        let _ = builder.add(&exclude_path);
+    }
+
+    // Load global gitignore files
+    if let Some(home) = dirs::home_dir() {
+        // ~/.config/git/ignore (XDG standard)
+        let xdg_ignore = home.join(".config").join("git").join("ignore");
+        if xdg_ignore.exists() {
+            let _ = builder.add(&xdg_ignore);
+        }
+
+        // ~/.gitignore_global (common macOS/legacy location)
+        let global_ignore = home.join(".gitignore_global");
+        if global_ignore.exists() {
+            let _ = builder.add(&global_ignore);
+        }
+    }
+
+    builder.build().unwrap_or_else(|_| Gitignore::empty())
+}
+
+/// Check if a path should be ignored by the file watcher.
+///
+/// Fast-path checks path components against `IGNORED_DIRS` and hidden file
+/// prefixes (`.`), then falls back to the gitignore matcher.
+pub fn should_ignore_path(gitignore: &Gitignore, rel_path: &Path, is_dir: bool) -> bool {
+    // Fast-path: check path components against hardcoded ignore list and hidden files
+    for component in rel_path.components() {
+        if let std::path::Component::Normal(name) = component {
+            let name_str = name.to_string_lossy();
+            // Check hardcoded ignored directories
+            if IGNORED_DIRS.iter().any(|&d| name_str == d) {
+                return true;
+            }
+            // Check hidden files/directories (starting with '.')
+            if name_str.starts_with('.') {
+                return true;
+            }
+        }
+    }
+
+    // Check against gitignore patterns
+    gitignore
+        .matched_path_or_any_parents(rel_path, is_dir)
+        .is_ignore()
+}
 
 /// Default debounce window in milliseconds
 pub const DEFAULT_DEBOUNCE_MS: u64 = 500;
@@ -635,5 +715,65 @@ foo = "bar"
         let config: ConfigFile = toml::from_str(toml_content).unwrap();
         assert_eq!(config.watcher.debounce_ms, None);
         assert_eq!(config.watcher.merge_segment_threshold, None);
+    }
+
+    #[test]
+    fn test_should_ignore_hardcoded_dirs() {
+        let gi = Gitignore::empty();
+        assert!(should_ignore_path(&gi, Path::new(".git/config"), false));
+        assert!(should_ignore_path(&gi, Path::new("node_modules/foo/bar.js"), false));
+        assert!(should_ignore_path(&gi, Path::new("target/debug/build"), true));
+        assert!(should_ignore_path(&gi, Path::new(".codesearch/index"), false));
+        assert!(should_ignore_path(&gi, Path::new("__pycache__/module.pyc"), false));
+        assert!(should_ignore_path(&gi, Path::new(".venv/lib/python"), true));
+        assert!(should_ignore_path(&gi, Path::new("venv/bin/activate"), false));
+    }
+
+    #[test]
+    fn test_should_ignore_hidden_files() {
+        let gi = Gitignore::empty();
+        assert!(should_ignore_path(&gi, Path::new(".hidden_file"), false));
+        assert!(should_ignore_path(&gi, Path::new(".env"), false));
+        assert!(should_ignore_path(&gi, Path::new("src/.hidden/foo.rs"), false));
+    }
+
+    #[test]
+    fn test_should_not_ignore_normal_files() {
+        let gi = Gitignore::empty();
+        assert!(!should_ignore_path(&gi, Path::new("src/main.rs"), false));
+        assert!(!should_ignore_path(&gi, Path::new("Cargo.toml"), false));
+        assert!(!should_ignore_path(&gi, Path::new("docs/readme.md"), false));
+    }
+
+    #[test]
+    fn test_should_ignore_gitignore_patterns() {
+        // Build a gitignore matcher with a custom pattern
+        let dir = std::env::temp_dir().join("fxi_test_gitignore");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let mut builder = GitignoreBuilder::new(&dir);
+        builder.add_line(None, "*.log").unwrap();
+        builder.add_line(None, "build/").unwrap();
+        let gi = builder.build().unwrap();
+
+        assert!(should_ignore_path(&gi, Path::new("app.log"), false));
+        assert!(should_ignore_path(&gi, Path::new("logs/debug.log"), false));
+        assert!(should_ignore_path(&gi, Path::new("build/output.js"), false));
+        assert!(!should_ignore_path(&gi, Path::new("src/main.rs"), false));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_gitignore_matcher_no_gitignore() {
+        // build_gitignore_matcher should not panic on a dir without .gitignore
+        let dir = std::env::temp_dir().join("fxi_test_no_gitignore");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let gi = build_gitignore_matcher(&dir);
+        // Should not ignore normal files
+        assert!(!should_ignore_path(&gi, Path::new("src/main.rs"), false));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

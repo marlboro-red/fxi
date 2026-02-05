@@ -130,13 +130,21 @@ enum Commands {
 #[derive(Subcommand)]
 enum DaemonAction {
     /// Start the daemon in background
-    Start,
+    Start {
+        /// Enable file watching for automatic index updates
+        #[arg(long)]
+        watch: bool,
+    },
     /// Stop the running daemon
     Stop,
     /// Check daemon status
     Status,
     /// Run daemon in foreground (for debugging)
-    Foreground,
+    Foreground {
+        /// Enable file watching for automatic index updates
+        #[arg(long)]
+        watch: bool,
+    },
     /// Reload index for a path
     Reload {
         /// Path to the codebase to reload
@@ -233,14 +241,14 @@ fn handle_daemon_command(action: DaemonAction) -> Result<()> {
     use server::{is_daemon_running, IndexClient};
 
     match action {
-        DaemonAction::Start => {
+        DaemonAction::Start { watch } => {
             if is_daemon_running() {
                 println!("Daemon is already running");
                 return Ok(());
             }
 
             println!("Starting fxid daemon...");
-            server::daemon::daemonize()?;
+            server::daemon::daemonize(watch)?;
 
             // Wait a moment for daemon to start
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -315,14 +323,14 @@ fn handle_daemon_command(action: DaemonAction) -> Result<()> {
             }
         }
 
-        DaemonAction::Foreground => {
+        DaemonAction::Foreground { watch } => {
             if is_daemon_running() {
                 println!("Daemon is already running in background. Stop it first with 'fxi daemon stop'");
                 return Ok(());
             }
 
             println!("Running daemon in foreground (Ctrl+C to stop)...");
-            server::daemon::run_foreground()?;
+            server::daemon::run_foreground(watch)?;
         }
 
         DaemonAction::Reload { path } => {

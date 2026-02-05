@@ -19,3 +19,6 @@ Thumbs.db
 # Rust - Cargo.lock is kept for reproducible builds
 .claude/
 *.tmp
+
+*.bat
+*.ps1

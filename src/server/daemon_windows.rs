@@ -15,7 +15,8 @@ use crate::server::protocol::{
     Request, Response, SearchMatchData, SearchResponse, StatusResponse,
 };
 use crate::server::watcher::{
-    ChangeBatch, ChangeKind, WatcherConfig, WatcherHandle, WatcherMessage,
+    build_gitignore_matcher, should_ignore_path, ChangeBatch, ChangeKind, WatcherConfig,
+    WatcherHandle, WatcherMessage,
 };
 use crate::server::{get_pid_path, get_pipe_name};
 use anyhow::{Context, Result};
@@ -299,16 +300,18 @@ pub struct IndexServer {
     watcher_config: WatcherConfig,
     /// Accumulated changes per index (root_path -> pending changes)
     pending_changes: Mutex<HashMap<PathBuf, PendingChanges>>,
+    /// Whether file watching is enabled
+    watch_enabled: bool,
 }
 
 impl IndexServer {
     /// Create a new index server wrapped in Arc
-    pub fn new() -> Arc<Self> {
+    pub fn new(watch_enabled: bool) -> Arc<Self> {
         let (watcher_tx, watcher_rx) = mpsc::channel();
         let config = WatcherConfig::from_env();
         eprintln!(
-            "fxid: config: debounce={}ms, delta_flush={}s, merge_segments={}, rebuild_threshold={}%",
-            config.debounce_ms, config.delta_flush_interval_secs,
+            "fxid: config: watch={}, debounce={}ms, delta_flush={}s, merge_segments={}, rebuild_threshold={}%",
+            watch_enabled, config.debounce_ms, config.delta_flush_interval_secs,
             config.merge_segment_threshold, config.rebuild_threshold_percent
         );
         Arc::new(Self {
@@ -319,6 +322,7 @@ impl IndexServer {
             watcher_rx: Mutex::new(watcher_rx),
             watcher_config: config,
             pending_changes: Mutex::new(HashMap::new()),
+            watch_enabled,
         })
     }
 
@@ -1131,21 +1135,22 @@ impl IndexServer {
     }
 
     /// Ensure an index is loaded and watcher is running
+    /// Ensure an index is loaded and watcher is running (if enabled)
     fn ensure_index_loaded(&self, root_path: &PathBuf) -> Result<()> {
         // Check with read lock first
-        let needs_watcher = {
+        let needs_load_or_watch = {
             let indexes = self.indexes.read().unwrap();
             if let Some(cached) = indexes.get(root_path) {
                 // Index loaded, check if watcher needs to be started
-                !cached.is_watching()
+                self.watch_enabled && !cached.is_watching()
             } else {
                 // Index not loaded
                 true
             }
         };
 
-        // If index exists but watcher not running, start it
-        if !needs_watcher {
+        // If index exists and watcher not needed (or already running), return
+        if !needs_load_or_watch {
             return Ok(());
         }
 
@@ -1174,17 +1179,19 @@ impl IndexServer {
             }
         }
 
-        // Start watcher if not already running
-        let should_start_watcher = {
-            let indexes = self.indexes.read().unwrap();
-            indexes
-                .get(root_path)
-                .is_some_and(|c| !c.is_watching())
-        };
+        // Start watcher if enabled and not already running
+        if self.watch_enabled {
+            let should_start_watcher = {
+                let indexes = self.indexes.read().unwrap();
+                indexes
+                    .get(root_path)
+                    .is_some_and(|c| !c.is_watching())
+            };
 
-        if should_start_watcher {
-            eprintln!("fxid: starting file watcher for {}", root_path.display());
-            self.spawn_watcher(root_path);
+            if should_start_watcher {
+                eprintln!("fxid: starting file watcher for {}", root_path.display());
+                self.spawn_watcher(root_path);
+            }
         }
 
         Ok(())
@@ -1324,6 +1331,9 @@ fn run_watcher_thread(
     // Start watching
     watcher.watch(&root_path, RecursiveMode::Recursive)?;
 
+    // Build gitignore matcher once for the root
+    let gitignore = build_gitignore_matcher(&root_path);
+
     eprintln!("fxid: watching {} for changes", root_path.display());
 
     // Event processing loop
@@ -1352,18 +1362,8 @@ fn run_watcher_thread(
 
                         // Get relative path
                         if let Ok(rel_path) = path.strip_prefix(&root_path) {
-                            // Skip ignored directories
-                            let path_str = rel_path.to_string_lossy();
-                            if path_str.contains(".git\\")
-                                || path_str.contains(".git/")
-                                || path_str.contains("node_modules\\")
-                                || path_str.contains("node_modules/")
-                                || path_str.contains("target\\")
-                                || path_str.contains("target/")
-                                || path_str.contains(".codesearch\\")
-                                || path_str.contains(".codesearch/")
-                                || path_str.starts_with('.')
-                            {
+                            // Skip ignored paths (hardcoded dirs, hidden files, gitignore patterns)
+                            if should_ignore_path(&gitignore, rel_path, false) {
                                 continue;
                             }
 
@@ -1404,7 +1404,7 @@ fn run_watcher_thread(
 }
 
 /// Daemonize the current process (Windows version - runs as background process)
-pub fn daemonize() -> Result<()> {
+pub fn daemonize(watch: bool) -> Result<()> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
@@ -1416,8 +1416,12 @@ pub fn daemonize() -> Result<()> {
     let exe = std::env::current_exe()?;
 
     // Start the server in foreground mode as a detached process
+    let mut args = vec!["daemon", "foreground"];
+    if watch {
+        args.push("--watch");
+    }
     Command::new(&exe)
-        .args(["daemon", "foreground"])
+        .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1432,8 +1436,8 @@ pub fn daemonize() -> Result<()> {
 }
 
 /// Start the daemon in foreground (for debugging)
-pub fn run_foreground() -> Result<()> {
-    let server = IndexServer::new();
+pub fn run_foreground(watch: bool) -> Result<()> {
+    let server = IndexServer::new(watch);
     server.run()
 }
 
