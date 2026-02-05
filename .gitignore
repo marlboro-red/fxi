@@ -22,3 +22,8 @@ Thumbs.db
 
 *.bat
 *.ps1
+
+# VS Code Extension
+vscode-extension/node_modules/
+vscode-extension/dist/
+vscode-extension/*.vsix

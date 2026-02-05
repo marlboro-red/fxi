@@ -1,0 +1,106 @@
+{
+  "name": "fxi",
+  "displayName": "fxi",
+  "description": "Ultra-fast code search powered by the fxi daemon",
+  "version": "0.1.0",
+  "publisher": "fxi",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "fxi",
+          "title": "fxi",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "fxi": [
+        {
+          "type": "webview",
+          "id": "fxi.searchPanel",
+          "name": "Search"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "fxi.search",
+        "title": "FXI: Search"
+      },
+      {
+        "command": "fxi.indexWorkspace",
+        "title": "FXI: Build Index"
+      },
+      {
+        "command": "fxi.reloadIndex",
+        "title": "FXI: Reload Index"
+      },
+      {
+        "command": "fxi.startDaemon",
+        "title": "FXI: Start Daemon"
+      },
+      {
+        "command": "fxi.stopDaemon",
+        "title": "FXI: Stop Daemon"
+      },
+      {
+        "command": "fxi.showStatus",
+        "title": "FXI: Daemon Status"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "fxi.search",
+        "key": "ctrl+shift+i",
+        "mac": "cmd+shift+i"
+      }
+    ],
+    "configuration": {
+      "title": "fxi",
+      "properties": {
+        "fxi.binaryPath": {
+          "type": "string",
+          "default": "fxi",
+          "description": "Path to the fxi binary"
+        },
+        "fxi.defaultLimit": {
+          "type": "number",
+          "default": 200,
+          "description": "Default maximum number of search results"
+        },
+        "fxi.defaultContextLines": {
+          "type": "number",
+          "default": 2,
+          "description": "Default number of context lines for Content search"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "package": "vsce package",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vitest/coverage-v8": "^4.0.18",
+    "esbuild": "^0.27.2",
+    "typescript": "^5.3.0",
+    "vitest": "^4.0.18"
+  }
+}

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Angle brackets representing code -->
+  <polyline points="7 7 3 12 7 17"/>
+  <polyline points="17 7 21 12 17 17"/>
+  <!-- Lightning bolt through the center — fast indexing -->
+  <polygon points="13 2 9 13 12.5 13 11 22 15 11 11.5 11 13 2" fill="currentColor" stroke="none"/>
+</svg>
