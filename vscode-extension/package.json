@@ -72,7 +72,7 @@
         "fxi.binaryPath": {
           "type": "string",
           "default": "fxi",
-          "description": "Path to the fxi binary"
+          "description": "Name or path of the fxi executable (e.g. \"vfp9\", \"C:\\\\tools\\\\vfp9.exe\")"
         },
         "fxi.defaultLimit": {
           "type": "number",

@@ -31,14 +31,7 @@ A VS Code extension is available in the `vscode-extension/` directory.
 cd vscode-extension
 npm install
 npm run build
-code --install-extension .
-```
-
-Alternatively, package it as a `.vsix` file:
-
-```bash
-npm install -g @vscode/vsce
-npm run package
+npx @vscode/vsce package
 code --install-extension fxi-0.1.0.vsix
 ```
 
