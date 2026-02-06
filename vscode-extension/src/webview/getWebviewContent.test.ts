@@ -57,6 +57,12 @@ describe("getWebviewContent", () => {
     expect(html).toContain('placeholder="Search..."');
   });
 
+  it("includes search button", () => {
+    const html = getHtml();
+    expect(html).toContain('id="searchBtn"');
+    expect(html).toContain("Search</button>");
+  });
+
   it("includes files-only checkbox", () => {
     const html = getHtml();
     expect(html).toContain('id="filesOnly"');
@@ -102,10 +108,13 @@ describe("getWebviewContent", () => {
     expect(html).toContain("&quot;");
   });
 
-  it("uses Number.isFinite for numeric input parsing", () => {
+  it("uses Number.isFinite for numeric input parsing with clamping", () => {
     const html = getHtml();
     // Verify the num() helper uses proper numeric check (not falsy check)
     expect(html).toContain("Number.isFinite(v)");
+    // Verify clamping with Math.max/Math.min
+    expect(html).toContain("Math.max(min");
+    expect(html).toContain("Math.min(max");
   });
 
   it("restores filesOnly state with explicit undefined check", () => {
@@ -163,6 +172,13 @@ describe("getWebviewContent", () => {
     const html = getHtml();
     expect(html).toContain("e.key === 'Enter'");
     expect(html).toContain("doSearch()");
+  });
+
+  it("debounces loading indicator", () => {
+    const html = getHtml();
+    expect(html).toContain("function showLoading");
+    expect(html).toContain("function hideLoading");
+    expect(html).toContain("setTimeout");
   });
 
   it("includes file open functionality", () => {

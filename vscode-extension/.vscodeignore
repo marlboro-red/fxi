@@ -1,5 +1,8 @@
 src/**
 node_modules/**
+.vscode/**
 tsconfig.json
 esbuild.mjs
+vitest.config.ts
+package-lock.json
 .gitignore

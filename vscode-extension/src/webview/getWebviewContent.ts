@@ -57,6 +57,7 @@ export function getWebviewContent(
     /* --- Search box --- */
     .search-box {
       display: flex;
+      gap: 4px;
       margin-bottom: 6px;
     }
     .search-box input {
@@ -69,6 +70,7 @@ export function getWebviewContent(
       outline: none;
       font-family: inherit;
       font-size: inherit;
+      min-width: 0;
     }
     .search-box input:focus {
       border-color: var(--vscode-focusBorder);
@@ -78,6 +80,24 @@ export function getWebviewContent(
     }
     .search-box input:disabled {
       opacity: 0.5;
+    }
+    .search-btn {
+      padding: 4px 8px;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border: none;
+      border-radius: 2px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: inherit;
+      white-space: nowrap;
+    }
+    .search-btn:hover {
+      background: var(--vscode-button-hoverBackground);
+    }
+    .search-btn:disabled {
+      opacity: 0.5;
+      cursor: default;
     }
 
     /* --- Options row --- */
@@ -263,6 +283,7 @@ export function getWebviewContent(
 
   <div class="search-box">
     <input type="text" id="queryInput" placeholder="Search..." autofocus />
+    <button class="search-btn" id="searchBtn" title="Search (Enter)">Search</button>
   </div>
 
   <div class="options">
@@ -273,7 +294,7 @@ export function getWebviewContent(
     </div>
     <div class="field field-wide">
       <label for="limitInput">Limit:</label>
-      <input type="number" id="limitInput" value="${defaultLimit}" min="1" max="10000" />
+      <input type="number" id="limitInput" value="${defaultLimit}" min="0" max="10000" />
     </div>
   </div>
 
@@ -292,6 +313,7 @@ export function getWebviewContent(
     const banner = document.getElementById('banner');
     const bannerStartBtn = document.getElementById('bannerStartBtn');
     const queryInput = document.getElementById('queryInput');
+    const searchBtn = document.getElementById('searchBtn');
     const limitInput = document.getElementById('limitInput');
     const contextInput = document.getElementById('contextInput');
     const filesOnly = document.getElementById('filesOnly');
@@ -334,6 +356,7 @@ export function getWebviewContent(
     function updateConnectionUI(isConnected) {
       connected = isConnected;
       queryInput.disabled = !isConnected;
+      searchBtn.disabled = !isConnected;
 
       if (isConnected) {
         banner.classList.add('hidden');
@@ -367,9 +390,21 @@ export function getWebviewContent(
     // --- Search ---
     let lastFilesOnly = false;
 
-    function num(el, fallback) {
+    function num(el, fallback, min, max) {
       const v = parseInt(el.value);
-      return Number.isFinite(v) ? v : fallback;
+      if (!Number.isFinite(v)) return fallback;
+      return Math.max(min, Math.min(max, v));
+    }
+
+    let loadingTimer = null;
+
+    function showLoading() {
+      loadingTimer = setTimeout(() => { loading.classList.remove('hidden'); }, 150);
+    }
+
+    function hideLoading() {
+      if (loadingTimer) { clearTimeout(loadingTimer); loadingTimer = null; }
+      loading.classList.add('hidden');
     }
 
     function doSearch() {
@@ -381,15 +416,15 @@ export function getWebviewContent(
       results.innerHTML = '';
       statsBar.classList.add('hidden');
       hideStatus();
-      loading.classList.remove('hidden');
+      showLoading();
 
       lastFilesOnly = filesOnly.checked;
 
       vscode.postMessage({
         command: 'search',
         query,
-        limit: num(limitInput, ${defaultLimit}),
-        contextLines: num(contextInput, ${defaultContextLines}),
+        limit: num(limitInput, ${defaultLimit}, 0, 10000),
+        contextLines: num(contextInput, ${defaultContextLines}, 0, 20),
         filesOnly: filesOnly.checked,
       });
     }
@@ -397,6 +432,7 @@ export function getWebviewContent(
     queryInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') doSearch();
     });
+    searchBtn.addEventListener('click', doSearch);
 
     // --- Rendering helpers ---
     function escapeHtml(s) {
@@ -445,7 +481,7 @@ export function getWebviewContent(
     }
 
     function renderResults(data) {
-      loading.classList.add('hidden');
+      hideLoading();
       const matches = data.matches;
       const isFilesOnly = lastFilesOnly;
 
@@ -537,7 +573,7 @@ export function getWebviewContent(
     }
 
     function renderError(msg) {
-      loading.classList.add('hidden');
+      hideLoading();
       statsBar.classList.add('hidden');
 
       let extra = '';

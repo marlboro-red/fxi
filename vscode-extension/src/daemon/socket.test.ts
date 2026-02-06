@@ -4,6 +4,7 @@ import * as path from "path";
 describe("getSocketPath", () => {
   const originalEnv = { ...process.env };
   const originalGetuid = process.getuid;
+  const originalPlatform = process.platform;
 
   beforeEach(() => {
     delete process.env["XDG_RUNTIME_DIR"];
@@ -17,6 +18,7 @@ describe("getSocketPath", () => {
     } else {
       delete (process as any).getuid;
     }
+    Object.defineProperty(process, "platform", { value: originalPlatform });
     vi.restoreAllMocks();
   });
 
@@ -57,5 +59,19 @@ describe("getSocketPath", () => {
     (process as any).getuid = undefined;
     const { getSocketPath } = await import("./socket");
     expect(getSocketPath()).toBe("/tmp/fxi-0.sock");
+  });
+
+  it("returns named pipe with USERNAME on Windows", async () => {
+    Object.defineProperty(process, "platform", { value: "win32" });
+    process.env["USERNAME"] = "testuser";
+    const { getSocketPath } = await import("./socket");
+    expect(getSocketPath()).toBe("\\\\.\\pipe\\fxi-testuser");
+  });
+
+  it("returns named pipe without USERNAME fallback on Windows", async () => {
+    Object.defineProperty(process, "platform", { value: "win32" });
+    delete process.env["USERNAME"];
+    const { getSocketPath } = await import("./socket");
+    expect(getSocketPath()).toBe("\\\\.\\pipe\\fxi");
   });
 });
