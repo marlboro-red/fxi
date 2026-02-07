@@ -5,6 +5,7 @@ export class StatusBar implements vscode.Disposable {
   private item: vscode.StatusBarItem;
   private client: DaemonClient;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private connectionListener: () => void;
 
   constructor(client: DaemonClient) {
     this.client = client;
@@ -13,7 +14,8 @@ export class StatusBar implements vscode.Disposable {
     this.update();
     this.item.show();
 
-    client.on("connectionChange", () => this.update());
+    this.connectionListener = () => this.update();
+    client.on("connectionChange", this.connectionListener);
 
     // Poll every 10s
     this.pollTimer = setInterval(() => this.update(), 10_000);
@@ -35,6 +37,7 @@ export class StatusBar implements vscode.Disposable {
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
     }
+    this.client.removeListener("connectionChange", this.connectionListener);
     this.item.dispose();
   }
 }

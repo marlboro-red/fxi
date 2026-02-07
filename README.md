@@ -4,13 +4,16 @@ A terminal-first, ultra-fast code search engine built in Rust.
 
 ## Features
 
-- **100-400x faster than ripgrep** on large codebases (verified on Chromium)
+- **Up to 100-400x faster than ripgrep** on selective queries against large codebases (verified on Chromium)
 - **Ripgrep-like CLI**: Familiar flags (`-i`, `-A`, `-B`, `-C`, `-l`, `-c`)
 - **Persistent daemon**: Keeps indexes warm for instant searches
 - **Hybrid indexing**: Trigram + token index for fast narrowing
 - **Rich query syntax**: Boolean operators, proximity search, field filters, regex
 - **Interactive TUI**: Real-time search with vim-style keybindings
 - **Instant preview**: File preview with matched line highlighting
+- **File watching**: Daemon auto-updates indexes when files change (`--watch`)
+- **Incremental updates**: Delta segments for efficient index maintenance
+- **Cross-platform**: Unix sockets (Linux/macOS) and Windows named pipes
 - **Respects .gitignore**: Automatic filtering of ignored files
 - **Centralized indexes**: Stored in app data, not in project directories
 - **Auto-detection**: Finds codebase root from any subdirectory
@@ -40,8 +43,29 @@ code --install-extension fxi-0.1.0.vsix
 - Sidebar search panel with real-time results
 - Click to open files at matching lines
 - Context lines and files-only mode
-- Daemon status indicator
-- Commands for starting daemon and building index
+- Daemon status indicator in the status bar
+- Keyboard shortcut: `Ctrl+Shift+I` (macOS: `Cmd+Shift+I`)
+
+### Commands
+
+All accessible via the Command Palette (`Ctrl+Shift+P`):
+
+| Command | Description |
+|---------|-------------|
+| `FXI: Search` | Focus the search panel |
+| `FXI: Build Index` | Build index for the workspace |
+| `FXI: Reload Index` | Reload index from disk |
+| `FXI: Start Daemon` | Start the fxi daemon |
+| `FXI: Stop Daemon` | Stop the fxi daemon |
+| `FXI: Daemon Status` | Show daemon status |
+
+### Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `fxi.binaryPath` | `"fxi"` | Path to the fxi executable |
+| `fxi.defaultLimit` | `200` | Maximum search results (0 = unlimited) |
+| `fxi.defaultContextLines` | `2` | Context lines shown with results |
 
 ## Usage
 
@@ -168,12 +192,19 @@ fxi search [path]          # TUI for specific directory
 
 ```bash
 fxi daemon start           # Start daemon in background
+fxi daemon start --watch   # Start with file watching (auto-updates indexes)
 fxi daemon stop            # Stop the daemon
 fxi daemon status          # Check daemon status and stats
 fxi daemon reload [path]   # Reload index for a path
+fxi daemon foreground      # Run in foreground (for debugging)
+fxi daemon foreground --watch  # Foreground with file watching
 ```
 
-The daemon keeps indexes loaded in memory. When running, searches are **800x faster** on large codebases. Searches automatically use the daemon if available, falling back to direct index loading if not.
+The daemon keeps indexes loaded in memory. When running, searches are **100-400x faster** on large codebases. Searches automatically use the daemon if available, falling back to direct index loading if not.
+
+#### File Watching
+
+With `--watch`, the daemon monitors indexed directories for file changes and automatically updates indexes. Changes are debounced to handle rapid edits (e.g., IDE auto-save, git operations). The watcher respects `.gitignore` rules and skips common non-source directories (`node_modules`, `target`, `.git`, etc.).
 
 ### Manage Indexes
 
@@ -209,7 +240,7 @@ Each codebase gets a unique folder based on a hash of its root path:
     │           ├── grams.postings
     │           ├── tokens.dict
     │           ├── tokens.postings
-    │           └── linemap.bin
+    │           └── bloom.bin
     └── another-repo-i9j0k1l2m3n4o5p6/
         └── ...
 ```
@@ -367,7 +398,7 @@ All benchmarks run on Apple M2 Max.
 
 Times are averages of 3 runs. File counts shown for validation.
 
-#### Linux Kernal
+#### Linux Kernel
 
 | Pattern | fxi (ms) | rg (ms) | grep (ms) | fxi files | rg files | Speedup vs rg |
 |---------|----------|---------|-----------|-----------|----------|---------------|

@@ -118,9 +118,41 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Format unix timestamp
+/// Format unix timestamp as human-readable date string
 fn format_timestamp(ts: u64) -> String {
-    use std::time::{Duration, UNIX_EPOCH};
-    let datetime = UNIX_EPOCH + Duration::from_secs(ts);
-    format!("{:?}", datetime)
+    // Convert to a basic readable format without external crate
+    let secs = ts;
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Calculate date from days since epoch (1970-01-01)
+    let mut remaining_days = days as i64;
+    let mut year: i64 = 1970;
+
+    loop {
+        let days_in_year: i64 = if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) { 366 } else { 365 };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+
+    let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let month_days: [i64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 0;
+    for (i, &md) in month_days.iter().enumerate() {
+        if remaining_days < md {
+            month = i + 1;
+            break;
+        }
+        remaining_days -= md;
+    }
+    if month == 0 { month = 12; }
+    let day = remaining_days + 1;
+
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", year, month, day, hours, minutes, seconds)
 }

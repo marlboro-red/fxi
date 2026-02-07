@@ -1,7 +1,5 @@
-import * as vscode from "vscode";
 
 export function getWebviewContent(
-  _webview: vscode.Webview,
   nonce: string,
   defaultLimit: number,
   defaultContextLines: number
@@ -391,7 +389,7 @@ export function getWebviewContent(
     let lastFilesOnly = false;
 
     function num(el, fallback, min, max) {
-      const v = parseInt(el.value);
+      const v = parseInt(el.value, 10);
       if (!Number.isFinite(v)) return fallback;
       return Math.max(min, Math.min(max, v));
     }

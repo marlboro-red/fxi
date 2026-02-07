@@ -22,6 +22,9 @@ Thumbs.db
 
 *.bat
 *.ps1
+.perf-check-stamp
+performance-log.md
+scripts/perf-check.sh
 
 # VS Code Extension
 vscode-extension/node_modules/

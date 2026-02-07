@@ -87,8 +87,8 @@
     "keybindings": [
       {
         "command": "fxi.search",
-        "key": "ctrl+shift+i",
-        "mac": "cmd+shift+i"
+        "key": "ctrl+alt+f",
+        "mac": "cmd+alt+f"
       }
     ],
     "configuration": {

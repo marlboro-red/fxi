@@ -9,34 +9,43 @@ FXI achieves 100-400x faster search performance than ripgrep through persistent 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         User Interface                          │
-├──────────────────┬────────────────────┬────────────────────────┤
-│   CLI (main.rs)  │    TUI (tui/)      │   Server (server/)     │
-└────────┬─────────┴─────────┬──────────┴───────────┬────────────┘
-         │                   │                      │
-         └───────────────────┼──────────────────────┘
-                             │
-┌────────────────────────────▼────────────────────────────────────┐
-│                      Query Processing                           │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │   Parser    │→ │   Planner   │→ │       Executor          │  │
-│  │ (parser.rs) │  │(planner.rs) │  │    (executor.rs)        │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-┌────────────────────────────▼────────────────────────────────────┐
-│                      Index Layer                                │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │   Reader    │  │   Writer    │  │        Types            │  │
-│  │ (reader.rs) │  │ (writer.rs) │  │     (types.rs)          │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-┌────────────────────────────▼────────────────────────────────────┐
-│                     Storage (Filesystem)                        │
-│  ~/.local/share/fxi/indexes/{hash}/                             │
-│  ├── meta.json, docs.bin, paths.bin                             │
-│  └── segments/seg_NNNN/{grams.*, tokens.*, bloom.bin}           │
-└─────────────────────────────────────────────────────────────────┘
+├──────────────┬──────────────┬──────────────┬───────────────────┤
+│ CLI (main.rs)│  TUI (tui/)  │Server(server)│ VS Code Extension │
+└──────┬───────┴───────┬──────┴──────┬───────┴────────┬──────────┘
+       │               │             │                │
+       │               │             │    (IPC: Unix socket /
+       │               │             │     Windows named pipe)
+       └───────────────┼─────────────┘                │
+                       │                              │
+┌──────────────────────▼──────────────────────────────▼──────────┐
+│                  Daemon (server/)                               │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
+│  │ Protocol │  │  Client  │  │ Watcher  │  │   Debouncer   │  │
+│  └──────────┘  └──────────┘  └──────────┘  └───────────────┘  │
+└──────────────────────┬────────────────────────────────────────┘
+                       │
+┌──────────────────────▼────────────────────────────────────────┐
+│                      Query Processing                          │
+│  ┌─────────────┐  ┌─────────────┐  ┌───────────────────────┐  │
+│  │   Parser    │→ │   Planner   │→ │      Executor         │  │
+│  │ (parser.rs) │  │(planner.rs) │  │   (executor.rs)       │  │
+│  └─────────────┘  └─────────────┘  └───────────────────────┘  │
+└──────────────────────┬────────────────────────────────────────┘
+                       │
+┌──────────────────────▼────────────────────────────────────────┐
+│                      Index Layer                               │
+│  ┌─────────────┐  ┌─────────────┐  ┌───────────────────────┐  │
+│  │   Reader    │  │   Writer    │  │       Types           │  │
+│  │ (reader.rs) │  │ (writer.rs) │  │    (types.rs)         │  │
+│  └─────────────┘  └─────────────┘  └───────────────────────┘  │
+└──────────────────────┬────────────────────────────────────────┘
+                       │
+┌──────────────────────▼────────────────────────────────────────┐
+│                     Storage (Filesystem)                       │
+│  ~/.local/share/fxi/indexes/{hash}/                            │
+│  ├── meta.json, docs.bin, paths.bin                            │
+│  └── segments/seg_NNNN/{grams.*, tokens.*, bloom.bin}          │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ## Module Structure
@@ -76,6 +85,8 @@ The server module provides a daemon for warm searches.
 | `client_unix.rs` | Unix client |
 | `client_windows.rs` | Windows client |
 | `protocol.rs` | JSON-based request/response protocol |
+| `watcher.rs` | File system watching for live index updates |
+| `debouncer.rs` | Event debouncing to batch rapid file changes |
 
 ### `src/tui/` - Terminal Interface
 
@@ -93,6 +104,20 @@ The server module provides a daemon for warm searches.
 | `bloom.rs` | Bloom filter for fast negative lookups |
 | `encoding.rs` | Variable-length integer encoding |
 | `app_data.rs` | XDG-compliant data directory management |
+
+### `vscode-extension/` - VS Code Integration
+
+A TypeScript extension that connects to the fxi daemon for IDE-integrated search.
+
+| Directory/File | Purpose |
+|----------------|---------|
+| `src/extension.ts` | Extension entry point and lifecycle |
+| `src/commands/` | Command handlers (search, daemon, index, reload) |
+| `src/daemon/` | Daemon communication (client, protocol, socket) |
+| `src/ui/` | Status bar and workspace utilities |
+| `src/webview/` | Search panel webview (HTML generation, message protocol) |
+
+The extension communicates with the daemon over the same Unix socket / Windows named pipe protocol used by the CLI.
 
 ## Key Design Decisions
 
@@ -137,7 +162,22 @@ Indexes are built in segments that can be:
 - Compacted in the background
 - Memory-mapped individually for efficient memory use
 
-### 5. Bloom Filter Pre-filtering
+### 5. Cross-Platform Daemon
+
+The daemon uses platform-specific IPC:
+- **Unix/macOS**: Unix domain sockets (`$XDG_RUNTIME_DIR/fxi.sock` or `~/.local/run/fxi.sock`)
+- **Windows**: Named pipes (`\\.\pipe\fxi-{username}`)
+
+Both share the same JSON-based length-prefixed protocol (`protocol.rs`), with platform-specific transport in `daemon_unix.rs`/`client_unix.rs` and `daemon_windows.rs`/`client_windows.rs`.
+
+### 6. File Watching and Incremental Updates
+
+The daemon supports live index updates via file system watching:
+- **Watcher** (`watcher.rs`): Monitors directories using the `notify` crate, respects `.gitignore` rules and skips non-source directories
+- **Debouncer** (`debouncer.rs`): Batches rapid file changes (IDE auto-save, git operations) into single update operations
+- **Delta segments**: Changes are written as new segments rather than rebuilding the full index, with periodic compaction available via `fxi compact`
+
+### 7. Bloom Filter Pre-filtering
 
 Each segment includes a Bloom filter for:
 - Fast rejection of queries that have no matches
@@ -210,13 +250,13 @@ Query String        Parser            Planner           Executor
         └── bloom.bin       # Bloom filter bitmap
 ```
 
-### Document Record (32 bytes)
+### Document Record (30 bytes)
 
 ```
-┌────────────┬────────────┬──────────┬──────────┬───────────┐
-│ path_offset│ path_len   │ size     │ mtime    │ language  │
-│ (8 bytes)  │ (4 bytes)  │ (8 bytes)│ (8 bytes)│ (2 bytes) │
-└────────────┴────────────┴──────────┴──────────┴───────────┘
+┌──────────┬──────────┬──────────┬──────────┬──────────┬───────┬────────────┐
+│ doc_id   │ path_id  │ size     │ mtime    │ language │ flags │ segment_id │
+│ (4 bytes)│ (4 bytes)│ (8 bytes)│ (8 bytes)│ (2 bytes)│(2 b)  │ (2 bytes)  │
+└──────────┴──────────┴──────────┴──────────┴──────────┴───────┴────────────┘
 ```
 
 ## Performance Characteristics
@@ -225,7 +265,7 @@ Query String        Parser            Planner           Executor
 |-----------|------------|-------|
 | Index open | O(1) | Just mmap, no actual I/O |
 | Trigram lookup | O(k) | k = posting list length |
-| Intersection | O(min(m,n)) | Merge-style intersection |
+| Intersection | O(m+n) | Merge-style intersection |
 | Content verification | O(n) | n = candidate count |
 
 Typical search latency: 5-50ms on million-file codebases.
@@ -246,7 +286,6 @@ Typical search latency: 5-50ms on million-file codebases.
 
 ## Future Directions
 
-- Incremental index updates (file watching)
 - Distributed indexing for very large codebases
 - Language-aware symbol extraction
 - Integration with LSP servers

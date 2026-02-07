@@ -5,6 +5,10 @@ edition = "2024"
 description = "Terminal-first, ultra-fast code search engine"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/user/fxi"
+keywords = ["search", "code-search", "index", "grep", "trigram"]
+categories = ["command-line-utilities", "development-tools", "text-processing"]
+rust-version = "1.85"
 
 [lib]
 name = "fxi"
@@ -72,3 +76,4 @@ harness = false
 lto = true
 codegen-units = 1
 opt-level = 3
+strip = true

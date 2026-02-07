@@ -1,16 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { getWebviewContent } from "./getWebviewContent";
 
-// Mock webview object (the function only uses it for type, doesn't call methods)
-const mockWebview = {} as any;
-
 describe("getWebviewContent", () => {
   const nonce = "abc123test";
   const defaultLimit = 200;
   const defaultContextLines = 2;
 
   function getHtml() {
-    return getWebviewContent(mockWebview, nonce, defaultLimit, defaultContextLines);
+    return getWebviewContent(nonce, defaultLimit, defaultContextLines);
   }
 
   it("returns valid HTML document", () => {
@@ -46,7 +43,7 @@ describe("getWebviewContent", () => {
   });
 
   it("uses different defaults when provided", () => {
-    const html = getWebviewContent(mockWebview, "x", 500, 5);
+    const html = getWebviewContent("x", 500, 5);
     expect(html).toContain('value="500"');
     expect(html).toContain('value="5"');
   });

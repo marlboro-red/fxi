@@ -303,6 +303,17 @@ export class DaemonClient extends EventEmitter {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    // Reject pending request
+    if (this.pending) {
+      this.pending.reject(new Error("Client disposed"));
+      this.pending = null;
+    }
+    // Reject queued requests
+    for (const item of this.queue) {
+      item.reject(new Error("Client disposed"));
+    }
+    this.queue = [];
+    this.processing = false;
     if (this.socket) {
       this.socket.removeAllListeners();
       this.socket.destroy();

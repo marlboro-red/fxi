@@ -223,7 +223,10 @@ impl<'a> QueryExecutor<'a> {
         self.sort_results(&mut results, query.options.sort);
 
         // Apply final limit (may have collected slightly more for better ranking)
-        results.truncate(query.options.limit);
+        // Skip truncation when limit == 0 (unlimited)
+        if query.options.limit > 0 {
+            results.truncate(query.options.limit);
+        }
 
         Ok(results)
     }

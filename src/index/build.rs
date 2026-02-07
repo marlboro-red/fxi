@@ -17,6 +17,28 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
+/// Check if a file extension is a known binary format (skip reading content)
+pub fn is_known_binary_ext(ext: &str) -> bool {
+    matches!(ext.to_ascii_lowercase().as_str(),
+        // Compiled/binary
+        "dll" | "exe" | "pdb" | "so" | "dylib" | "a" | "lib" | "o" | "obj" |
+        // Archives
+        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "nupkg" | "jar" | "war" | "ear" |
+        // Images
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "webp" | "tiff" | "tif" | "psd" |
+        // Fonts
+        "woff" | "woff2" | "ttf" | "eot" | "otf" |
+        // Documents (binary formats)
+        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" |
+        // Media
+        "mp3" | "mp4" | "avi" | "mov" | "wav" | "ogg" | "flac" | "mkv" | "webm" |
+        // Certificates/keys
+        "snk" | "pfx" | "p12" | "cer" | "crt" | "p7s" | "p7b" |
+        // Other binary/cache
+        "cache" | "db" | "sqlite" | "mdb" | "ldf" | "mdf"
+    )
+}
+
 /// Result of processing a single file (computed in parallel)
 pub struct ProcessedFile {
     pub rel_path: PathBuf,
@@ -237,26 +259,8 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
             .filter_map(|(full_path, rel_path)| {
                 // Fast-path for known binary extensions - skip reading content entirely
                 let ext = rel_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                let is_known_binary = matches!(ext.to_ascii_lowercase().as_str(),
-                    // Compiled/binary
-                    "dll" | "exe" | "pdb" | "so" | "dylib" | "a" | "lib" | "o" | "obj" |
-                    // Archives
-                    "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "nupkg" | "jar" | "war" | "ear" |
-                    // Images
-                    "png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "webp" | "tiff" | "tif" | "psd" |
-                    // Fonts
-                    "woff" | "woff2" | "ttf" | "eot" | "otf" |
-                    // Documents (binary formats)
-                    "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" |
-                    // Media
-                    "mp3" | "mp4" | "avi" | "mov" | "wav" | "ogg" | "flac" | "mkv" | "webm" |
-                    // Certificates/keys
-                    "snk" | "pfx" | "p12" | "cer" | "crt" | "p7s" | "p7b" |
-                    // Other binary/cache
-                    "cache" | "db" | "sqlite" | "mdb" | "ldf" | "mdf"
-                );
 
-                if is_known_binary {
+                if is_known_binary_ext(ext) {
                     if let Some(ref pb) = pb_clone {
                         pb.inc(1);
                     }
@@ -298,34 +302,6 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
 
                 // Skip empty files
                 if file_size == 0 {
-                    if let Some(ref pb) = pb_clone {
-                        pb.inc(1);
-                    }
-                    return None;
-                }
-
-                // Fast-path: skip reading known binary extensions entirely
-                let ext = rel_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                let is_known_binary = matches!(ext.to_ascii_lowercase().as_str(),
-                    // Compiled/binary
-                    "dll" | "exe" | "pdb" | "so" | "dylib" | "a" | "lib" | "o" | "obj" |
-                    // Archives
-                    "zip" | "tar" | "gz" | "7z" | "rar" | "nupkg" |
-                    // Images
-                    "png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "webp" | "tiff" | "svg" |
-                    // Fonts
-                    "woff" | "woff2" | "ttf" | "eot" | "otf" |
-                    // Documents (binary formats)
-                    "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" |
-                    // Media
-                    "mp3" | "mp4" | "wav" | "avi" | "mov" | "webm" | "ogg" |
-                    // Certificates/keys
-                    "snk" | "pfx" | "p12" | "cer" | "crt" | "p7s" | "p7b" |
-                    // Other binary/cache
-                    "cache" | "db" | "sqlite" | "mdb" | "ldf" | "mdf"
-                );
-
-                if is_known_binary {
                     if let Some(ref pb) = pb_clone {
                         pb.inc(1);
                     }

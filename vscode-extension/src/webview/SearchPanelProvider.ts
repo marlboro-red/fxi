@@ -6,11 +6,13 @@ import { getWebviewContent } from "./getWebviewContent";
 import { getWorkspaceRoot, getDefaultLimit, getDefaultContextLines } from "../ui/workspace";
 import type { WebviewMessage, HostMessage } from "./messages";
 
-export class SearchPanelProvider implements vscode.WebviewViewProvider {
+export class SearchPanelProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewType = "fxi.searchPanel";
 
   private view?: vscode.WebviewView;
   private client: DaemonClient;
+  private connectionListener: (connected: boolean) => void;
+  private configListener: vscode.Disposable;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -18,9 +20,26 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
   ) {
     this.client = client;
 
-    client.on("connectionChange", (connected: boolean) => {
+    this.connectionListener = (connected: boolean) => {
       this.postMessage({ command: "connection", connected });
+    };
+    client.on("connectionChange", this.connectionListener);
+
+    this.configListener = vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("fxi") && this.view) {
+        const nonce = crypto.randomBytes(16).toString("hex");
+        this.view.webview.html = getWebviewContent(
+          nonce,
+          getDefaultLimit(),
+          getDefaultContextLines()
+        );
+      }
     });
+  }
+
+  dispose(): void {
+    this.client.removeListener("connectionChange", this.connectionListener);
+    this.configListener.dispose();
   }
 
   resolveWebviewView(
@@ -37,14 +56,15 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider {
 
     const nonce = crypto.randomBytes(16).toString("hex");
     webviewView.webview.html = getWebviewContent(
-      webviewView.webview,
       nonce,
       getDefaultLimit(),
       getDefaultContextLines()
     );
 
-    webviewView.webview.onDidReceiveMessage((msg: WebviewMessage) => {
-      this.handleMessage(msg);
+    webviewView.webview.onDidReceiveMessage((msg: unknown) => {
+      if (msg && typeof msg === "object" && "command" in msg && typeof (msg as WebviewMessage).command === "string") {
+        this.handleMessage(msg as WebviewMessage);
+      }
     });
 
     // Re-send connection state and focus input whenever the panel becomes visible

@@ -448,19 +448,24 @@ impl<'a> QueryParser<'a> {
     }
 
     fn parse_near_query(&self, value: &str) -> QueryNode {
-        // Parse near:term1,term2,distance format
+        // Parse near:term1,term2[,distance] format
         let parts: Vec<&str> = value.split(',').collect();
         if parts.len() >= 2 {
-            let terms: Vec<String> = parts[..parts.len().saturating_sub(1)]
+            // Check if the last element is a numeric distance
+            let last = parts.last().unwrap().trim();
+            let (term_parts, distance) = if let Ok(d) = last.parse::<u32>() {
+                // Last element is a distance - use all but last as terms
+                (&parts[..parts.len() - 1], d)
+            } else {
+                // Last element is NOT a number - treat ALL elements as terms, use default distance
+                (&parts[..], 10u32)
+            };
+
+            let terms: Vec<String> = term_parts
                 .iter()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-
-            // Last part should be the distance
-            let distance = parts.last()
-                .and_then(|s| s.trim().parse::<u32>().ok())
-                .unwrap_or(10); // Default distance of 10 lines
 
             if terms.len() >= 2 {
                 return QueryNode::Near { terms, distance };
@@ -618,10 +623,10 @@ mod tests {
 
     #[test]
     fn test_near_query_default_distance() {
-        // If no valid distance is parsed, should use default of 10
+        // If no valid distance is parsed, all elements are terms with default distance 10
         let q = parse_query("near:foo,bar,abc");
         assert!(
-            matches!(q.root, QueryNode::Near { ref terms, distance } if terms.len() == 2 && distance == 10)
+            matches!(q.root, QueryNode::Near { ref terms, distance } if terms.len() == 3 && distance == 10)
         );
     }
 

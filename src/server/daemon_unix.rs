@@ -3,7 +3,7 @@
 //! Keeps indexes loaded in memory and serves search requests over Unix socket.
 //! Supports live file watching for automatic index updates.
 
-use crate::index::build::{build_index_with_progress, ProcessedFile};
+use crate::index::build::{build_index_with_progress, is_known_binary_ext, ProcessedFile};
 use crate::index::reader::IndexReader;
 use crate::index::types::{DocFlags, IndexMeta, Language};
 use crate::index::writer::DeltaSegmentWriter;
@@ -43,6 +43,9 @@ const COMPACTION_TOMBSTONE_THRESHOLD: f32 = 0.15; // 15%
 /// Connection timeout
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Maximum concurrent connection handlers
+const MAX_CONCURRENT_CONNECTIONS: u64 = 64;
+
 /// Maximum results to return to avoid exceeding message size limits
 /// This caps unbounded (limit=0) requests to prevent excessive memory/transfer
 /// Set very high since the protocol already has a 100MB message limit
@@ -50,14 +53,14 @@ const MAX_RESULTS_CAP: usize = 10_000_000;
 
 /// Cached index with its query cache and optional file watcher
 struct CachedIndex {
-    /// Current reader (atomically swappable)
-    reader: Arc<IndexReader>,
+    /// Current reader (swapped atomically via Mutex)
+    reader: Mutex<Arc<IndexReader>>,
     /// Query result cache (cleared on reader swap)
     query_cache: Mutex<LruCache<String, Vec<SearchMatchData>>>,
+    /// Content search result cache (cleared on reader swap)
+    content_cache: Mutex<LruCache<String, (Vec<ContentMatch>, usize)>>,
     /// Last access time
     last_used: Mutex<Instant>,
-    /// Pending new reader to swap in (set by watcher processor)
-    pending_reader: Mutex<Option<Arc<IndexReader>>>,
     /// Reader version for cache invalidation
     reader_version: AtomicU64,
     /// File watcher handle (if watching is active)
@@ -67,10 +70,10 @@ struct CachedIndex {
 impl CachedIndex {
     fn new(reader: IndexReader) -> Self {
         Self {
-            reader: Arc::new(reader),
+            reader: Mutex::new(Arc::new(reader)),
             query_cache: Mutex::new(LruCache::new(NonZeroUsize::new(CACHE_SIZE).unwrap())),
+            content_cache: Mutex::new(LruCache::new(NonZeroUsize::new(CACHE_SIZE).unwrap())),
             last_used: Mutex::new(Instant::now()),
-            pending_reader: Mutex::new(None),
             reader_version: AtomicU64::new(0),
             watcher_handle: Mutex::new(None),
         }
@@ -82,30 +85,27 @@ impl CachedIndex {
         }
     }
 
-    /// Get the current reader, checking for pending swap first
+    /// Get the current reader
     fn get_reader(&self) -> Arc<IndexReader> {
-        // Check for pending reader swap
-        if let Ok(mut pending) = self.pending_reader.lock() {
-            if let Some(new_reader) = pending.take() {
-                // Clear query cache since index changed
-                if let Ok(mut cache) = self.query_cache.lock() {
-                    cache.clear();
-                }
-                // Increment version
-                self.reader_version.fetch_add(1, Ordering::SeqCst);
-                // Note: We can't actually swap self.reader since it's not behind a Mutex
-                // The swap happens through pending_reader being consumed
-                return new_reader;
-            }
-        }
-        Arc::clone(&self.reader)
+        self.reader.lock().unwrap().clone()
     }
 
-    /// Set a pending reader to be swapped in on next access
+    /// Swap in a new reader, clearing caches
     fn set_pending_reader(&self, reader: IndexReader) {
-        if let Ok(mut pending) = self.pending_reader.lock() {
-            *pending = Some(Arc::new(reader));
+        let new_reader = Arc::new(reader);
+        // Swap the reader
+        if let Ok(mut current) = self.reader.lock() {
+            *current = new_reader;
         }
+        // Clear caches since index changed
+        if let Ok(mut cache) = self.query_cache.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.content_cache.lock() {
+            cache.clear();
+        }
+        // Increment version
+        self.reader_version.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Check if file watching is active
@@ -243,7 +243,8 @@ impl IndexServer {
             server_for_watcher.run_watcher_processor();
         });
 
-        // Accept connections
+        // Accept connections with concurrency limit
+        let active_connections = Arc::new(AtomicU64::new(0));
         for stream in listener.incoming() {
             if self.shutdown.load(Ordering::Relaxed) {
                 break;
@@ -251,16 +252,25 @@ impl IndexServer {
 
             match stream {
                 Ok(stream) => {
+                    // Check connection limit
+                    if active_connections.load(Ordering::Relaxed) >= MAX_CONCURRENT_CONNECTIONS {
+                        eprintln!("fxid: too many connections, rejecting");
+                        continue;
+                    }
+
                     // Set timeout
                     let _ = stream.set_read_timeout(Some(CONNECTION_TIMEOUT));
                     let _ = stream.set_write_timeout(Some(CONNECTION_TIMEOUT));
 
                     // Handle in new thread
                     let server = Arc::clone(self);
+                    let conn_count = Arc::clone(&active_connections);
+                    conn_count.fetch_add(1, Ordering::Relaxed);
                     thread::spawn(move || {
                         if let Err(e) = server.handle_connection(stream) {
                             eprintln!("fxid: connection error: {}", e);
                         }
+                        conn_count.fetch_sub(1, Ordering::Relaxed);
                     });
                 }
                 Err(e) => {
@@ -406,7 +416,7 @@ impl IndexServer {
             let indexes = self.indexes.read().unwrap();
             indexes
                 .get(&root_path)
-                .map(|c| c.reader.meta.doc_count as usize)
+                .map(|c| c.get_reader().meta.doc_count as usize)
                 .unwrap_or(0)
         };
 
@@ -830,6 +840,29 @@ impl IndexServer {
         // Get the reader (handles pending swap)
         let reader = cached.get_reader();
 
+        // Build cache key from pattern + options + limit
+        let cache_key = format!(
+            "{}\x00{}\x00{}\x00{}\x00{}\x00{}",
+            pattern, options.context_before, options.context_after,
+            options.case_insensitive, options.files_only, limit
+        );
+
+        // Check content cache first
+        if let Ok(mut cache) = cached.content_cache.lock()
+            && let Some((cached_matches, cached_file_count)) = cache.get(&cache_key)
+        {
+            self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
+            self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
+
+            return Response::ContentSearch(ContentSearchResponse {
+                matches: cached_matches.clone(),
+                duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+                files_with_matches: *cached_file_count,
+            });
+        }
+
+        self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
+
         // Build query - handle case insensitivity by wrapping pattern
         // Skip wrapping if pattern is already a regex (starts with "re:/")
         let query_str = if options.case_insensitive && !pattern.starts_with("re:/") {
@@ -878,6 +911,11 @@ impl IndexServer {
                 })
                 .collect();
 
+            // Cache the results
+            if let Ok(mut cache) = cached.content_cache.lock() {
+                cache.put(cache_key, (match_data.clone(), file_count));
+            }
+
             self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
             return Response::ContentSearch(ContentSearchResponse {
@@ -908,7 +946,6 @@ impl IndexServer {
         }
 
         // Convert to protocol type and apply limit
-        // Cap unlimited requests to prevent exceeding message size limits
         let effective_limit = if limit == 0 { MAX_RESULTS_CAP } else { limit.min(MAX_RESULTS_CAP) };
         let iter = matches.into_iter().take(effective_limit);
         let match_data: Vec<ContentMatch> = iter
@@ -923,12 +960,19 @@ impl IndexServer {
             })
             .collect();
 
+        let file_count = unique_files.len();
+
+        // Cache the results
+        if let Ok(mut cache) = cached.content_cache.lock() {
+            cache.put(cache_key, (match_data.clone(), file_count));
+        }
+
         self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
         Response::ContentSearch(ContentSearchResponse {
             matches: match_data,
             duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-            files_with_matches: unique_files.len(),
+            files_with_matches: file_count,
         })
     }
 
@@ -936,7 +980,7 @@ impl IndexServer {
     fn handle_status(&self) -> Response {
         let indexes = self.indexes.read().unwrap();
 
-        let total_docs: u32 = indexes.values().map(|idx| idx.reader.meta.doc_count).sum();
+        let total_docs: u32 = indexes.values().map(|idx| idx.get_reader().meta.doc_count).sum();
 
         let loaded_roots: Vec<PathBuf> = indexes.keys().cloned().collect();
 
@@ -945,7 +989,7 @@ impl IndexServer {
             .values()
             .map(|idx| {
                 // Rough estimate: doc count * 100 bytes per doc + overhead
-                (idx.reader.meta.doc_count as u64) * 100 + 1024 * 1024
+                (idx.get_reader().meta.doc_count as u64) * 100 + 1024 * 1024
             })
             .sum();
 
@@ -984,7 +1028,7 @@ impl IndexServer {
                 let indexes = self.indexes.read().unwrap();
                 let doc_count = indexes
                     .get(&root_path)
-                    .map(|c| c.reader.meta.doc_count)
+                    .map(|c| c.get_reader().meta.doc_count)
                     .unwrap_or(0);
                 Response::Reloaded {
                     success: true,
@@ -1082,28 +1126,12 @@ fn process_file_for_delta(full_path: &std::path::Path, rel_path: &std::path::Pat
 
     // Fast-path for known binary extensions
     let ext = rel_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let is_known_binary = matches!(ext.to_ascii_lowercase().as_str(),
-        "dll" | "exe" | "pdb" | "so" | "dylib" | "a" | "lib" | "o" | "obj" |
-        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "nupkg" | "jar" |
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "webp" | "tiff" |
-        "woff" | "woff2" | "ttf" | "eot" | "otf" |
-        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" |
-        "mp3" | "mp4" | "avi" | "mov" | "wav" | "ogg" | "flac" | "mkv" |
-        "snk" | "pfx" | "p12" | "cer" | "crt" | "p7s" | "p7b" |
-        "cache" | "db" | "sqlite" | "mdb" | "ldf" | "mdf"
-    );
 
-    if is_known_binary {
+    if is_known_binary_ext(ext) {
         return None;
     }
 
-    // Read file content
-    let content = match std::fs::read(full_path) {
-        Ok(c) => c,
-        Err(_) => return None,
-    };
-
-    // Get metadata
+    // Get metadata and check size BEFORE reading file content
     let metadata = match std::fs::metadata(full_path) {
         Ok(m) => m,
         Err(_) => return None,
@@ -1114,6 +1142,12 @@ fn process_file_for_delta(full_path: &std::path::Path, rel_path: &std::path::Pat
     if metadata.len() == 0 || metadata.len() > MAX_FILE_SIZE {
         return None;
     }
+
+    // Read file content
+    let content = match std::fs::read(full_path) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
 
     // Check if binary
     if is_binary(&content) {
@@ -1311,7 +1345,12 @@ pub fn daemonize(watch: bool) -> Result<()> {
                     let server = IndexServer::new(watch);
                     if let Err(e) = server.run() {
                         // Can't really report this since stdout is closed
-                        let _ = fs::write("/tmp/fxid-error.log", format!("{}", e));
+                        // Write to user-specific path to avoid symlink attacks on /tmp
+                        if let Some(data_dir) = dirs::data_local_dir() {
+                            let log_dir = data_dir.join("fxi");
+                            let _ = fs::create_dir_all(&log_dir);
+                            let _ = fs::write(log_dir.join("fxid-error.log"), format!("{}", e));
+                        }
                     }
                     std::process::exit(0);
                 }

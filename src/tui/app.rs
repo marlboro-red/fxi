@@ -536,10 +536,24 @@ impl App {
             // Format line number for editors that support it
             let line_arg = format!("+{}", result.line_number);
 
+            // Temporarily restore terminal before launching editor
+            let _ = crossterm::terminal::disable_raw_mode();
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::LeaveAlternateScreen
+            );
+
             let _ = Command::new(&editor)
                 .arg(&line_arg)
                 .arg(&full_path)
                 .status();
+
+            // Restore TUI terminal state
+            let _ = crossterm::terminal::enable_raw_mode();
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::EnterAlternateScreen
+            );
         }
     }
 

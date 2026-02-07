@@ -183,12 +183,31 @@ impl QueryPlanner {
             }
 
             QueryNode::BoostedLiteral { text, boost } => {
-                // For single-word queries, prefer direct token lookup over trigrams
+                // For single-word queries, use BOTH token lookup (fast exact match)
+                // AND trigram search (substring match), same strategy as Literal
                 let is_single_word = !text.contains(char::is_whitespace) && text.len() >= 2;
 
                 if is_single_word {
+                    let trigrams = query_trigrams(text);
+
+                    let token_plan = QueryPlan {
+                        steps: vec![PlanStep::TokenLookup(text.to_lowercase())],
+                        verification: None,
+                    };
+
+                    let steps = if !trigrams.is_empty() {
+                        let trigram_plan = QueryPlan {
+                            steps: vec![PlanStep::TrigramIntersect(trigrams)],
+                            verification: None,
+                        };
+                        // Union token and trigram results for substring matching
+                        vec![PlanStep::Union(vec![token_plan, trigram_plan])]
+                    } else {
+                        vec![PlanStep::TokenLookup(text.to_lowercase())]
+                    };
+
                     (
-                        vec![PlanStep::TokenLookup(text.to_lowercase())],
+                        steps,
                         Some(VerificationStep::BoostedLiteral {
                             text: text.clone(),
                             boost: *boost,

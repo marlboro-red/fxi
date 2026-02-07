@@ -1193,7 +1193,7 @@ impl IndexWriter {
             file.write_all(&doc.path_id.to_le_bytes())?;
             file.write_all(&doc.size.to_le_bytes())?;
             file.write_all(&doc.mtime.to_le_bytes())?;
-            file.write_all(&(doc.language as u8).to_le_bytes())?;
+            file.write_all(&(doc.language as u16).to_le_bytes())?;
             file.write_all(&doc.flags.0.to_le_bytes())?;
             file.write_all(&doc.segment_id.to_le_bytes())?;
         }

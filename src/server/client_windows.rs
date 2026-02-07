@@ -8,7 +8,7 @@ use crate::server::protocol::{
 use crate::server::get_pipe_name;
 use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Read/write timeout (not directly supported for file handles, but we document intent)
@@ -118,7 +118,7 @@ impl IndexClient {
     pub fn search(
         &mut self,
         query: &str,
-        root_path: &PathBuf,
+        root_path: &Path,
         limit: usize,
     ) -> ClientResult<SearchResult> {
         let request = Request::Search {
@@ -155,7 +155,7 @@ impl IndexClient {
     pub fn content_search(
         &mut self,
         pattern: &str,
-        root_path: &PathBuf,
+        root_path: &Path,
         limit: usize,
         options: ContentSearchOptions,
     ) -> ClientResult<ContentSearchResponse> {
@@ -191,7 +191,7 @@ impl IndexClient {
     }
 
     /// Request index reload
-    pub fn reload(&mut self, root_path: &PathBuf) -> ClientResult<(bool, String)> {
+    pub fn reload(&mut self, root_path: &Path) -> ClientResult<(bool, String)> {
         let request = Request::Reload {
             root_path: root_path.clone(),
         };

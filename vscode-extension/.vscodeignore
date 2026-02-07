@@ -1,8 +1,11 @@
 src/**
 node_modules/**
 .vscode/**
+.claude/**
 tsconfig.json
 esbuild.mjs
 vitest.config.ts
 package-lock.json
 .gitignore
+*.vsix
+media/icon.svg

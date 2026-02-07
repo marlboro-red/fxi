@@ -109,8 +109,14 @@ pub fn is_daemon_running() -> bool {
         && let Ok(pid) = pid_str.trim().parse::<i32>()
     {
         // Check if process exists using kill(pid, 0)
+        // Returns 0 if process exists and we can signal it.
+        // Returns -1 with EPERM if process exists but we lack permission (still running).
+        // Returns -1 with ESRCH if process does not exist.
         unsafe {
-            return libc::kill(pid, 0) == 0;
+            if libc::kill(pid, 0) == 0 {
+                return true;
+            }
+            return std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
         }
     }
 

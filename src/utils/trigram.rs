@@ -131,13 +131,6 @@ pub fn extract_trigrams(content: &[u8]) -> Vec<Trigram> {
     bitset.collect()
 }
 
-/// Alias for extract_trigrams for backward compatibility
-#[deprecated(note = "Use extract_trigrams instead, which now returns Vec<Trigram>")]
-#[allow(dead_code)]
-pub fn extract_trigrams_vec(content: &[u8]) -> Vec<Trigram> {
-    extract_trigrams(content)
-}
-
 /// Extract trigrams from a query string for searching
 pub fn query_trigrams(query: &str) -> Vec<Trigram> {
     let bytes = query.as_bytes();

@@ -86,7 +86,7 @@ impl SegmentReader {
     }
 
     /// Open a segment from disk (lazy loading for line maps)
-    fn open(segment_path: &Path, segment_id: SegmentId, index_path: &Path) -> Result<Self> {
+    fn open(segment_path: &Path, segment_id: SegmentId, _index_path: &Path) -> Result<Self> {
         // Read trigram dictionary (already sorted from BTreeMap write)
         let trigram_dict = read_trigram_dict(segment_path)?;
 
@@ -96,8 +96,15 @@ impl SegmentReader {
             let file = File::open(&postings_path)?;
             unsafe { Mmap::map(&file)? }
         } else {
-            // Empty mmap for empty segment
-            unsafe { Mmap::map(&File::open(index_path.join("meta.json"))?)? }
+            // Empty mmap for empty segment - use anonymous mapping instead of unrelated file
+            unsafe {
+                Mmap::map(&File::open(postings_path).unwrap_or_else(|_| {
+                    // Create an empty temp file as mmap source
+                    let empty_path = segment_path.join(".empty_postings");
+                    let _ = std::fs::write(&empty_path, b"");
+                    File::open(&empty_path).expect("failed to create empty postings placeholder")
+                }))?
+            }
         };
 
         // Read token dictionary (already sorted from BTreeMap write)
@@ -109,7 +116,14 @@ impl SegmentReader {
             let file = File::open(&token_postings_path)?;
             unsafe { Mmap::map(&file)? }
         } else {
-            unsafe { Mmap::map(&File::open(index_path.join("meta.json"))?)? }
+            // Empty mmap for empty segment - use anonymous mapping instead of unrelated file
+            unsafe {
+                Mmap::map(&File::open(token_postings_path).unwrap_or_else(|_| {
+                    let empty_path = segment_path.join(".empty_token_postings");
+                    let _ = std::fs::write(&empty_path, b"");
+                    File::open(&empty_path).expect("failed to create empty token postings placeholder")
+                }))?
+            }
         };
 
         // Line maps are NOT loaded here - loaded lazily on first access

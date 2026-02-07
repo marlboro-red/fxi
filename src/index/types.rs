@@ -102,7 +102,8 @@ impl Language {
             "py" | "pyi" | "pyw" => Language::Python,
             "js" | "mjs" | "cjs" => Language::JavaScript,
             "ts" | "mts" | "cts" => Language::TypeScript,
-            "tsx" | "jsx" => Language::TypeScript,
+            "tsx" => Language::TypeScript,
+            "jsx" => Language::JavaScript,
             "go" => Language::Go,
             "c" | "h" => Language::C,
             "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => Language::Cpp,
@@ -126,7 +127,7 @@ impl Language {
             "clj" | "cljs" | "cljc" | "edn" => Language::Clojure,
             "lua" => Language::Lua,
             "pl" | "pm" => Language::Perl,
-            "r" | "R" => Language::R,
+            "r" => Language::R,
             "zig" => Language::Zig,
             "nim" => Language::Nim,
             "ml" | "mli" => Language::Ocaml,
@@ -177,7 +178,6 @@ impl DocFlags {
         self.0 |= Self::STALE;
     }
 
-    #[allow(dead_code)]
     pub fn set_tombstone(&mut self) {
         self.0 |= Self::TOMBSTONE;
     }

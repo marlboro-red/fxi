@@ -3,7 +3,7 @@
 //! Keeps indexes loaded in memory and serves search requests over named pipes.
 //! Supports live file watching for automatic index updates.
 
-use crate::index::build::{build_index_with_progress, ProcessedFile};
+use crate::index::build::{build_index_with_progress, is_known_binary_ext, ProcessedFile};
 use crate::index::reader::IndexReader;
 use crate::index::types::{DocFlags, IndexMeta, Language};
 use crate::index::writer::DeltaSegmentWriter;
@@ -24,7 +24,7 @@ use lru::LruCache;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::num::NonZeroUsize;
 use std::os::windows::ffi::OsStrExt;
@@ -72,6 +72,24 @@ unsafe extern "system" {
     fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> *mut std::ffi::c_void;
 
     fn TerminateProcess(hProcess: *mut std::ffi::c_void, uExitCode: u32) -> i32;
+
+    fn ReadFile(
+        hFile: *mut std::ffi::c_void,
+        lpBuffer: *mut u8,
+        nNumberOfBytesToRead: u32,
+        lpNumberOfBytesRead: *mut u32,
+        lpOverlapped: *mut std::ffi::c_void,
+    ) -> i32;
+
+    fn WriteFile(
+        hFile: *mut std::ffi::c_void,
+        lpBuffer: *const u8,
+        nNumberOfBytesToWrite: u32,
+        lpNumberOfBytesWritten: *mut u32,
+        lpOverlapped: *mut std::ffi::c_void,
+    ) -> i32;
+
+    fn FlushFileBuffers(hFile: *mut std::ffi::c_void) -> i32;
 }
 
 const PROCESS_TERMINATE: u32 = 0x0001;
@@ -91,6 +109,9 @@ const MAX_RESULTS_CAP: usize = 10_000_000;
 
 /// Buffer size for named pipe
 const PIPE_BUFFER_SIZE: u32 = 65536;
+
+/// Maximum concurrent connection handlers
+const MAX_CONCURRENT_CONNECTIONS: u64 = 64;
 
 /// A Send-safe wrapper for a Windows HANDLE
 #[derive(Clone, Copy)]
@@ -125,31 +146,50 @@ impl PipeHandle {
 
 impl Read for PipeHandle {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        use std::os::windows::io::FromRawHandle;
-        // Convert to File temporarily to use its Read impl
-        let file = unsafe { File::from_raw_handle(self.handle.as_raw() as *mut _) };
-        let result = (&file).read(buf);
-        // Prevent the File from closing our handle
-        std::mem::forget(file);
-        result
+        let mut bytes_read: u32 = 0;
+        let ok = unsafe {
+            ReadFile(
+                self.handle.as_raw(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut bytes_read,
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(bytes_read as usize)
+        }
     }
 }
 
 impl Write for PipeHandle {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        use std::os::windows::io::FromRawHandle;
-        let file = unsafe { File::from_raw_handle(self.handle.as_raw() as *mut _) };
-        let result = (&file).write(buf);
-        std::mem::forget(file);
-        result
+        let mut bytes_written: u32 = 0;
+        let ok = unsafe {
+            WriteFile(
+                self.handle.as_raw(),
+                buf.as_ptr(),
+                buf.len() as u32,
+                &mut bytes_written,
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(bytes_written as usize)
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        use std::os::windows::io::FromRawHandle;
-        let file = unsafe { File::from_raw_handle(self.handle.as_raw() as *mut _) };
-        let result = (&file).flush();
-        std::mem::forget(file);
-        result
+        let ok = unsafe { FlushFileBuffers(self.handle.as_raw()) };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -171,14 +211,14 @@ fn to_wide_string(s: &str) -> Vec<u16> {
 
 /// Cached index with its query cache and optional file watcher
 struct CachedIndex {
-    /// Current reader (atomically swappable)
-    reader: Arc<IndexReader>,
+    /// Current reader (swapped atomically via Mutex)
+    reader: Mutex<Arc<IndexReader>>,
     /// Query result cache (cleared on reader swap)
     query_cache: Mutex<LruCache<String, Vec<SearchMatchData>>>,
+    /// Content search result cache (cleared on reader swap)
+    content_cache: Mutex<LruCache<String, (Vec<ContentMatch>, usize)>>,
     /// Last access time
     last_used: Mutex<Instant>,
-    /// Pending new reader to swap in (set by watcher processor)
-    pending_reader: Mutex<Option<Arc<IndexReader>>>,
     /// Reader version for cache invalidation
     reader_version: AtomicU64,
     /// File watcher handle (if watching is active)
@@ -188,10 +228,10 @@ struct CachedIndex {
 impl CachedIndex {
     fn new(reader: IndexReader) -> Self {
         Self {
-            reader: Arc::new(reader),
+            reader: Mutex::new(Arc::new(reader)),
             query_cache: Mutex::new(LruCache::new(NonZeroUsize::new(CACHE_SIZE).unwrap())),
+            content_cache: Mutex::new(LruCache::new(NonZeroUsize::new(CACHE_SIZE).unwrap())),
             last_used: Mutex::new(Instant::now()),
-            pending_reader: Mutex::new(None),
             reader_version: AtomicU64::new(0),
             watcher_handle: Mutex::new(None),
         }
@@ -203,28 +243,27 @@ impl CachedIndex {
         }
     }
 
-    /// Get the current reader, checking for pending swap first
+    /// Get the current reader
     fn get_reader(&self) -> Arc<IndexReader> {
-        // Check for pending reader swap
-        if let Ok(mut pending) = self.pending_reader.lock() {
-            if let Some(new_reader) = pending.take() {
-                // Clear query cache since index changed
-                if let Ok(mut cache) = self.query_cache.lock() {
-                    cache.clear();
-                }
-                // Increment version
-                self.reader_version.fetch_add(1, Ordering::SeqCst);
-                return new_reader;
-            }
-        }
-        Arc::clone(&self.reader)
+        self.reader.lock().unwrap().clone()
     }
 
-    /// Set a pending reader to be swapped in on next access
+    /// Swap in a new reader, clearing caches
     fn set_pending_reader(&self, reader: IndexReader) {
-        if let Ok(mut pending) = self.pending_reader.lock() {
-            *pending = Some(Arc::new(reader));
+        let new_reader = Arc::new(reader);
+        // Swap the reader
+        if let Ok(mut current) = self.reader.lock() {
+            *current = new_reader;
         }
+        // Clear caches since index changed
+        if let Ok(mut cache) = self.query_cache.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.content_cache.lock() {
+            cache.clear();
+        }
+        // Increment version
+        self.reader_version.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Check if file watching is active
@@ -348,6 +387,7 @@ impl IndexServer {
         });
 
         // Main server loop - create pipe instances and accept connections
+        let active_connections = Arc::new(AtomicU64::new(0));
         loop {
             if self.shutdown.load(Ordering::Relaxed) {
                 break;
@@ -391,14 +431,27 @@ impl IndexServer {
                 break;
             }
 
+            // Check connection limit
+            if active_connections.load(Ordering::Relaxed) >= MAX_CONCURRENT_CONNECTIONS {
+                eprintln!("fxid: too many connections, rejecting");
+                unsafe {
+                    DisconnectNamedPipe(pipe_handle);
+                    CloseHandle(pipe_handle);
+                }
+                continue;
+            }
+
             // Handle connection in new thread
             let server = Arc::clone(self);
             let sendable_handle = SendableHandle::from_raw(pipe_handle);
+            let conn_count = Arc::clone(&active_connections);
+            conn_count.fetch_add(1, Ordering::Relaxed);
             thread::spawn(move || {
                 let handle = PipeHandle { handle: sendable_handle };
                 if let Err(e) = server.handle_connection(handle) {
                     eprintln!("fxid: connection error: {}", e);
                 }
+                conn_count.fetch_sub(1, Ordering::Relaxed);
             });
         }
 
@@ -416,11 +469,11 @@ impl IndexServer {
 
     /// Handle a single client connection
     fn handle_connection(&self, pipe: PipeHandle) -> Result<()> {
-        let mut reader = BufReader::new(PipeHandle { handle: pipe.handle });
-        let mut writer = BufWriter::new(PipeHandle { handle: pipe.handle });
-
-        // Prevent the original pipe from being dropped (closing the handle)
-        std::mem::forget(pipe);
+        // Use ManuallyDrop for the writer's PipeHandle to avoid double-close.
+        // The reader owns the handle lifecycle; the writer borrows it.
+        let handle = pipe.handle;
+        let mut reader = BufReader::new(pipe);
+        let mut writer = BufWriter::new(std::mem::ManuallyDrop::new(PipeHandle { handle }));
 
         loop {
             // Read request
@@ -455,10 +508,11 @@ impl IndexServer {
             }
         }
 
-        // Disconnect and close the pipe
+        // Disconnect and close the pipe (reader owns the handle)
         unsafe {
-            DisconnectNamedPipe(reader.into_inner().handle.as_raw());
+            DisconnectNamedPipe(reader.get_ref().handle.as_raw());
         }
+        // reader drops here, closing the handle once
 
         Ok(())
     }
@@ -587,7 +641,7 @@ impl IndexServer {
             let indexes = self.indexes.read().unwrap();
             indexes
                 .get(&root_path)
-                .map(|c| c.reader.meta.doc_count as usize)
+                .map(|c| c.get_reader().meta.doc_count as usize)
                 .unwrap_or(0)
         };
 
@@ -972,6 +1026,29 @@ impl IndexServer {
         // Get the reader (handles pending swap)
         let reader = cached.get_reader();
 
+        // Build cache key from pattern + options + limit
+        let cache_key = format!(
+            "{}\x00{}\x00{}\x00{}\x00{}\x00{}",
+            pattern, options.context_before, options.context_after,
+            options.case_insensitive, options.files_only, limit
+        );
+
+        // Check content cache first
+        if let Ok(mut cache) = cached.content_cache.lock() {
+            if let Some((cached_matches, cached_file_count)) = cache.get(&cache_key) {
+                self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
+                self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
+
+                return Response::ContentSearch(ContentSearchResponse {
+                    matches: cached_matches.clone(),
+                    duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    files_with_matches: *cached_file_count,
+                });
+            }
+        }
+
+        self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
+
         // Build query - handle case insensitivity by wrapping pattern
         let query_str = if options.case_insensitive && !pattern.starts_with("re:/") {
             format!("re:/(?i){}/", regex::escape(&pattern))
@@ -1017,6 +1094,11 @@ impl IndexServer {
                 })
                 .collect();
 
+            // Cache the results
+            if let Ok(mut cache) = cached.content_cache.lock() {
+                cache.put(cache_key, (match_data.clone(), file_count));
+            }
+
             self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
             return Response::ContentSearch(ContentSearchResponse {
@@ -1061,12 +1143,19 @@ impl IndexServer {
             })
             .collect();
 
+        let file_count = unique_files.len();
+
+        // Cache the results
+        if let Ok(mut cache) = cached.content_cache.lock() {
+            cache.put(cache_key, (match_data.clone(), file_count));
+        }
+
         self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
         Response::ContentSearch(ContentSearchResponse {
             matches: match_data,
             duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-            files_with_matches: unique_files.len(),
+            files_with_matches: file_count,
         })
     }
 
@@ -1074,14 +1163,14 @@ impl IndexServer {
     fn handle_status(&self) -> Response {
         let indexes = self.indexes.read().unwrap();
 
-        let total_docs: u32 = indexes.values().map(|idx| idx.reader.meta.doc_count).sum();
+        let total_docs: u32 = indexes.values().map(|idx| idx.get_reader().meta.doc_count).sum();
 
         let loaded_roots: Vec<PathBuf> = indexes.keys().cloned().collect();
 
         let memory_bytes: u64 = indexes
             .values()
             .map(|idx| {
-                (idx.reader.meta.doc_count as u64) * 100 + 1024 * 1024
+                (idx.get_reader().meta.doc_count as u64) * 100 + 1024 * 1024
             })
             .sum();
 
@@ -1120,7 +1209,7 @@ impl IndexServer {
                 let indexes = self.indexes.read().unwrap();
                 let doc_count = indexes
                     .get(&root_path)
-                    .map(|c| c.reader.meta.doc_count)
+                    .map(|c| c.get_reader().meta.doc_count)
                     .unwrap_or(0);
                 Response::Reloaded {
                     success: true,
@@ -1219,28 +1308,12 @@ fn process_file_for_delta(full_path: &std::path::Path, rel_path: &std::path::Pat
 
     // Fast-path for known binary extensions
     let ext = rel_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let is_known_binary = matches!(ext.to_ascii_lowercase().as_str(),
-        "dll" | "exe" | "pdb" | "so" | "dylib" | "a" | "lib" | "o" | "obj" |
-        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "nupkg" | "jar" |
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "webp" | "tiff" |
-        "woff" | "woff2" | "ttf" | "eot" | "otf" |
-        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" |
-        "mp3" | "mp4" | "avi" | "mov" | "wav" | "ogg" | "flac" | "mkv" |
-        "snk" | "pfx" | "p12" | "cer" | "crt" | "p7s" | "p7b" |
-        "cache" | "db" | "sqlite" | "mdb" | "ldf" | "mdf"
-    );
 
-    if is_known_binary {
+    if is_known_binary_ext(ext) {
         return None;
     }
 
-    // Read file content
-    let content = match std::fs::read(full_path) {
-        Ok(c) => c,
-        Err(_) => return None,
-    };
-
-    // Get metadata
+    // Get metadata and check size BEFORE reading file content
     let metadata = match std::fs::metadata(full_path) {
         Ok(m) => m,
         Err(_) => return None,
@@ -1251,6 +1324,12 @@ fn process_file_for_delta(full_path: &std::path::Path, rel_path: &std::path::Pat
     if metadata.len() == 0 || metadata.len() > MAX_FILE_SIZE {
         return None;
     }
+
+    // Read file content
+    let content = match std::fs::read(full_path) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
 
     // Check if binary
     if is_binary(&content) {
