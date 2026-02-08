@@ -22,20 +22,56 @@ The daemon uses a **length-prefixed JSON** protocol over local IPC:
 
 ### Connection
 
-**Unix / macOS** — Unix domain socket, checked in order:
+See [Socket Path Discovery](#socket-path-discovery) above for the full resolution order.
+
+### Socket Path Discovery
+
+Third-party clients need to know where the daemon is listening. Two mechanisms simplify this:
+
+**1. `FXI_SOCKET` environment variable** (highest priority)
+
+If set, all path-resolution logic is skipped and this value is used directly:
+
+```bash
+export FXI_SOCKET=/tmp/custom.sock
+# All fxi commands and clients will use /tmp/custom.sock
+```
+
+**2. `fxi daemon socket-path` CLI command**
+
+Prints the resolved socket/pipe path to stdout. Clients can shell out once at startup:
+
+```bash
+# Shell out to get the path
+FXI_SOCKET=$(fxi daemon socket-path)
+
+# Python
+import subprocess
+socket_path = subprocess.check_output(["fxi", "daemon", "socket-path"]).decode().strip()
+
+# Node.js
+const { execSync } = require("child_process");
+const socketPath = execSync("fxi daemon socket-path").toString().trim();
+```
+
+**3. Built-in fallback chains** (when `FXI_SOCKET` is not set)
+
+Unix / macOS — Unix domain socket, checked in order:
 
 | Priority | Path |
 |----------|------|
-| 1 | `$XDG_RUNTIME_DIR/fxi.sock` |
-| 2 | `~/.local/run/fxi.sock` |
-| 3 | `/tmp/fxi-{uid}.sock` |
+| 1 | `$FXI_SOCKET` (env var override) |
+| 2 | `$XDG_RUNTIME_DIR/fxi.sock` |
+| 3 | `~/.local/run/fxi.sock` |
+| 4 | `/tmp/fxi-{uid}.sock` |
 
-**Windows** — Named pipe:
+Windows — Named pipe:
 
 | Priority | Name |
 |----------|------|
-| 1 | `\\.\pipe\fxi-{USERNAME}` |
-| 2 | `\\.\pipe\fxi` |
+| 1 | `$FXI_SOCKET` (env var override) |
+| 2 | `\\.\pipe\fxi-{USERNAME}` |
+| 3 | `\\.\pipe\fxi` |
 
 ### Authentication
 
@@ -434,6 +470,10 @@ import json
 import os
 
 def get_socket_path():
+    # Highest priority: FXI_SOCKET env var override
+    override = os.environ.get("FXI_SOCKET")
+    if override:
+        return override
     xdg = os.environ.get("XDG_RUNTIME_DIR")
     if xdg:
         return os.path.join(xdg, "fxi.sock")
@@ -519,6 +559,9 @@ const path = require("path");
 const os = require("os");
 
 function getSocketPath() {
+  // Highest priority: FXI_SOCKET env var override
+  const override = process.env.FXI_SOCKET;
+  if (override) return override;
   const xdg = process.env.XDG_RUNTIME_DIR;
   if (xdg) return path.join(xdg, "fxi.sock");
   return path.join(os.homedir(), ".local", "run", "fxi.sock");

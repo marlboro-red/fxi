@@ -8,6 +8,12 @@ import * as os from "os";
  *   - Unix:    get_socket_path() → XDG_RUNTIME_DIR/fxi.sock, etc.
  */
 export function getSocketPath(): string {
+  // Highest priority: FXI_SOCKET env var override
+  const override_ = process.env["FXI_SOCKET"];
+  if (override_) {
+    return override_;
+  }
+
   if (process.platform === "win32") {
     const username = process.env["USERNAME"];
     if (username) {

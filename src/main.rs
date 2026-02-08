@@ -151,6 +151,8 @@ enum DaemonAction {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Print the daemon socket/pipe path
+    SocketPath,
 }
 
 /// Options for grep-style content search (ripgrep-compatible)
@@ -337,6 +339,13 @@ fn handle_daemon_command(action: DaemonAction) -> Result<()> {
 
             println!("Running daemon in foreground (Ctrl+C to stop)...");
             server::daemon::run_foreground(watch)?;
+        }
+
+        DaemonAction::SocketPath => {
+            #[cfg(unix)]
+            println!("{}", server::get_socket_path().display());
+            #[cfg(windows)]
+            println!("{}", server::get_pipe_name());
         }
 
         DaemonAction::Reload { path } => {

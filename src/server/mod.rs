@@ -37,6 +37,11 @@ use std::path::PathBuf;
 /// Get the socket path for the index server (Unix)
 #[cfg(unix)]
 pub fn get_socket_path() -> PathBuf {
+    // Highest priority: FXI_SOCKET env var override
+    if let Ok(path) = std::env::var("FXI_SOCKET") {
+        return PathBuf::from(path);
+    }
+
     // Try XDG_RUNTIME_DIR first (most secure, tmpfs-backed)
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
         return PathBuf::from(runtime_dir).join("fxi.sock");
@@ -55,6 +60,11 @@ pub fn get_socket_path() -> PathBuf {
 /// Get the named pipe name for the index server (Windows)
 #[cfg(windows)]
 pub fn get_pipe_name() -> String {
+    // Highest priority: FXI_SOCKET env var override
+    if let Ok(path) = std::env::var("FXI_SOCKET") {
+        return path;
+    }
+
     // Use a per-user pipe name based on username
     if let Ok(username) = std::env::var("USERNAME") {
         format!(r"\\.\pipe\fxi-{}", username)
