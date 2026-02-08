@@ -50,7 +50,10 @@ Client                              Server
   │                                   │
   ├─── connect ──────────────────────►│
   │                                   │
-  │  ┌─ request 1 ───────────────────►│
+  │  ┌─ Hello (optional) ───────────►│
+  │  │◄── Hello ─────────────────────┤
+  │  │                                │
+  │  │─ request 1 ───────────────────►│
   │  │◄── response 1 ─────────────────┤
   │  │                                │
   │  │─ request 2 ───────────────────►│
@@ -59,6 +62,23 @@ Client                              Server
   │                                   │
   └─── disconnect ───────────────────►│
 ```
+
+### Protocol Versioning
+
+The protocol uses a single integer version number (`PROTOCOL_VERSION`, currently `1`). The version is bumped only on **breaking** changes (field removal/rename, semantic changes, wire format changes). Adding new optional fields or new request types does **not** require a bump.
+
+Two mechanisms expose the version:
+
+1. **Hello handshake** — optional first message after connect. Client sends its protocol version, server responds with its version + software version. Lets clients fail fast on mismatch.
+2. **StatusResponse fields** — `protocol_version` and `server_version` are included in every Status response.
+
+#### Backwards Compatibility
+
+| Scenario | Behavior |
+|----------|----------|
+| Old client + New server | No Hello sent, works as before. New StatusResponse fields ignored by client. |
+| New client + Old server | Hello returns Error (unknown variant), client knows it's pre-versioning. StatusResponse version fields default to `0`/`""`. |
+| New client + New server | Hello succeeds, versions compared. |
 
 ---
 
@@ -76,6 +96,7 @@ type Request =
   | { type: "Reload";        root_path: string }
   | { type: "Shutdown" }
   | { type: "Ping" }
+  | { type: "Hello";         protocol_version: number }
 ```
 
 ### Responses
@@ -84,11 +105,12 @@ type Request =
 type Response =
   | { type: "Search";        matches: SearchMatchData[]; duration_ms: number; cached: boolean }
   | { type: "ContentSearch"; matches: ContentMatch[]; duration_ms: number; files_with_matches: number }
-  | { type: "Status";        uptime_secs: number; indexes_loaded: number; total_docs: number; queries_served: number; cache_hit_rate: number; memory_bytes: number; loaded_roots: string[] }
+  | { type: "Status";        uptime_secs: number; indexes_loaded: number; total_docs: number; queries_served: number; cache_hit_rate: number; memory_bytes: number; loaded_roots: string[]; protocol_version?: number; server_version?: string }
   | { type: "Reloaded";      success: boolean; message: string }
   | { type: "ShuttingDown" }
   | { type: "Pong" }
   | { type: "Error";         message: string }
+  | { type: "Hello";         protocol_version: number; server_version: string }
 ```
 
 Any request can return an `Error` response.
@@ -236,7 +258,9 @@ Health check and server statistics.
   "queries_served": 1250,
   "cache_hit_rate": 0.756,
   "memory_bytes": 10485760,
-  "loaded_roots": ["/home/user/project1", "/home/user/project2"]
+  "loaded_roots": ["/home/user/project1", "/home/user/project2"],
+  "protocol_version": 1,
+  "server_version": "0.1.0"
 }
 ```
 
@@ -249,6 +273,8 @@ Health check and server statistics.
 | `cache_hit_rate` | number (f32) | Cache hit rate, `0.0` to `1.0` |
 | `memory_bytes` | number (u64) | Approximate memory usage in bytes |
 | `loaded_roots` | string[] | Absolute paths of all loaded codebase roots |
+| `protocol_version` | number (u32) | Protocol version (`0` if server predates versioning) |
+| `server_version` | string | Server software version (empty if server predates versioning) |
 
 ---
 
@@ -315,6 +341,40 @@ Lightweight connection test with no payload.
 ```json
 { "type": "Pong" }
 ```
+
+---
+
+### Hello
+
+Optional protocol version handshake. Should be the first message after connecting. If the server does not support Hello (pre-versioning), it returns an Error response with "unknown variant" — the client should treat this as protocol version 0.
+
+**Request**
+
+```json
+{
+  "type": "Hello",
+  "protocol_version": 1
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `protocol_version` | number (u32) | Client's protocol version |
+
+**Response**
+
+```json
+{
+  "type": "Hello",
+  "protocol_version": 1,
+  "server_version": "0.1.0"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `protocol_version` | number (u32) | Server's protocol version |
+| `server_version` | string | Server software version (e.g. `"0.1.0"`) |
 
 ---
 
@@ -402,6 +462,14 @@ def read_response(sock):
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.settimeout(30)
 sock.connect(get_socket_path())
+
+# Hello (optional version handshake)
+send_request(sock, {"type": "Hello", "protocol_version": 1})
+hello = read_response(sock)
+if hello["type"] == "Hello":
+    print(f"Server protocol: v{hello['protocol_version']}, version: {hello['server_version']}")
+else:
+    print("Server predates protocol versioning")
 
 # Ping
 send_request(sock, {"type": "Ping"})
@@ -493,6 +561,14 @@ function createClient() {
 // Usage
 (async () => {
   const client = createClient();
+
+  // Hello (optional version handshake)
+  const hello = await client.send({ type: "Hello", protocol_version: 1 });
+  if (hello.type === "Hello") {
+    console.log(`Server protocol: v${hello.protocol_version}, version: ${hello.server_version}`);
+  } else {
+    console.log("Server predates protocol versioning");
+  }
 
   const pong = await client.send({ type: "Ping" });
   console.log(pong); // { type: "Pong" }

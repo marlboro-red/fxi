@@ -8,7 +8,9 @@ import type {
   ContentSearchResponse,
   StatusResponse,
   ContentSearchOptions,
+  HelloResponse,
 } from "./protocol";
+import { PROTOCOL_VERSION } from "./protocol";
 
 const MAX_MESSAGE_SIZE = 100 * 1024 * 1024; // 100 MB
 const RECONNECT_DELAY_MS = 3000;
@@ -287,6 +289,28 @@ export class DaemonClient extends EventEmitter {
     }
     if (resp.type !== "Pong") {
       throw new Error(`Unexpected response type: ${resp.type}`);
+    }
+  }
+
+  async hello(): Promise<{ protocolVersion: number; serverVersion: string; compatible: boolean }> {
+    try {
+      const resp = await this.request({
+        type: "Hello",
+        protocol_version: PROTOCOL_VERSION,
+      });
+      if (resp.type === "Hello") {
+        const hr = resp as HelloResponse;
+        return {
+          protocolVersion: hr.protocol_version,
+          serverVersion: hr.server_version,
+          compatible: hr.protocol_version === PROTOCOL_VERSION,
+        };
+      }
+      // Old server returned Error for unknown variant — pre-versioning
+      return { protocolVersion: 0, serverVersion: "", compatible: false };
+    } catch {
+      // Connection error or old server — pre-versioning
+      return { protocolVersion: 0, serverVersion: "", compatible: false };
     }
   }
 

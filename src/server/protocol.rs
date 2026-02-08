@@ -8,6 +8,11 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
+/// Protocol version number. Bumped only on breaking changes
+/// (field removal/rename, semantic changes, wire format changes).
+/// Adding new optional fields or new request types does NOT require a bump.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 /// Options for content search
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContentSearchOptions {
@@ -59,6 +64,12 @@ pub enum Request {
 
     /// Ping for connection testing
     Ping,
+
+    /// Protocol version handshake
+    Hello {
+        /// Client's protocol version
+        protocol_version: u32,
+    },
 }
 
 /// Response from server to client
@@ -85,6 +96,14 @@ pub enum Response {
 
     /// Error response
     Error { message: String },
+
+    /// Protocol version handshake response
+    Hello {
+        /// Server's protocol version
+        protocol_version: u32,
+        /// Server software version (e.g. "0.1.0")
+        server_version: String,
+    },
 }
 
 /// Search results response
@@ -144,6 +163,12 @@ pub struct StatusResponse {
     pub memory_bytes: u64,
     /// Loaded codebase roots
     pub loaded_roots: Vec<PathBuf>,
+    /// Protocol version (0 if server predates versioning)
+    #[serde(default)]
+    pub protocol_version: u32,
+    /// Server software version (empty if server predates versioning)
+    #[serde(default)]
+    pub server_version: String,
 }
 
 /// Write a message to a stream with length prefix
@@ -206,6 +231,75 @@ mod tests {
                 assert_eq!(query, "test query");
                 assert_eq!(root_path, PathBuf::from("/home/user/project"));
                 assert_eq!(limit, 100);
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_hello_request() {
+        let req = Request::Hello {
+            protocol_version: 1,
+        };
+
+        let mut buf = Vec::new();
+        write_message(&mut buf, &req).unwrap();
+
+        let mut cursor = Cursor::new(buf);
+        let decoded: Request = read_message(&mut cursor).unwrap();
+
+        match decoded {
+            Request::Hello { protocol_version } => {
+                assert_eq!(protocol_version, 1);
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_hello_response() {
+        let resp = Response::Hello {
+            protocol_version: 1,
+            server_version: "0.1.0".to_string(),
+        };
+
+        let mut buf = Vec::new();
+        write_message(&mut buf, &resp).unwrap();
+
+        let mut cursor = Cursor::new(buf);
+        let decoded: Response = read_message(&mut cursor).unwrap();
+
+        match decoded {
+            Response::Hello {
+                protocol_version,
+                server_version,
+            } => {
+                assert_eq!(protocol_version, 1);
+                assert_eq!(server_version, "0.1.0");
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_status_response_version_defaults() {
+        // Simulate a StatusResponse from an old server (no version fields)
+        let json = r#"{
+            "type": "Status",
+            "uptime_secs": 100,
+            "indexes_loaded": 1,
+            "total_docs": 500,
+            "queries_served": 10,
+            "cache_hit_rate": 0.5,
+            "memory_bytes": 1024,
+            "loaded_roots": []
+        }"#;
+
+        let resp: Response = serde_json::from_str(json).unwrap();
+        match resp {
+            Response::Status(status) => {
+                assert_eq!(status.protocol_version, 0);
+                assert_eq!(status.server_version, "");
             }
             _ => panic!("Wrong variant"),
         }

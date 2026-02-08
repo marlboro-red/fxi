@@ -305,6 +305,12 @@ fn handle_daemon_command(action: DaemonAction) -> Result<()> {
                             println!("  Queries served: {}", status.queries_served);
                             println!("  Cache hit rate: {:.1}%", status.cache_hit_rate * 100.0);
                             println!("  Memory (approx): {:.1} MB", status.memory_bytes as f64 / 1024.0 / 1024.0);
+                            if status.protocol_version > 0 {
+                                println!("  Protocol version: {}", status.protocol_version);
+                            }
+                            if !status.server_version.is_empty() {
+                                println!("  Server version: {}", status.server_version);
+                            }
                             if !status.loaded_roots.is_empty() {
                                 println!("  Loaded codebases:");
                                 for root in &status.loaded_roots {

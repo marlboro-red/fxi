@@ -12,7 +12,7 @@ use crate::utils::{extract_tokens, extract_trigrams, get_index_dir, is_binary, i
 use crate::server::debouncer::EventDebouncer;
 use crate::server::protocol::{
     read_message, write_message, ContentMatch, ContentSearchOptions, ContentSearchResponse,
-    Request, Response, SearchMatchData, SearchResponse, StatusResponse,
+    Request, Response, SearchMatchData, SearchResponse, StatusResponse, PROTOCOL_VERSION,
 };
 use crate::server::watcher::{
     build_gitignore_matcher, should_ignore_path, ChangeBatch, ChangeKind, WatcherConfig,
@@ -684,6 +684,11 @@ impl IndexServer {
             }
 
             Request::Ping => Response::Pong,
+
+            Request::Hello { protocol_version: _ } => Response::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                server_version: env!("CARGO_PKG_VERSION").to_string(),
+            },
         }
     }
 
@@ -1001,6 +1006,8 @@ impl IndexServer {
             cache_hit_rate: self.stats.cache_hit_rate(),
             memory_bytes,
             loaded_roots,
+            protocol_version: PROTOCOL_VERSION,
+            server_version: env!("CARGO_PKG_VERSION").to_string(),
         })
     }
 

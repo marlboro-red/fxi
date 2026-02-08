@@ -3,7 +3,7 @@
 use crate::index::types::SearchMatch;
 use crate::server::protocol::{
     read_message, write_message, ContentSearchOptions, ContentSearchResponse, Request, Response,
-    StatusResponse,
+    StatusResponse, PROTOCOL_VERSION,
 };
 use crate::server::get_pipe_name;
 use std::fs::OpenOptions;
@@ -29,6 +29,11 @@ pub enum ClientError {
     ServerError(String),
     /// Invalid response
     InvalidResponse,
+    /// Protocol version mismatch
+    VersionMismatch {
+        client_version: u32,
+        server_version: u32,
+    },
 }
 
 impl std::fmt::Display for ClientError {
@@ -38,6 +43,14 @@ impl std::fmt::Display for ClientError {
             ClientError::IoError(e) => write!(f, "I/O error: {}", e),
             ClientError::ServerError(msg) => write!(f, "Server error: {}", msg),
             ClientError::InvalidResponse => write!(f, "Invalid response from server"),
+            ClientError::VersionMismatch {
+                client_version,
+                server_version,
+            } => write!(
+                f,
+                "Protocol version mismatch: client={}, server={}",
+                client_version, server_version
+            ),
         }
     }
 }
@@ -220,6 +233,35 @@ impl IndexClient {
         }
     }
 
+    /// Perform protocol version handshake
+    pub fn hello(&mut self) -> ClientResult<HelloResponse> {
+        let request = Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        };
+
+        write_message(&mut self.writer, &request)?;
+
+        let response: Response = read_message(&mut self.reader)?;
+
+        match response {
+            Response::Hello {
+                protocol_version,
+                server_version,
+            } => Ok(HelloResponse {
+                protocol_version,
+                server_version,
+                compatible: protocol_version == PROTOCOL_VERSION,
+            }),
+            // Old server that doesn't know Hello — treat as pre-versioning
+            Response::Error { .. } => Ok(HelloResponse {
+                protocol_version: 0,
+                server_version: String::new(),
+                compatible: false,
+            }),
+            _ => Err(ClientError::InvalidResponse),
+        }
+    }
+
     /// Ping the server
     pub fn ping(&mut self) -> ClientResult<()> {
         write_message(&mut self.writer, &Request::Ping)?;
@@ -232,6 +274,13 @@ impl IndexClient {
             _ => Err(ClientError::InvalidResponse),
         }
     }
+}
+
+/// Response from a Hello handshake
+pub struct HelloResponse {
+    pub protocol_version: u32,
+    pub server_version: String,
+    pub compatible: bool,
 }
 
 /// Search result from the server

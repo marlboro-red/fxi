@@ -8,6 +8,7 @@ import type {
   ReloadRequest,
   ShutdownRequest,
   PingRequest,
+  HelloRequest,
   SearchResponse,
   ContentSearchResponse,
   StatusResponse,
@@ -15,10 +16,12 @@ import type {
   ShuttingDownResponse,
   PongResponse,
   ErrorResponse,
+  HelloResponse,
   ContentSearchOptions,
   SearchMatchData,
   ContentMatch,
 } from "./protocol";
+import { PROTOCOL_VERSION } from "./protocol";
 
 // These tests verify the TypeScript protocol types match the Rust serde
 // wire format. Each test constructs a JSON object as the daemon would
@@ -79,6 +82,13 @@ describe("Request types match Rust serde format", () => {
     expect(Object.keys(req)).toEqual(["type"]);
   });
 
+  it("Hello request has protocol_version", () => {
+    const req: HelloRequest = { type: "Hello", protocol_version: PROTOCOL_VERSION };
+    const json = JSON.parse(JSON.stringify(req));
+    expect(json.type).toBe("Hello");
+    expect(json.protocol_version).toBe(1);
+  });
+
   it("Request union includes all request types", () => {
     const requests: Request[] = [
       { type: "Search", query: "q", root_path: "/r", limit: 10 },
@@ -93,8 +103,9 @@ describe("Request types match Rust serde format", () => {
       { type: "Reload", root_path: "/r" },
       { type: "Shutdown" },
       { type: "Ping" },
+      { type: "Hello", protocol_version: 1 },
     ];
-    expect(requests).toHaveLength(6);
+    expect(requests).toHaveLength(7);
   });
 });
 
@@ -155,6 +166,27 @@ describe("Response types match Rust serde format", () => {
     const resp: StatusResponse = wireJson;
     expect(resp.uptime_secs).toBe(3600);
     expect(resp.loaded_roots).toHaveLength(2);
+    // Version fields should be undefined when not present
+    expect(resp.protocol_version).toBeUndefined();
+    expect(resp.server_version).toBeUndefined();
+  });
+
+  it("Status response with version fields", () => {
+    const wireJson = {
+      type: "Status" as const,
+      uptime_secs: 100,
+      indexes_loaded: 1,
+      total_docs: 500,
+      queries_served: 10,
+      cache_hit_rate: 0.5,
+      memory_bytes: 1024,
+      loaded_roots: [],
+      protocol_version: 1,
+      server_version: "0.1.0",
+    };
+    const resp: StatusResponse = wireJson;
+    expect(resp.protocol_version).toBe(1);
+    expect(resp.server_version).toBe("0.1.0");
   });
 
   it("Reloaded response matches wire format", () => {
@@ -188,6 +220,18 @@ describe("Response types match Rust serde format", () => {
     expect(resp.message).toBe("Index not found");
   });
 
+  it("Hello response has version fields", () => {
+    const wireJson = {
+      type: "Hello" as const,
+      protocol_version: 1,
+      server_version: "0.1.0",
+    };
+    const resp: HelloResponse = wireJson;
+    expect(resp.type).toBe("Hello");
+    expect(resp.protocol_version).toBe(1);
+    expect(resp.server_version).toBe("0.1.0");
+  });
+
   it("Response union includes all response types", () => {
     const responses: Response[] = [
       { type: "Search", matches: [], duration_ms: 0, cached: false },
@@ -206,8 +250,9 @@ describe("Response types match Rust serde format", () => {
       { type: "ShuttingDown" },
       { type: "Pong" },
       { type: "Error", message: "" },
+      { type: "Hello", protocol_version: 1, server_version: "0.1.0" },
     ];
-    expect(responses).toHaveLength(7);
+    expect(responses).toHaveLength(8);
   });
 });
 

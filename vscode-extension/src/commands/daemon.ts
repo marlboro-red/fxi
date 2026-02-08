@@ -81,15 +81,21 @@ export function registerDaemonCommands(
         const cacheRate = (status.cache_hit_rate * 100).toFixed(1);
         const roots = status.loaded_roots.join(", ") || "none";
 
-        vscode.window.showInformationMessage(
+        let msg =
           `FXI Daemon — Uptime: ${status.uptime_secs}s | ` +
             `Indexes: ${status.indexes_loaded} | ` +
             `Docs: ${status.total_docs} | ` +
             `Queries: ${status.queries_served} | ` +
             `Cache: ${cacheRate}% | ` +
             `Memory: ${memMB} MB | ` +
-            `Roots: ${roots}`
-        );
+            `Roots: ${roots}`;
+        if (status.server_version) {
+          msg += ` | Version: ${status.server_version}`;
+        }
+        if (status.protocol_version) {
+          msg += ` | Protocol: v${status.protocol_version}`;
+        }
+        vscode.window.showInformationMessage(msg);
       } catch (e) {
         vscode.window.showErrorMessage(`Failed to get daemon status: ${e}`);
       }

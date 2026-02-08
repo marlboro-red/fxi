@@ -3,6 +3,9 @@
 // Response uses #[serde(tag = "type")] with newtype variants,
 // so inner struct fields are flattened alongside "type".
 
+/// Protocol version number. Bumped only on breaking changes.
+export const PROTOCOL_VERSION = 1;
+
 // --- Request types ---
 
 export interface SearchRequest {
@@ -44,13 +47,19 @@ export interface PingRequest {
   type: "Ping";
 }
 
+export interface HelloRequest {
+  type: "Hello";
+  protocol_version: number;
+}
+
 export type Request =
   | SearchRequest
   | ContentSearchRequest
   | StatusRequest
   | ReloadRequest
   | ShutdownRequest
-  | PingRequest;
+  | PingRequest
+  | HelloRequest;
 
 // --- Response types ---
 // Serde #[serde(tag = "type")] with newtype variants flattens inner fields.
@@ -95,6 +104,8 @@ export interface StatusResponse {
   cache_hit_rate: number;
   memory_bytes: number;
   loaded_roots: string[];
+  protocol_version?: number;
+  server_version?: string;
 }
 
 export interface ReloadedResponse {
@@ -116,6 +127,12 @@ export interface ErrorResponse {
   message: string;
 }
 
+export interface HelloResponse {
+  type: "Hello";
+  protocol_version: number;
+  server_version: string;
+}
+
 export type Response =
   | SearchResponse
   | ContentSearchResponse
@@ -123,4 +140,5 @@ export type Response =
   | ReloadedResponse
   | ShuttingDownResponse
   | PongResponse
-  | ErrorResponse;
+  | ErrorResponse
+  | HelloResponse;
