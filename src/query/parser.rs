@@ -879,4 +879,296 @@ mod tests {
         assert_eq!(q.filters.mtime_min, Some(1700000000));
         assert_eq!(q.filters.mtime_max, Some(1710000000));
     }
+
+    // ========================================================================
+    // Parenthesized grouping tests
+    // ========================================================================
+
+    #[test]
+    fn test_paren_simple_or_group() {
+        // (foo | bar) baz → And([Or([foo, bar]), baz])
+        let q = parse_query("(foo | bar) baz");
+        match &q.root {
+            QueryNode::And(nodes) => {
+                assert_eq!(nodes.len(), 2);
+                assert!(matches!(&nodes[0], QueryNode::Or(inner) if inner.len() == 2));
+                assert!(matches!(&nodes[1], QueryNode::Literal(s) if s == "baz"));
+            }
+            _ => panic!("Expected And node, got {:?}", q.root),
+        }
+    }
+
+    #[test]
+    fn test_paren_nested() {
+        // ((a | b) | c) → Or([Or([a, b]), c])
+        let q = parse_query("((a | b) | c)");
+        match &q.root {
+            QueryNode::Or(nodes) => {
+                assert_eq!(nodes.len(), 2);
+                assert!(matches!(&nodes[0], QueryNode::Or(inner) if inner.len() == 2));
+                assert!(matches!(&nodes[1], QueryNode::Literal(s) if s == "c"));
+            }
+            _ => panic!("Expected Or node, got {:?}", q.root),
+        }
+    }
+
+    #[test]
+    fn test_paren_with_not() {
+        // (foo | bar) -baz → And([Or([foo, bar]), Not(baz)])
+        let q = parse_query("(foo | bar) -baz");
+        match &q.root {
+            QueryNode::And(nodes) => {
+                assert_eq!(nodes.len(), 2);
+                assert!(matches!(&nodes[0], QueryNode::Or(_)));
+                assert!(matches!(&nodes[1], QueryNode::Not(_)));
+            }
+            _ => panic!("Expected And node, got {:?}", q.root),
+        }
+    }
+
+    #[test]
+    fn test_paren_empty() {
+        // () should produce Empty
+        let q = parse_query("()");
+        assert!(matches!(q.root, QueryNode::Empty));
+    }
+
+    #[test]
+    fn test_paren_unclosed() {
+        // Unclosed paren should not panic - graceful degradation
+        let q = parse_query("(foo | bar");
+        // Should still parse the contents
+        assert!(!matches!(q.root, QueryNode::Empty));
+    }
+
+    #[test]
+    fn test_paren_multiple_groups() {
+        // (a | b) (c | d) → And([Or([a, b]), Or([c, d])])
+        let q = parse_query("(a | b) (c | d)");
+        match &q.root {
+            QueryNode::And(nodes) => {
+                assert_eq!(nodes.len(), 2);
+                assert!(matches!(&nodes[0], QueryNode::Or(_)));
+                assert!(matches!(&nodes[1], QueryNode::Or(_)));
+            }
+            _ => panic!("Expected And node, got {:?}", q.root),
+        }
+    }
+
+    #[test]
+    fn test_paren_with_phrase_inside() {
+        // ("hello world" | bar) → Or([Phrase, Literal])
+        let q = parse_query("(\"hello world\" | bar)");
+        match &q.root {
+            QueryNode::Or(nodes) => {
+                assert_eq!(nodes.len(), 2);
+                assert!(matches!(&nodes[0], QueryNode::Phrase(s) if s == "hello world"));
+                assert!(matches!(&nodes[1], QueryNode::Literal(s) if s == "bar"));
+            }
+            _ => panic!("Expected Or node, got {:?}", q.root),
+        }
+    }
+
+    // ========================================================================
+    // NOT operator edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_not_with_and() {
+        // foo -bar → And([Literal(foo), Not(Literal(bar))])
+        let q = parse_query("foo -bar");
+        match &q.root {
+            QueryNode::And(nodes) => {
+                assert_eq!(nodes.len(), 2);
+                assert!(matches!(&nodes[0], QueryNode::Literal(s) if s == "foo"));
+                match &nodes[1] {
+                    QueryNode::Not(inner) => {
+                        assert!(matches!(inner.as_ref(), QueryNode::Literal(s) if s == "bar"));
+                    }
+                    _ => panic!("Expected Not node"),
+                }
+            }
+            _ => panic!("Expected And node, got {:?}", q.root),
+        }
+    }
+
+    #[test]
+    fn test_not_multiple() {
+        // foo -bar -baz → And([foo, Not(bar), Not(baz)])
+        let q = parse_query("foo -bar -baz");
+        match &q.root {
+            QueryNode::And(nodes) => {
+                assert_eq!(nodes.len(), 3);
+                assert!(matches!(&nodes[0], QueryNode::Literal(s) if s == "foo"));
+                assert!(matches!(&nodes[1], QueryNode::Not(_)));
+                assert!(matches!(&nodes[2], QueryNode::Not(_)));
+            }
+            _ => panic!("Expected And node, got {:?}", q.root),
+        }
+    }
+
+    // ========================================================================
+    // Regex edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_regex_with_special_chars() {
+        let q = parse_query(r"re:/fn\s+\w+/");
+        match &q.root {
+            QueryNode::Regex(pat) => assert_eq!(pat, r"fn\s+\w+"),
+            _ => panic!("Expected Regex node, got {:?}", q.root),
+        }
+    }
+
+    #[test]
+    fn test_regex_empty() {
+        let q = parse_query("re://");
+        match &q.root {
+            QueryNode::Regex(pat) => assert!(pat.is_empty()),
+            _ => panic!("Expected Regex node, got {:?}", q.root),
+        }
+    }
+
+    #[test]
+    fn test_regex_with_filter() {
+        let q = parse_query("ext:rs re:/TODO.*fix/");
+        assert_eq!(q.filters.ext, Some("rs".to_string()));
+        // Filter produces Empty node, combined with Regex → And([Empty, Regex])
+        match &q.root {
+            QueryNode::Regex(pat) => assert_eq!(pat, "TODO.*fix"),
+            QueryNode::And(nodes) => {
+                let has_regex = nodes.iter().any(
+                    |n| matches!(n, QueryNode::Regex(pat) if pat == "TODO.*fix"),
+                );
+                assert!(has_regex, "Should contain Regex node in And, got {:?}", nodes);
+            }
+            _ => panic!("Expected Regex or And node, got {:?}", q.root),
+        }
+    }
+
+    // ========================================================================
+    // Near edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_near_single_term_becomes_empty() {
+        // near:foo has no commas, so parts.len() < 2 → Empty
+        let q = parse_query("near:foo");
+        assert!(
+            matches!(&q.root, QueryNode::Empty),
+            "Single-term near (no commas) should become Empty, got {:?}",
+            q.root
+        );
+    }
+
+    #[test]
+    fn test_near_two_terms_no_distance_becomes_literal() {
+        // near:foo,bar - last element parses as non-numeric, so all are terms with default distance
+        let q = parse_query("near:foo,bar");
+        assert!(
+            matches!(&q.root, QueryNode::Near { terms, distance } if terms.len() == 2 && *distance == 10),
+            "Two terms without numeric distance should use default distance 10, got {:?}",
+            q.root
+        );
+    }
+
+    #[test]
+    fn test_near_with_other_terms() {
+        // near:a,b,3 extra → And([Near{...}, Literal(extra)])
+        let q = parse_query("near:a,b,3 extra");
+        match &q.root {
+            QueryNode::And(nodes) => {
+                assert_eq!(nodes.len(), 2);
+                assert!(matches!(&nodes[0], QueryNode::Near { terms, distance } if terms.len() == 2 && *distance == 3));
+                assert!(matches!(&nodes[1], QueryNode::Literal(s) if s == "extra"));
+            }
+            _ => panic!("Expected And node, got {:?}", q.root),
+        }
+    }
+
+    // ========================================================================
+    // Boost edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_boost_zero() {
+        let q = parse_query("^0:term");
+        assert!(
+            matches!(&q.root, QueryNode::BoostedLiteral { text, boost } if text == "term" && *boost == 0.0)
+        );
+    }
+
+    #[test]
+    fn test_boost_on_phrase() {
+        let q = parse_query("^3:\"exact phrase\"");
+        assert!(
+            matches!(&q.root, QueryNode::BoostedLiteral { text, boost } if text == "exact phrase" && *boost == 3.0)
+        );
+    }
+
+    // ========================================================================
+    // Line filter edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_line_filter_zero() {
+        let q = parse_query("line:0 test");
+        assert_eq!(q.filters.line_start, Some(0));
+        assert_eq!(q.filters.line_end, Some(0));
+    }
+
+    #[test]
+    fn test_line_filter_reversed_range() {
+        // line:200-100 - parser should still store what's given
+        let q = parse_query("line:200-100 test");
+        assert_eq!(q.filters.line_start, Some(200));
+        assert_eq!(q.filters.line_end, Some(100));
+    }
+
+    // ========================================================================
+    // Size filter edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_size_filter_zero() {
+        let q = parse_query("size:>0 test");
+        assert_eq!(q.filters.size_min, Some(0));
+    }
+
+    #[test]
+    fn test_size_filter_invalid() {
+        // Invalid size value should be ignored
+        let q = parse_query("size:>abc test");
+        assert_eq!(q.filters.size_min, None);
+    }
+
+    // ========================================================================
+    // Unknown field edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_unknown_field_treated_as_literal() {
+        let q = parse_query("foo:bar");
+        assert!(matches!(&q.root, QueryNode::Literal(s) if s == "foo:bar"));
+    }
+
+    // ========================================================================
+    // Empty / whitespace edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_whitespace_only() {
+        let q = parse_query("   ");
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn test_only_filters_no_search_term() {
+        let q = parse_query("ext:rs lang:rust");
+        assert_eq!(q.filters.ext, Some("rs".to_string()));
+        assert_eq!(q.filters.lang, Some("rust".to_string()));
+        // Each filter returns Empty node; two Empties → And([Empty, Empty])
+        // The query is NOT considered empty because filters are set
+        assert!(!q.is_empty());
+    }
 }

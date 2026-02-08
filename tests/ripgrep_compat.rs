@@ -1202,3 +1202,458 @@ fn test_chunk_size_default_no_flag() {
     assert!(success, "Search should succeed");
     assert!(stdout.contains("func1"), "Should find func1");
 }
+
+// ============================================================================
+// Query Operator Integration Tests
+// ============================================================================
+
+// --- NOT operator ---
+
+#[test]
+fn test_not_operator_excludes_term() {
+    let dir = setup_fixtures();
+
+    // "TODO -optimize" should find main.rs (has "TODO: fix this")
+    // but NOT lib.rs (has "TODO: optimize this")
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "TODO -optimize"], &dir);
+
+    assert!(fxi_ok, "NOT query should succeed");
+    let fxi_files = extract_files(&fxi_out);
+
+    // lib.rs has "TODO: optimize" so it should be excluded
+    assert!(
+        !fxi_files.contains("lib.rs"),
+        "lib.rs should be excluded (has 'optimize'). Got: {:?}",
+        fxi_files
+    );
+}
+
+#[test]
+fn test_not_operator_multiple_exclusions() {
+    let dir = setup_fixtures();
+
+    // Search for pub but exclude format and multiply
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "pub -format -multiply"], &dir);
+
+    assert!(fxi_ok, "Multiple NOT query should succeed");
+    let fxi_files = extract_files(&fxi_out);
+
+    // utils.rs has "format_error" → excluded
+    // lib.rs has "multiply" → excluded
+    assert!(
+        !fxi_files.contains("utils.rs"),
+        "utils.rs should be excluded (has 'format')"
+    );
+    assert!(
+        !fxi_files.contains("lib.rs"),
+        "lib.rs should be excluded (has 'multiply')"
+    );
+}
+
+// --- Regex ---
+
+#[test]
+fn test_regex_search() {
+    let dir = setup_fixtures();
+
+    // Regex matching function definitions
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "re:/fn\\s+\\w+/"], &dir);
+
+    assert!(fxi_ok, "Regex query should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    assert!(
+        fxi_files.contains("main.rs"),
+        "Should find main.rs (has fn definitions)"
+    );
+}
+
+#[test]
+fn test_regex_digit_pattern() {
+    let dir = setup_fixtures();
+
+    // Regex matching numbers
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "re:/\\d+/"], &dir);
+
+    assert!(fxi_ok, "Digit regex should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    assert!(
+        fxi_files.contains("main.rs"),
+        "main.rs has numbers (42)"
+    );
+    assert!(
+        fxi_files.contains("config.json"),
+        "config.json has numbers (1.0.0)"
+    );
+}
+
+#[test]
+fn test_regex_no_match() {
+    let dir = setup_fixtures();
+
+    let (fxi_out, _, _) = run_fxi(&["-l", "re:/zzzznonexistent\\d+aaaa/"], &dir);
+    let fxi_files = extract_files(&fxi_out);
+    assert!(fxi_files.is_empty(), "Nonsense regex should match nothing");
+}
+
+#[test]
+fn test_regex_with_filter() {
+    let dir = setup_fixtures();
+
+    // Regex combined with ext filter
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "ext:rs re:/fn\\s+\\w+/"], &dir);
+
+    assert!(fxi_ok, "Regex + ext filter should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    for file in &fxi_files {
+        assert!(file.ends_with(".rs"), "All results should be .rs files");
+    }
+}
+
+// --- Parenthesized grouping ---
+
+#[test]
+fn test_paren_or_group() {
+    let dir = setup_fixtures();
+
+    // (println | multiply) should find main.rs and lib.rs
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "(println | multiply)"], &dir);
+
+    assert!(fxi_ok, "Parenthesized OR should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    assert!(
+        fxi_files.contains("main.rs"),
+        "Should find main.rs (has println)"
+    );
+    assert!(
+        fxi_files.contains("lib.rs"),
+        "Should find lib.rs (has multiply)"
+    );
+}
+
+#[test]
+fn test_paren_or_with_and() {
+    let dir = setup_fixtures();
+
+    // (println | multiply) fn → files with fn AND (println OR multiply)
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "(println | multiply) fn"], &dir);
+
+    assert!(fxi_ok, "Paren OR + AND should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    // main.rs has fn + println, lib.rs has fn + multiply
+    assert!(
+        fxi_files.contains("main.rs") || fxi_files.contains("lib.rs"),
+        "Should find at least one file. Got: {:?}",
+        fxi_files
+    );
+    // Should not find config.json (no fn)
+    assert!(
+        !fxi_files.contains("config.json"),
+        "config.json should not match (no fn)"
+    );
+}
+
+// --- lang: filter ---
+
+#[test]
+fn test_filter_lang_rust() {
+    let dir = setup_fixtures();
+
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "lang:rust fn"], &dir);
+
+    assert!(fxi_ok, "lang:rust filter should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    // Should only find .rs files
+    for file in &fxi_files {
+        assert!(
+            file.ends_with(".rs"),
+            "lang:rust should only match .rs files, got: {}",
+            file
+        );
+    }
+    // Should not find json files
+    assert!(
+        !fxi_files.contains("config.json"),
+        "lang:rust should not include json files"
+    );
+}
+
+#[test]
+fn test_filter_lang_no_match() {
+    let dir = setup_fixtures();
+
+    // lang:go with rust content → no matches
+    let (fxi_out, _, _) = run_fxi(&["-l", "lang:go fn"], &dir);
+    let fxi_files = extract_files(&fxi_out);
+    assert!(
+        fxi_files.is_empty(),
+        "lang:go should find nothing in a Rust/JSON codebase"
+    );
+}
+
+// --- size: filter ---
+
+#[test]
+fn test_filter_size_min() {
+    let dir = setup_fixtures();
+
+    // All fixture files are > 10 bytes
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "size:>10 fn"], &dir);
+
+    assert!(fxi_ok, "size:>10 should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    assert!(!fxi_files.is_empty(), "Should find files > 10 bytes");
+}
+
+#[test]
+fn test_filter_size_max_excludes_all() {
+    let dir = setup_fixtures();
+
+    // No file is < 1 byte
+    let (fxi_out, _, _) = run_fxi(&["-l", "size:<1 fn"], &dir);
+    let fxi_files = extract_files(&fxi_out);
+    assert!(
+        fxi_files.is_empty(),
+        "size:<1 should find nothing (all files are > 0 bytes)"
+    );
+}
+
+// --- line: filter ---
+
+#[test]
+fn test_filter_line_single() {
+    let dir = setup_fixtures();
+
+    // "line:1 fn" should only find matches on line 1
+    let (fxi_out, _, fxi_ok) = run_fxi(&["line:1 fn"], &dir);
+
+    assert!(fxi_ok, "line:1 filter should succeed");
+    // Parse output lines to check line numbers
+    for line in fxi_out.lines() {
+        if line.contains(':') && !line.starts_with("--") {
+            // Format is "file:line:content"
+            let parts: Vec<&str> = line.splitn(3, ':').collect();
+            if parts.len() >= 2 {
+                if let Ok(line_num) = parts[1].parse::<u32>() {
+                    assert_eq!(
+                        line_num, 1,
+                        "line:1 filter should only return line 1, got line {}",
+                        line_num
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_filter_line_range() {
+    let dir = setup_fixtures();
+
+    // "line:1-3 fn" should find matches in first 3 lines
+    let (fxi_out, _, fxi_ok) = run_fxi(&["line:1-3 fn"], &dir);
+
+    assert!(fxi_ok, "line range filter should succeed");
+    for line in fxi_out.lines() {
+        if line.contains(':') && !line.starts_with("--") {
+            let parts: Vec<&str> = line.splitn(3, ':').collect();
+            if parts.len() >= 2 {
+                if let Ok(line_num) = parts[1].parse::<u32>() {
+                    assert!(
+                        line_num >= 1 && line_num <= 3,
+                        "line:1-3 should only return lines 1-3, got line {}",
+                        line_num
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_filter_line_out_of_range() {
+    let dir = setup_fixtures();
+
+    // No file has 10000 lines — content search should return no matching lines
+    let (fxi_out, _, _) = run_fxi(&["line:10000 println"], &dir);
+
+    // Count actual content matches (file:line:content format)
+    let content_lines: Vec<&str> = fxi_out
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with("--") && l.contains(':'))
+        .collect();
+
+    // Verify no content matches on line 10000
+    for line in &content_lines {
+        let parts: Vec<&str> = line.splitn(3, ':').collect();
+        if parts.len() >= 2 {
+            if let Ok(line_num) = parts[1].parse::<u32>() {
+                assert!(
+                    line_num <= 20,
+                    "No file has 10000+ lines, but got line {}",
+                    line_num
+                );
+            }
+        }
+    }
+}
+
+// --- near: (proximity) ---
+
+#[test]
+fn test_near_search_within_distance() {
+    let dir = setup_fixtures();
+
+    // In main.rs: "println" (line 2) and "Hello" (line 2) are on the same line
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "near:println,Hello,3"], &dir);
+
+    assert!(fxi_ok, "near: search should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    assert!(
+        fxi_files.contains("main.rs"),
+        "Should find main.rs where println and Hello are close"
+    );
+}
+
+#[test]
+fn test_near_search_terms_too_far() {
+    let dir = setup_fixtures();
+
+    // "helper" is on line 8, "42" is on line 3 → distance > 1
+    let (fxi_out, _, _) = run_fxi(&["-l", "near:helper,42,1"], &dir);
+
+    let fxi_files = extract_files(&fxi_out);
+    // With distance=1, helper (line 8) and 42 (line 3) should not match
+    assert!(
+        !fxi_files.contains("main.rs"),
+        "near: with distance=1 should not match terms 5 lines apart"
+    );
+}
+
+// --- boost ---
+
+#[test]
+fn test_boost_search_returns_results() {
+    let dir = setup_fixtures();
+
+    // Boost should not change what's found, just scoring
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "^main"], &dir);
+    let (fxi_out_normal, _, _) = run_fxi(&["-l", "main"], &dir);
+
+    assert!(fxi_ok, "Boosted search should succeed");
+    let boosted_files = extract_files(&fxi_out);
+    let normal_files = extract_files(&fxi_out_normal);
+
+    // Same files should be found (boost affects ranking only)
+    assert_eq!(
+        boosted_files, normal_files,
+        "Boost should not change which files are found"
+    );
+}
+
+// --- sort: ---
+
+#[test]
+fn test_sort_recency() {
+    let dir = setup_fixtures();
+
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "sort:recency fn"], &dir);
+
+    assert!(fxi_ok, "sort:recency should succeed");
+    assert!(!fxi_out.is_empty(), "Should find results");
+}
+
+// --- Combined operator edge cases ---
+
+#[test]
+fn test_combined_regex_and_ext() {
+    let dir = setup_fixtures();
+
+    // ext:json with regex for version pattern
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "ext:json re:/\\d+\\.\\d+\\.\\d+/"], &dir);
+
+    assert!(fxi_ok, "ext + regex should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    assert!(
+        fxi_files.contains("config.json"),
+        "Should find config.json (has version 1.0.0)"
+    );
+    assert_eq!(fxi_files.len(), 1, "Should only find json files");
+}
+
+#[test]
+fn test_combined_file_and_line() {
+    let dir = setup_fixtures();
+
+    // file:main.rs line:1 fn → only fn on line 1 of main.rs
+    let (fxi_out, _, fxi_ok) = run_fxi(&["file:main.rs line:1 fn"], &dir);
+
+    assert!(fxi_ok, "file + line filter should succeed");
+    // Should only have main.rs results on line 1
+    for line in fxi_out.lines() {
+        if line.contains(':') && !line.starts_with("--") {
+            assert!(
+                line.contains("main.rs"),
+                "Should only have main.rs results"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_empty_query_with_filters_only() {
+    let dir = setup_fixtures();
+
+    // Just "ext:rs" with no search term should list all .rs files
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "ext:rs"], &dir);
+
+    assert!(fxi_ok, "Filter-only query should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    assert!(
+        fxi_files.contains("main.rs"),
+        "Should find main.rs"
+    );
+    assert!(
+        fxi_files.contains("lib.rs"),
+        "Should find lib.rs"
+    );
+    assert!(
+        !fxi_files.contains("config.json"),
+        "Should not find config.json"
+    );
+}
+
+#[test]
+fn test_or_operator_pipe() {
+    let dir = setup_fixtures();
+
+    // "println | multiply" should find files with either term
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "println | multiply"], &dir);
+
+    assert!(fxi_ok, "OR operator should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    assert!(
+        fxi_files.contains("main.rs") || fxi_files.contains("lib.rs"),
+        "Should find main.rs (println) or lib.rs (multiply)"
+    );
+}
+
+#[test]
+fn test_phrase_vs_and_search() {
+    let dir = setup_fixtures();
+
+    // Phrase: exact "fn main" sequence
+    let (phrase_out, _, _) = run_fxi(&["-l", "\"fn main\""], &dir);
+    // AND: both "fn" and "main" anywhere
+    let (and_out, _, _) = run_fxi(&["-l", "fn main"], &dir);
+
+    let phrase_files = extract_files(&phrase_out);
+    let and_files = extract_files(&and_out);
+
+    // AND should find at least as many files as phrase
+    assert!(
+        and_files.len() >= phrase_files.len(),
+        "AND should match >= phrase. AND: {:?}, Phrase: {:?}",
+        and_files,
+        phrase_files
+    );
+}

@@ -22,8 +22,8 @@ type ContextLines = Vec<(u32, String)>;
 /// A single match within a file: (line_number, line_content, match_start, match_end)
 type FileMatch = (u32, String, usize, usize);
 
-/// Collected file matches with metadata: (doc_id, rel_path, mtime, matches)
-type FileMatchResult = (DocId, PathBuf, u64, Vec<FileMatch>);
+/// Collected file matches with metadata: (doc_id, full_path, rel_path, mtime, matches)
+type FileMatchResult = (DocId, PathBuf, PathBuf, u64, Vec<FileMatch>);
 
 /// Precompiled filename filter matcher to avoid per-document recompilation.
 enum FilenameMatcher {
@@ -198,23 +198,67 @@ impl<'a> QueryExecutor<'a> {
         let plan = QueryPlan::from_query(query);
         let candidates = self.execute_plan(&plan)?;
 
-        // Verify candidates with limit for early termination
-        let mut results = self.verify_candidates(&candidates, &plan, query.options.limit)?;
+        let limit = query.options.limit;
+        // Collect 1.5x limit for better ranking (early termination)
+        let target = if limit > 0 {
+            Some(limit + (limit / 2))
+        } else {
+            None
+        };
+        let all_matches = self.find_verified_matches(&candidates, &plan, target)?;
+
+        // Build results with scoring
+        let verification = plan.verification.as_ref();
+        let search_terms_lower = verification
+            .map(|v| Self::extract_search_terms(v))
+            .unwrap_or_default();
+        let boost = verification.map(|v| Self::extract_boost(v)).unwrap_or(1.0);
+
+        let estimated_total = all_matches.len() * 2;
+        let mut results = Vec::with_capacity(estimated_total.min(if limit > 0 { limit * 2 } else { estimated_total }));
+
+        for (doc_id, _full_path, path, mtime, file_matches) in &all_matches {
+            if file_matches.is_empty() {
+                // File-only query (no verification) — emit one match per file
+                results.push(SearchMatch {
+                    doc_id: *doc_id,
+                    path: path.clone(),
+                    line_number: 1,
+                    score: 1.0,
+                });
+                continue;
+            }
+
+            let filename_match = Self::filename_matches_terms(path, &search_terms_lower);
+            let score_ctx = ScoreContext {
+                match_count: file_matches.len(),
+                filename_match,
+                depth: Scorer::path_depth(path),
+                mtime: *mtime,
+                boost,
+            };
+            let score = self.scorer.calculate_score(&score_ctx);
+
+            for (line_num, _line_content, _start, _end) in file_matches {
+                results.push(SearchMatch {
+                    doc_id: *doc_id,
+                    path: path.clone(),
+                    line_number: *line_num,
+                    score,
+                });
+            }
+        }
 
         // Also find files whose names match the search terms
-        if let Some(ref verification) = plan.verification {
-            let search_terms_lower = Self::extract_search_terms(verification);
-            if !search_terms_lower.is_empty() {
-                let filename_matches =
-                    self.find_filename_matches(&search_terms_lower, query.options.limit)?;
+        if !search_terms_lower.is_empty() {
+            let filename_matches = self.find_filename_matches(&search_terms_lower, limit)?;
 
-                // Merge filename matches, avoiding duplicates
-                let existing_paths: std::collections::HashSet<PathBuf> =
-                    results.iter().map(|m| m.path.clone()).collect();
-                for m in filename_matches {
-                    if !existing_paths.contains(&m.path) {
-                        results.push(m);
-                    }
+            // Merge filename matches, avoiding duplicates
+            let existing_paths: std::collections::HashSet<PathBuf> =
+                results.iter().map(|m| m.path.clone()).collect();
+            for m in filename_matches {
+                if !existing_paths.contains(&m.path) {
+                    results.push(m);
                 }
             }
         }
@@ -224,8 +268,8 @@ impl<'a> QueryExecutor<'a> {
 
         // Apply final limit (may have collected slightly more for better ranking)
         // Skip truncation when limit == 0 (unlimited)
-        if query.options.limit > 0 {
-            results.truncate(query.options.limit);
+        if limit > 0 {
+            results.truncate(limit);
         }
 
         Ok(results)
@@ -241,146 +285,49 @@ impl<'a> QueryExecutor<'a> {
         let plan = QueryPlan::from_query(query);
         let candidates = self.execute_plan(&plan)?;
 
-        let verification = match &plan.verification {
-            Some(v) => v,
-            None => {
-                // No search term - return one match per file (file-only query like "file:main.rs")
-                let results: Vec<ContentMatchResult> = candidates
-                    .iter()
-                    .filter_map(|doc_id| {
-                        self.reader.get_document(doc_id).and_then(|doc| {
-                            self.reader.get_path(doc).map(|path| ContentMatchResult {
-                                path: path.clone(),
-                                line_number: 1,
-                                line_content: String::new(),
-                                match_start: 0,
-                                match_end: 0,
-                                context_before: vec![],
-                                context_after: vec![],
-                            })
-                        })
-                    })
-                    .collect();
-                return Ok(results);
-            }
-        };
-
-        // Extract line filter from plan (if present)
-        let (line_start, line_end) = Self::extract_line_filter(&plan.steps);
-
-        // Collect candidate doc_ids with their paths for processing
-        let candidate_infos: Vec<(DocId, PathBuf, PathBuf)> = candidates
-            .iter()
-            .filter_map(|doc_id| {
-                self.reader.get_document(doc_id).and_then(|doc| {
-                    self.reader.get_full_path(doc).map(|full_path| {
-                        let rel_path = self.reader.get_path(doc).cloned().unwrap_or_default();
-                        (doc_id, full_path, rel_path)
-                    })
-                })
-            })
-            .collect();
-
-        let candidate_count = candidate_infos.len();
-        let use_cache = !should_use_parallel(candidate_count);
+        let verified = self.find_verified_matches(&candidates, &plan, None)?;
 
         let mut all_results = Vec::new();
 
-        if use_cache {
-            // Sequential processing with cache
-            for (_doc_id, full_path, rel_path) in candidate_infos {
-                let content = match self.reader.read_file_cached(&full_path) {
-                    Some(c) => c,
-                    None => continue,
+        for (_doc_id, full_path, rel_path, _mtime, file_matches) in verified {
+            if file_matches.is_empty() {
+                // File-only query (no verification) — emit one match per file
+                all_results.push(ContentMatchResult {
+                    path: rel_path,
+                    line_number: 1,
+                    line_content: String::new(),
+                    match_start: 0,
+                    match_end: 0,
+                    context_before: vec![],
+                    context_after: vec![],
+                });
+                continue;
+            }
+
+            // Re-read file for context extraction (hits file cache for sequential,
+            // re-reads for parallel — but context extraction is a post-processing step)
+            let content = self
+                .reader
+                .read_file_cached(&full_path)
+                .or_else(|| read_file_mmap(&full_path).map(|c| c.into_owned().into()));
+
+            for (line_num, line_content, start, end) in file_matches {
+                let (ctx_before, ctx_after) = match &content {
+                    Some(c) if context_before > 0 || context_after > 0 => {
+                        Self::extract_context_lines(c, line_num, context_before, context_after)
+                    }
+                    _ => (Vec::new(), Vec::new()),
                 };
 
-                let file_matches = Self::verify_content_static(&content, verification, 0);
-
-                for (line_num, line_content, start, end) in file_matches {
-                    // Apply line filter if specified
-                    if let Some(min) = line_start
-                        && line_num < min
-                    {
-                        continue;
-                    }
-                    if let Some(max) = line_end
-                        && line_num > max
-                    {
-                        continue;
-                    }
-
-                    let (ctx_before, ctx_after) = Self::extract_context_lines(
-                        &content,
-                        line_num,
-                        context_before,
-                        context_after,
-                    );
-
-                    all_results.push(ContentMatchResult {
-                        path: rel_path.clone(),
-                        line_number: line_num,
-                        line_content,
-                        match_start: start,
-                        match_end: end,
-                        context_before: ctx_before,
-                        context_after: ctx_after,
-                    });
-                }
-            }
-        } else {
-            // Parallel processing with memory-mapped I/O
-            let results: Vec<Vec<ContentMatchResult>> = candidate_infos
-                .into_par_iter()
-                .filter_map(|(_doc_id, full_path, rel_path)| {
-                    let content = read_file_mmap(&full_path)?;
-                    let file_matches = Self::verify_content_static(&content, verification, 0);
-
-                    if file_matches.is_empty() {
-                        return None;
-                    }
-
-                    let mut matches = Vec::new();
-                    for (line_num, line_content, start, end) in file_matches {
-                        // Apply line filter if specified
-                        if let Some(min) = line_start
-                            && line_num < min
-                        {
-                            continue;
-                        }
-                        if let Some(max) = line_end
-                            && line_num > max
-                        {
-                            continue;
-                        }
-
-                        let (ctx_before, ctx_after) = Self::extract_context_lines(
-                            &content,
-                            line_num,
-                            context_before,
-                            context_after,
-                        );
-
-                        matches.push(ContentMatchResult {
-                            path: rel_path.clone(),
-                            line_number: line_num,
-                            line_content,
-                            match_start: start,
-                            match_end: end,
-                            context_before: ctx_before,
-                            context_after: ctx_after,
-                        });
-                    }
-
-                    if matches.is_empty() {
-                        None
-                    } else {
-                        Some(matches)
-                    }
-                })
-                .collect();
-
-            for file_results in results {
-                all_results.extend(file_results);
+                all_results.push(ContentMatchResult {
+                    path: rel_path.clone(),
+                    line_number: line_num,
+                    line_content,
+                    match_start: start,
+                    match_end: end,
+                    context_before: ctx_before,
+                    context_after: ctx_after,
+                });
             }
         }
 
@@ -678,7 +625,29 @@ impl<'a> QueryExecutor<'a> {
 
                 PlanStep::Exclude(sub_plan) => {
                     let excluded = self.execute_plan(sub_plan)?;
-                    exclude_set |= excluded;
+                    // Verify excluded candidates to avoid trigram false positives.
+                    // Without verification, files that share trigrams with the
+                    // negated term (but don't actually contain it) get incorrectly excluded.
+                    if let Some(ref verification) = sub_plan.verification {
+                        for doc_id in excluded.iter() {
+                            if let Some(doc) = self.reader.get_document(doc_id)
+                                && let Some(full_path) = self.reader.get_full_path(doc)
+                            {
+                                let content = match self.reader.read_file_cached(&full_path) {
+                                    Some(c) => c,
+                                    None => continue,
+                                };
+                                let matches =
+                                    Self::verify_content_static(&content, verification, doc_id);
+                                if !matches.is_empty() {
+                                    exclude_set.insert(doc_id);
+                                }
+                            }
+                        }
+                    } else {
+                        // No verification available, fall back to trigram-only exclusion
+                        exclude_set |= excluded;
+                    }
                 }
 
                 PlanStep::Filter(filter) => {
@@ -711,7 +680,9 @@ impl<'a> QueryExecutor<'a> {
         candidates: Option<&RoaringBitmap>,
     ) -> Result<RoaringBitmap> {
         let path_matcher = filter.path_glob.as_ref().map(|g| {
-            Glob::new(g)
+            globset::GlobBuilder::new(g)
+                .literal_separator(true)
+                .build()
                 .unwrap_or_else(|_| Glob::new("*").unwrap())
                 .compile_matcher()
         });
@@ -832,30 +803,6 @@ impl<'a> QueryExecutor<'a> {
         Ok(result)
     }
 
-    /// Create matches for file-only queries (no content search term)
-    fn create_file_matches(
-        &self,
-        candidates: &RoaringBitmap,
-        limit: usize,
-    ) -> Result<Vec<SearchMatch>> {
-        let mut matches = Vec::with_capacity(limit.min(candidates.len() as usize));
-
-        for doc_id in candidates.iter().take(limit) {
-            if let Some(doc) = self.reader.get_document(doc_id)
-                && let Some(path) = self.reader.get_path(doc)
-            {
-                matches.push(SearchMatch {
-                    doc_id,
-                    path: path.clone(),
-                    line_number: 1,
-                    score: 1.0,
-                });
-            }
-        }
-
-        Ok(matches)
-    }
-
     /// Check if filename contains any search term (all terms must already be lowercase).
     #[inline]
     fn filename_matches_terms(path: &Path, terms_lower: &[String]) -> bool {
@@ -899,33 +846,39 @@ impl<'a> QueryExecutor<'a> {
         Ok(matches)
     }
 
-    /// Verify candidates against actual file content using parallel processing
-    /// with early termination once limit is reached
-    fn verify_candidates(
+    /// Shared pipeline: collect candidates → read files → verify content → apply line filter.
+    /// Returns per-file match data. If `target_matches` is Some(n), stops after collecting
+    /// approximately n total matches (for early termination in score-based search).
+    fn find_verified_matches(
         &self,
         candidates: &RoaringBitmap,
         plan: &QueryPlan,
-        limit: usize,
-    ) -> Result<Vec<SearchMatch>> {
+        target_matches: Option<usize>,
+    ) -> Result<Vec<FileMatchResult>> {
         let verification = match &plan.verification {
             Some(v) => v,
             None => {
-                // No content verification needed - return file-only matches
-                // This happens when using filters without a search term (e.g., "file:foo")
-                return self.create_file_matches(candidates, limit);
+                // No content verification needed — return one entry per file with empty matches
+                let results: Vec<FileMatchResult> = candidates
+                    .iter()
+                    .filter_map(|doc_id| {
+                        self.reader.get_document(doc_id).and_then(|doc| {
+                            self.reader.get_full_path(doc).map(|full_path| {
+                                let rel_path =
+                                    self.reader.get_path(doc).cloned().unwrap_or_default();
+                                (doc_id, full_path, rel_path, doc.mtime, Vec::new())
+                            })
+                        })
+                    })
+                    .collect();
+                return Ok(results);
             }
         };
-
-        // Extract search terms for filename matching
-        let search_terms_lower = Self::extract_search_terms(verification);
-
-        // Extract boost factor from verification steps
-        let boost = Self::extract_boost(verification);
 
         // Extract line filter from plan (if present)
         let (line_start, line_end) = Self::extract_line_filter(&plan.steps);
 
-        // Collect candidate doc_ids with their paths for parallel processing
+        // Collect candidate doc_ids with their paths for processing
         let candidate_infos: Vec<(DocId, PathBuf, PathBuf, u64)> = candidates
             .iter()
             .filter_map(|doc_id| {
@@ -938,34 +891,29 @@ impl<'a> QueryExecutor<'a> {
             })
             .collect();
 
-        // Process files - use cache for small result sets, parallel for large
-        // Adaptive threshold based on CPU cores
         let candidate_count = candidate_infos.len();
         let use_cache = !should_use_parallel(candidate_count);
 
-        // Track match count for early termination
-        // Collect 1.5x limit for better ranking (was 2x, reduced for faster termination)
-        let target_matches = limit + (limit / 2);
-        let match_count = AtomicUsize::new(0);
-
         let all_matches: Vec<FileMatchResult> = if use_cache {
             // Small result set: use cached reads (sequential to leverage cache)
-            let mut results = Vec::with_capacity(candidate_count.min(target_matches));
+            let mut results = Vec::with_capacity(
+                candidate_count.min(target_matches.unwrap_or(candidate_count)),
+            );
             let mut total_matches = 0;
 
             for (doc_id, full_path, rel_path, mtime) in candidate_infos {
                 // Early termination check
-                if total_matches >= target_matches {
-                    break;
+                if let Some(target) = target_matches {
+                    if total_matches >= target {
+                        break;
+                    }
                 }
 
-                // Use cached file reading
                 let content = match self.reader.read_file_cached(&full_path) {
                     Some(c) => c,
                     None => continue,
                 };
 
-                // Find matches
                 let mut file_matches = Self::verify_content_static(&content, verification, doc_id);
 
                 // Apply line filter if specified
@@ -979,27 +927,27 @@ impl<'a> QueryExecutor<'a> {
 
                 if !file_matches.is_empty() {
                     total_matches += file_matches.len();
-                    results.push((doc_id, rel_path, mtime, file_matches));
+                    results.push((doc_id, full_path, rel_path, mtime, file_matches));
                 }
             }
             results
         } else {
             // Large result set: use parallel memory-mapped reads with early termination
-            // Use with_min_len to ensure good work stealing granularity
+            let match_count = AtomicUsize::new(0);
+
             candidate_infos
                 .into_par_iter()
-                .with_min_len(4) // Ensure chunks aren't too small
+                .with_min_len(4)
                 .filter_map(|(doc_id, full_path, rel_path, mtime)| {
-                    // Early termination check - skip if we have enough matches
-                    // Use Relaxed ordering for maximum performance (occasional over-collection is OK)
-                    if match_count.load(Ordering::Relaxed) >= target_matches {
-                        return None;
+                    // Early termination check
+                    if let Some(target) = target_matches {
+                        if match_count.load(Ordering::Relaxed) >= target {
+                            return None;
+                        }
                     }
 
-                    // Read file content using mmap for large files
                     let content = read_file_mmap(&full_path)?;
 
-                    // Find matches
                     let mut file_matches =
                         Self::verify_content_static(&content, verification, doc_id);
 
@@ -1015,45 +963,14 @@ impl<'a> QueryExecutor<'a> {
                     if file_matches.is_empty() {
                         None
                     } else {
-                        // Update match count for early termination
                         match_count.fetch_add(file_matches.len(), Ordering::Relaxed);
-                        Some((doc_id, rel_path, mtime, file_matches))
+                        Some((doc_id, full_path, rel_path, mtime, file_matches))
                     }
                 })
                 .collect()
         };
 
-        // Build final results with scoring
-        // Pre-allocate based on expected match count (typically 1-3 matches per file)
-        let estimated_total = all_matches.len() * 2;
-        let mut matches = Vec::with_capacity(estimated_total.min(limit * 2));
-
-        for (doc_id, path, mtime, file_matches) in all_matches {
-            // Build score context
-            let filename_match = Self::filename_matches_terms(&path, &search_terms_lower);
-
-            let score_ctx = ScoreContext {
-                match_count: file_matches.len(),
-                filename_match,
-                depth: Scorer::path_depth(&path),
-                mtime,
-                boost,
-            };
-
-            let score = self.scorer.calculate_score(&score_ctx);
-
-            // Create matches with calculated score
-            for (line_num, _line_content, _start, _end) in file_matches {
-                matches.push(SearchMatch {
-                    doc_id,
-                    path: path.clone(),
-                    line_number: line_num,
-                    score,
-                });
-            }
-        }
-
-        Ok(matches)
+        Ok(all_matches)
     }
 
     /// Extract boost factor from verification steps
@@ -1779,4 +1696,568 @@ def format_warning(msg: str) -> str:
             "Case-insensitive should find all 3 matches"
         );
     }
+
+    // ========================================================================
+    // NOT operator executor tests
+    // ========================================================================
+
+    #[test]
+    fn test_verify_content_not_excludes() {
+        // Content that DOES contain the negated term → no match
+        let content = "fn main() {\n    println!(\"hello\");\n}\n";
+        let verification = VerificationStep::Not(Box::new(VerificationStep::Literal(
+            "println".to_string(),
+        )));
+
+        let matches = QueryExecutor::verify_content_static(content, &verification, 1);
+        assert!(
+            matches.is_empty(),
+            "NOT should produce no matches when term is present"
+        );
+    }
+
+    #[test]
+    fn test_verify_content_not_includes() {
+        // Content that does NOT contain the negated term → match
+        let content = "fn main() {\n    let x = 42;\n}\n";
+        let verification = VerificationStep::Not(Box::new(VerificationStep::Literal(
+            "println".to_string(),
+        )));
+
+        let matches = QueryExecutor::verify_content_static(content, &verification, 1);
+        assert!(
+            !matches.is_empty(),
+            "NOT should produce a match when term is absent"
+        );
+    }
+
+    #[test]
+    fn test_verify_content_and_with_not() {
+        // "fn -println" → has fn, but NOT println
+        let content_with_both = "fn main() { println!(\"hi\"); }";
+        let content_without = "fn helper() { let x = 1; }";
+
+        let verification = VerificationStep::And(vec![
+            VerificationStep::Literal("fn".to_string()),
+            VerificationStep::Not(Box::new(VerificationStep::Literal("println".to_string()))),
+        ]);
+
+        let matches_both = QueryExecutor::verify_content_static(content_with_both, &verification, 1);
+        assert!(
+            matches_both.is_empty(),
+            "Should NOT match when negated term is present"
+        );
+
+        let matches_without =
+            QueryExecutor::verify_content_static(content_without, &verification, 1);
+        assert!(
+            !matches_without.is_empty(),
+            "Should match when negated term is absent"
+        );
+    }
+
+    #[test]
+    fn test_executor_not_operator() {
+        // The Exclude step now verifies candidates by reading file content before
+        // excluding, preventing trigram false positives from causing over-exclusion.
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root_path = temp_dir.path().to_path_buf();
+
+        fs::write(
+            root_path.join("has_excluded.rs"),
+            "pub fn xyzabc_unique_marker() {\n    println!(\"hello\");\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root_path.join("no_excluded.rs"),
+            "pub fn xyzabc_unique_marker() {\n    let result = 42;\n}\n",
+        )
+        .unwrap();
+        // Add padding files to ensure trigram index has some noise
+        for i in 0..20 {
+            fs::write(
+                root_path.join(format!("padding_{}.txt", i)),
+                format!("padding content number {} with various words\n", i),
+            )
+            .unwrap();
+        }
+
+        crate::index::build::build_index(&root_path, false).expect("Failed to build index");
+        let reader = IndexReader::open(&root_path).expect("Failed to open index");
+        let executor = QueryExecutor::new(&reader);
+
+        let query = parse_query("xyzabc_unique_marker -println");
+        let results = executor.execute(&query).unwrap();
+
+        // Must NOT contain files with "println"
+        for result in &results {
+            let path_str = result.path.to_string_lossy();
+            assert!(
+                !path_str.contains("has_excluded"),
+                "File with println should never appear in NOT results, got: {}",
+                path_str
+            );
+        }
+
+        // Must contain the file WITHOUT "println" (the fix ensures this)
+        let has_no_excluded = results
+            .iter()
+            .any(|r| r.path.to_string_lossy().contains("no_excluded"));
+        assert!(
+            has_no_excluded,
+            "File without println should appear in results (Exclude verification fix)"
+        );
+    }
+
+    // ========================================================================
+    // Near (proximity) executor tests
+    // ========================================================================
+
+    #[test]
+    fn test_verify_content_near_within_distance() {
+        // Terms on adjacent lines → within distance
+        let content = "line1: function\nline2: return\nline3: end\n";
+        let verification = VerificationStep::Near {
+            terms: vec!["function".to_string(), "return".to_string()],
+            distance: 2,
+        };
+
+        let matches = QueryExecutor::verify_content_static(content, &verification, 1);
+        assert!(
+            !matches.is_empty(),
+            "Near should match when terms are within distance"
+        );
+    }
+
+    #[test]
+    fn test_verify_content_near_beyond_distance() {
+        // Terms far apart → should NOT match
+        let content = "line1: function\nline2: a\nline3: b\nline4: c\nline5: d\nline6: e\nline7: f\nline8: g\nline9: h\nline10: return\n";
+        let verification = VerificationStep::Near {
+            terms: vec!["function".to_string(), "return".to_string()],
+            distance: 2,
+        };
+
+        let matches = QueryExecutor::verify_content_static(content, &verification, 1);
+        assert!(
+            matches.is_empty(),
+            "Near should NOT match when terms are beyond distance (9 lines apart, distance=2)"
+        );
+    }
+
+    #[test]
+    fn test_verify_content_near_same_line() {
+        // Both terms on the same line → always within distance
+        let content = "fn main() { return 42; }\n";
+        let verification = VerificationStep::Near {
+            terms: vec!["main".to_string(), "return".to_string()],
+            distance: 1,
+        };
+
+        let matches = QueryExecutor::verify_content_static(content, &verification, 1);
+        assert!(
+            !matches.is_empty(),
+            "Near should match when terms are on the same line"
+        );
+    }
+
+    #[test]
+    fn test_verify_content_near_missing_term() {
+        // One term is absent entirely → no match
+        let content = "fn main() {\n    let x = 42;\n}\n";
+        let verification = VerificationStep::Near {
+            terms: vec!["main".to_string(), "nonexistent".to_string()],
+            distance: 100,
+        };
+
+        let matches = QueryExecutor::verify_content_static(content, &verification, 1);
+        assert!(
+            matches.is_empty(),
+            "Near should NOT match when a term is missing"
+        );
+    }
+
+    #[test]
+    fn test_executor_near_search() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        // "near:println,Hello,3" - should find main.rs where println and Hello are close
+        let query = parse_query("near:println,Hello,3");
+        let results = executor.execute(&query);
+        assert!(results.is_ok());
+        let results = results.unwrap();
+        assert!(
+            results
+                .iter()
+                .any(|m| m.path.to_string_lossy().contains("main.rs")),
+            "Should find main.rs where println and Hello are close together"
+        );
+    }
+
+    // ========================================================================
+    // Size filter executor tests
+    // ========================================================================
+
+    #[test]
+    fn test_executor_size_filter_min() {
+        let (_temp_dir, root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        // Get actual file sizes for the test
+        let main_size = fs::metadata(root_path.join("main.rs"))
+            .expect("main.rs should exist")
+            .len();
+
+        // Search with size filter larger than all files → no results
+        let query = parse_query(&format!("size:>{} fn", main_size + 10000));
+        let results = executor.execute(&query).unwrap();
+        assert!(
+            results.is_empty(),
+            "size:>huge should find no files"
+        );
+    }
+
+    #[test]
+    fn test_executor_size_filter_max() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        // Search with very small max size → should exclude most/all files
+        let query = parse_query("size:<1 fn");
+        let results = executor.execute(&query).unwrap();
+        assert!(
+            results.is_empty(),
+            "size:<1 should find no files (all files are > 0 bytes)"
+        );
+    }
+
+    #[test]
+    fn test_executor_size_filter_range() {
+        let (_temp_dir, root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        // Get actual file sizes
+        let main_size = fs::metadata(root_path.join("main.rs")).unwrap().len();
+        let lib_size = fs::metadata(root_path.join("lib.rs")).unwrap().len();
+
+        // Use a range that includes all our files
+        let min_size = main_size.min(lib_size);
+        let query = parse_query(&format!("size:>0 size:<{} fn", min_size + 1));
+        let results = executor.execute(&query).unwrap();
+
+        // Should find at least the smallest file
+        assert!(
+            !results.is_empty(),
+            "size range should find at least one file"
+        );
+    }
+
+    // ========================================================================
+    // Mtime filter executor tests
+    // ========================================================================
+
+    #[test]
+    fn test_executor_mtime_filter_future() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        // mtime is stored as seconds (matching the query parser's interpretation)
+        let future_secs = 4102444800u64; // year ~2100 in seconds
+        let query = parse_query(&format!("ext:rs mtime:>{}", future_secs));
+        let results = executor.execute(&query).unwrap();
+        assert!(
+            results.is_empty(),
+            "mtime filter in far future should find no files, got {} results",
+            results.len()
+        );
+    }
+
+    #[test]
+    fn test_executor_mtime_filter_past() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        // mtime is stored as seconds. Files modified after epoch → all files
+        let query = parse_query("ext:rs mtime:>0");
+        let results = executor.execute(&query).unwrap();
+        assert!(
+            !results.is_empty(),
+            "mtime:>0 should find files (all files were recently created)"
+        );
+    }
+
+    #[test]
+    fn test_executor_mtime_filter_max_excludes_recent() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        // mtime is stored as seconds. max=1 second → excludes all recent files
+        let query = parse_query("ext:rs mtime:<1");
+        let results = executor.execute(&query).unwrap();
+        assert!(
+            results.is_empty(),
+            "mtime:<1 should find no files (all files are recently created)"
+        );
+    }
+
+    #[test]
+    fn test_executor_mtime_filter_with_real_timestamp() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        // mtime is now stored as seconds, matching the parser's interpretation.
+        // Use a real-world seconds timestamp (Jan 1, 2020) that all test files
+        // (created just now) should be newer than.
+        let query = parse_query("ext:rs mtime:>1577836800");
+        let results = executor.execute(&query).unwrap();
+        assert!(
+            !results.is_empty(),
+            "mtime:>1577836800 (Jan 2020 in seconds) should find recently created files"
+        );
+    }
+
+    // ========================================================================
+    // Line filter executor tests
+    // ========================================================================
+
+    #[test]
+    fn test_executor_line_filter() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        // Search for "fn" but only on line 1
+        let query = parse_query("line:1 fn");
+        let results = executor.execute(&query).unwrap();
+
+        // main.rs has "fn main()" on line 1, lib.rs has "pub fn add" on line 1
+        // All matches should be on line 1
+        for result in &results {
+            assert_eq!(
+                result.line_number, 1,
+                "Line filter line:1 should only return matches on line 1, got line {}",
+                result.line_number
+            );
+        }
+    }
+
+    #[test]
+    fn test_executor_line_filter_range() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        // Search for "fn" in lines 5-10
+        let query = parse_query("line:5-10 fn");
+        let results = executor.execute(&query).unwrap();
+
+        // All matches should be within the line range
+        for result in &results {
+            assert!(
+                result.line_number >= 5 && result.line_number <= 10,
+                "Line filter line:5-10 should only return matches in range, got line {}",
+                result.line_number
+            );
+        }
+    }
+
+    #[test]
+    fn test_executor_line_filter_out_of_range() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        // Search for "fn" on line 1000 — none of our test files are that long
+        let query = parse_query("line:1000 fn");
+        let results = executor.execute(&query).unwrap();
+        assert!(
+            results.is_empty(),
+            "line:1000 should find no matches in small test files"
+        );
+    }
+
+    // ========================================================================
+    // Regex executor tests
+    // ========================================================================
+
+    #[test]
+    fn test_executor_regex_search() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        let query = parse_query(r"re:/fn\s+\w+/");
+        let results = executor.execute(&query).unwrap();
+        assert!(
+            !results.is_empty(),
+            r"Regex re:/fn\s+\w+/ should match function definitions"
+        );
+    }
+
+    #[test]
+    fn test_executor_regex_no_match() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        let query = parse_query(r"re:/zzzznonexistent\d+/");
+        let results = executor.execute(&query).unwrap();
+        assert!(
+            results.is_empty(),
+            "Regex with no matching content should return empty"
+        );
+    }
+
+    #[test]
+    fn test_verify_content_regex_digits() {
+        let content = "let x = 42;\nlet y = hello;\nlet z = 99;\n";
+        let verification = VerificationStep::Regex(r"\d+".to_string());
+
+        let matches = QueryExecutor::verify_content_static(content, &verification, 1);
+        assert_eq!(
+            matches.len(),
+            2,
+            "Regex \\d+ should match lines with 42 and 99"
+        );
+    }
+
+    #[test]
+    fn test_verify_content_regex_no_match() {
+        let content = "hello world\nfoo bar\n";
+        let verification = VerificationStep::Regex(r"\d+".to_string());
+
+        let matches = QueryExecutor::verify_content_static(content, &verification, 1);
+        assert!(matches.is_empty(), "Regex \\d+ should not match text-only content");
+    }
+
+    // ========================================================================
+    // Boost executor tests
+    // ========================================================================
+
+    #[test]
+    fn test_executor_boosted_search() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        // Boosted search should still find results (boost affects scoring, not filtering)
+        let query = parse_query("^main");
+        let results = executor.execute(&query).unwrap();
+        assert!(
+            !results.is_empty(),
+            "Boosted search should find results"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|m| m.path.to_string_lossy().contains("main.rs")),
+            "Should find main.rs"
+        );
+    }
+
+    // ========================================================================
+    // OR executor tests
+    // ========================================================================
+
+    #[test]
+    fn test_verify_content_or_neither_match() {
+        let content = "fn main() {\n    let x = 42;\n}\n";
+        let verification = VerificationStep::Or(vec![
+            VerificationStep::Literal("nonexistent1".to_string()),
+            VerificationStep::Literal("nonexistent2".to_string()),
+        ]);
+
+        let matches = QueryExecutor::verify_content_static(content, &verification, 1);
+        assert!(matches.is_empty(), "OR with no matching terms should be empty");
+    }
+
+    // ========================================================================
+    // Parenthesized / compound executor tests
+    // ========================================================================
+
+    #[test]
+    fn test_executor_grouped_or_with_and() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        // (println | multiply) fn → files containing fn AND (println OR multiply)
+        let query = parse_query("(println | multiply) fn");
+        let results = executor.execute(&query).unwrap();
+        assert!(
+            !results.is_empty(),
+            "Grouped OR with AND should find results"
+        );
+        // main.rs has println+fn, lib.rs has multiply+fn
+        let paths: Vec<String> = results
+            .iter()
+            .map(|m| m.path.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            paths.iter().any(|p| p.contains("main.rs")),
+            "Should find main.rs (has println and fn)"
+        );
+    }
+
+    // ========================================================================
+    // File/path filter executor tests
+    // ========================================================================
+
+    #[test]
+    fn test_executor_file_filter() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        let query = parse_query("file:main.rs fn");
+        let results = executor.execute(&query).unwrap();
+
+        assert!(!results.is_empty(), "file:main.rs should find main.rs");
+        for result in &results {
+            assert!(
+                result
+                    .path
+                    .file_name()
+                    .map(|f| f == "main.rs")
+                    .unwrap_or(false),
+                "All results should be from main.rs"
+            );
+        }
+    }
+
+    #[test]
+    fn test_executor_file_glob_filter() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        let query = parse_query("file:*.rs fn");
+        let results = executor.execute(&query).unwrap();
+
+        assert!(!results.is_empty(), "file:*.rs should find .rs files");
+        for result in &results {
+            assert!(
+                result.path.extension().map(|e| e == "rs").unwrap_or(false),
+                "file:*.rs should only return .rs files"
+            );
+        }
+        // Should NOT include utils.py
+        assert!(
+            !results
+                .iter()
+                .any(|m| m.path.to_string_lossy().contains(".py")),
+            "file:*.rs should not include .py files"
+        );
+    }
+
+    // ========================================================================
+    // Edge case: empty results
+    // ========================================================================
+
+    #[test]
+    fn test_executor_all_filters_combined_no_match() {
+        let (_temp_dir, _root_path, reader) = create_test_index();
+        let executor = QueryExecutor::new(&reader);
+
+        // ext:json with fn → config.json doesn't contain "fn"
+        let query = parse_query("ext:json fn");
+        let results = executor.execute(&query).unwrap();
+        assert!(
+            results.is_empty(),
+            "ext:json with fn should find nothing (json file has no fn)"
+        );
+    }
+
 }

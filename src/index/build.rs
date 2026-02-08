@@ -339,7 +339,7 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
                 // Get modification time
                 let mtime = metadata
                     .modified()
-                    .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64)
+                    .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
                     .unwrap_or(0);
 
                 // Process file content (trigrams, tokens, line map)
@@ -565,7 +565,7 @@ fn compute_index_diff(root: &Path, indexed_files: &HashMap<PathBuf, (u32, u64)>)
 
         let current_mtime = metadata
             .modified()
-            .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64)
+            .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
             .unwrap_or(0);
 
         seen_paths.insert(rel_path.clone());

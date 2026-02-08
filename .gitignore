@@ -3,9 +3,6 @@
 debug/
 release/
 
-# Index directory
-.codesearch/
-
 # IDE
 .idea/
 .vscode/
