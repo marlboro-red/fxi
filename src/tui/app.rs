@@ -382,7 +382,7 @@ impl App {
 
             thread::spawn(move || {
                 let result = if let Ok(mut client) = client.lock() {
-                    match client.search(&query_for_thread, &root_path, 0) {
+                    match client.search(&query_for_thread, Some(&root_path), 0) {
                         Ok(sr) => Ok(sr.matches),
                         Err(e) => Err(e.to_string()),
                     }
@@ -570,7 +570,7 @@ impl App {
                     if let Some(ref client) = self.client
                         && let Ok(mut client) = client.lock()
                     {
-                        let _ = client.reload(&self.root_path);
+                        let _ = client.reload(Some(&self.root_path));
                     }
                     self.status_message = "Index rebuilt (daemon notified)".to_string();
 

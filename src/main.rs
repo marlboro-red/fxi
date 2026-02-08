@@ -358,7 +358,7 @@ fn handle_daemon_command(action: DaemonAction) -> Result<()> {
 
             match IndexClient::connect() {
                 Some(mut client) => {
-                    match client.reload(&root) {
+                    match client.reload(Some(&root)) {
                         Ok((success, message)) => {
                             if success {
                                 println!("Reloaded: {}", message);
@@ -412,7 +412,7 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
 
     // Try to use daemon for warm search
     let matches = if let Some(mut client) = server::IndexClient::connect() {
-        match client.content_search(&combined_pattern, &root, opts.max_count, search_options) {
+        match client.content_search(&combined_pattern, Some(&root), opts.max_count, search_options) {
             Ok(response) => response.matches,
             Err(e) => {
                 eprintln!("Daemon search failed, falling back to direct search: {}", e);

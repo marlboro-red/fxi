@@ -11,14 +11,14 @@ export const PROTOCOL_VERSION = 1;
 export interface SearchRequest {
   type: "Search";
   query: string;
-  root_path: string;
+  root_path?: string;
   limit: number;
 }
 
 export interface ContentSearchRequest {
   type: "ContentSearch";
   pattern: string;
-  root_path: string;
+  root_path?: string;
   limit: number;
   options: ContentSearchOptions;
 }
@@ -36,7 +36,7 @@ export interface StatusRequest {
 
 export interface ReloadRequest {
   type: "Reload";
-  root_path: string;
+  root_path?: string;
 }
 
 export interface ShutdownRequest {
@@ -76,6 +76,7 @@ export interface SearchResponse {
   matches: SearchMatchData[];
   duration_ms: number;
   cached: boolean;
+  resolved_root?: string;
 }
 
 export interface ContentMatch {
@@ -93,6 +94,7 @@ export interface ContentSearchResponse {
   matches: ContentMatch[];
   duration_ms: number;
   files_with_matches: number;
+  resolved_root?: string;
 }
 
 export interface StatusResponse {
@@ -112,6 +114,7 @@ export interface ReloadedResponse {
   type: "Reloaded";
   success: boolean;
   message: string;
+  resolved_root?: string;
 }
 
 export interface ShuttingDownResponse {

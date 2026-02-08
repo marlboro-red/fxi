@@ -35,8 +35,9 @@ pub enum Request {
     Search {
         /// The search query string
         query: String,
-        /// Root path of the codebase to search
-        root_path: PathBuf,
+        /// Root path of the codebase to search (optional — server resolves subdirs or uses single loaded index)
+        #[serde(default)]
+        root_path: Option<PathBuf>,
         /// Maximum number of results
         limit: usize,
     },
@@ -45,8 +46,9 @@ pub enum Request {
     ContentSearch {
         /// The search pattern
         pattern: String,
-        /// Root path of the codebase to search
-        root_path: PathBuf,
+        /// Root path of the codebase to search (optional — server resolves subdirs or uses single loaded index)
+        #[serde(default)]
+        root_path: Option<PathBuf>,
         /// Maximum number of results
         limit: usize,
         /// Content search options
@@ -57,7 +59,10 @@ pub enum Request {
     Status,
 
     /// Request server to reload index for a path
-    Reload { root_path: PathBuf },
+    Reload {
+        #[serde(default)]
+        root_path: Option<PathBuf>,
+    },
 
     /// Graceful shutdown request
     Shutdown,
@@ -86,7 +91,13 @@ pub enum Response {
     Status(StatusResponse),
 
     /// Reload completed
-    Reloaded { success: bool, message: String },
+    Reloaded {
+        success: bool,
+        message: String,
+        /// The resolved codebase root the server used
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_root: Option<PathBuf>,
+    },
 
     /// Shutdown acknowledged
     ShuttingDown,
@@ -115,6 +126,9 @@ pub struct SearchResponse {
     pub duration_ms: f64,
     /// Whether results came from cache
     pub cached: bool,
+    /// The resolved codebase root the server used
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_root: Option<PathBuf>,
 }
 
 /// Serializable search match (mirrors SearchMatch but with Serialize/Deserialize)
@@ -144,6 +158,9 @@ pub struct ContentSearchResponse {
     pub matches: Vec<ContentMatch>,
     pub duration_ms: f64,
     pub files_with_matches: usize,
+    /// The resolved codebase root the server used
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_root: Option<PathBuf>,
 }
 
 /// Server status response
@@ -216,7 +233,7 @@ mod tests {
     fn test_roundtrip_request() {
         let req = Request::Search {
             query: "test query".to_string(),
-            root_path: PathBuf::from("/home/user/project"),
+            root_path: Some(PathBuf::from("/home/user/project")),
             limit: 100,
         };
 
@@ -229,7 +246,7 @@ mod tests {
         match decoded {
             Request::Search { query, root_path, limit } => {
                 assert_eq!(query, "test query");
-                assert_eq!(root_path, PathBuf::from("/home/user/project"));
+                assert_eq!(root_path, Some(PathBuf::from("/home/user/project")));
                 assert_eq!(limit, 100);
             }
             _ => panic!("Wrong variant"),
@@ -316,6 +333,7 @@ mod tests {
             }],
             duration_ms: 12.5,
             cached: false,
+            resolved_root: Some(PathBuf::from("/home/user/project")),
         });
 
         let mut buf = Vec::new();
@@ -328,6 +346,92 @@ mod tests {
             Response::Search(sr) => {
                 assert_eq!(sr.matches.len(), 1);
                 assert_eq!(sr.matches[0].line_number, 42);
+                assert_eq!(sr.resolved_root, Some(PathBuf::from("/home/user/project")));
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_search_request_with_root_path_backward_compat() {
+        // Old client sends root_path as a string, should deserialize to Some(...)
+        let json = r#"{"type":"Search","query":"main","root_path":"/home/user/project","limit":10}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::Search { root_path, .. } => {
+                assert_eq!(root_path, Some(PathBuf::from("/home/user/project")));
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_search_request_without_root_path() {
+        // New client omits root_path entirely
+        let json = r#"{"type":"Search","query":"main","limit":10}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        match req {
+            Request::Search { root_path, .. } => {
+                assert_eq!(root_path, None);
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_resolved_root_omitted_when_none() {
+        // resolved_root: None should not appear in serialized JSON
+        let resp = SearchResponse {
+            matches: vec![],
+            duration_ms: 1.0,
+            cached: false,
+            resolved_root: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("resolved_root"));
+
+        // resolved_root: Some should appear
+        let resp_with_root = SearchResponse {
+            matches: vec![],
+            duration_ms: 1.0,
+            cached: false,
+            resolved_root: Some(PathBuf::from("/tmp/test")),
+        };
+        let json = serde_json::to_string(&resp_with_root).unwrap();
+        assert!(json.contains("resolved_root"));
+    }
+
+    #[test]
+    fn test_content_search_response_resolved_root_default() {
+        // Old server response without resolved_root should default to None
+        let json = r#"{"type":"ContentSearch","matches":[],"duration_ms":1.0,"files_with_matches":0}"#;
+        let resp: Response = serde_json::from_str(json).unwrap();
+        match resp {
+            Response::ContentSearch(cs) => {
+                assert_eq!(cs.resolved_root, None);
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_reloaded_response_resolved_root() {
+        // Reloaded without resolved_root (backward compat)
+        let json = r#"{"type":"Reloaded","success":true,"message":"ok"}"#;
+        let resp: Response = serde_json::from_str(json).unwrap();
+        match resp {
+            Response::Reloaded { resolved_root, .. } => {
+                assert_eq!(resolved_root, None);
+            }
+            _ => panic!("Wrong variant"),
+        }
+
+        // Reloaded with resolved_root
+        let json = r#"{"type":"Reloaded","success":true,"message":"ok","resolved_root":"/tmp/test"}"#;
+        let resp: Response = serde_json::from_str(json).unwrap();
+        match resp {
+            Response::Reloaded { resolved_root, .. } => {
+                assert_eq!(resolved_root, Some(PathBuf::from("/tmp/test")));
             }
             _ => panic!("Wrong variant"),
         }

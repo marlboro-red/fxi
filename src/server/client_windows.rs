@@ -131,12 +131,12 @@ impl IndexClient {
     pub fn search(
         &mut self,
         query: &str,
-        root_path: &Path,
+        root_path: Option<&Path>,
         limit: usize,
     ) -> ClientResult<SearchResult> {
         let request = Request::Search {
             query: query.to_string(),
-            root_path: root_path.clone(),
+            root_path: root_path.map(|p| p.to_path_buf()),
             limit,
         };
 
@@ -168,13 +168,13 @@ impl IndexClient {
     pub fn content_search(
         &mut self,
         pattern: &str,
-        root_path: &Path,
+        root_path: Option<&Path>,
         limit: usize,
         options: ContentSearchOptions,
     ) -> ClientResult<ContentSearchResponse> {
         let request = Request::ContentSearch {
             pattern: pattern.to_string(),
-            root_path: root_path.clone(),
+            root_path: root_path.map(|p| p.to_path_buf()),
             limit,
             options,
         };
@@ -204,9 +204,9 @@ impl IndexClient {
     }
 
     /// Request index reload
-    pub fn reload(&mut self, root_path: &Path) -> ClientResult<(bool, String)> {
+    pub fn reload(&mut self, root_path: Option<&Path>) -> ClientResult<(bool, String)> {
         let request = Request::Reload {
-            root_path: root_path.clone(),
+            root_path: root_path.map(|p| p.to_path_buf()),
         };
 
         write_message(&mut self.writer, &request)?;
@@ -214,7 +214,7 @@ impl IndexClient {
         let response: Response = read_message(&mut self.reader)?;
 
         match response {
-            Response::Reloaded { success, message } => Ok((success, message)),
+            Response::Reloaded { success, message, .. } => Ok((success, message)),
             Response::Error { message } => Err(ClientError::ServerError(message)),
             _ => Err(ClientError::InvalidResponse),
         }

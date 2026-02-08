@@ -73,6 +73,21 @@ Windows — Named pipe:
 | 2 | `\\.\pipe\fxi-{USERNAME}` |
 | 3 | `\\.\pipe\fxi` |
 
+### Path Resolution
+
+The `root_path` field in `Search`, `ContentSearch`, and `Reload` requests is **optional**. The daemon resolves which index to use via three strategies, tried in order:
+
+1. **Exact root path** — If `root_path` matches a loaded (or loadable) index root exactly, it is used directly. This is the original behavior.
+
+2. **Subdirectory path** — If `root_path` points to a subdirectory of an indexed codebase, the daemon walks up to find the codebase root (`.git` directory or indexed parent). For example, sending `root_path: "/home/user/project/src/utils"` resolves to `/home/user/project`.
+
+3. **Omitted** — If `root_path` is omitted (or `null`), the daemon checks how many indexes are loaded:
+   - **Exactly one** — uses that index automatically.
+   - **Zero** — returns an error: `"No indexes loaded; root_path is required"`.
+   - **Two or more** — returns an error listing the loaded roots: `"Ambiguous: 2 indexes loaded; specify root_path. Loaded: /home/user/project1, /home/user/project2"`.
+
+All three search/reload responses include a `resolved_root` field containing the absolute path the daemon resolved to. Clients can cache this value to avoid repeated resolution.
+
 ### Authentication
 
 None. Access is controlled by filesystem permissions (socket is `0o600` on Unix, per-user pipe on Windows).
@@ -126,10 +141,10 @@ All requests and responses are JSON objects with a `"type"` discriminator field 
 
 ```typescript
 type Request =
-  | { type: "Search";        query: string; root_path: string; limit: number }
-  | { type: "ContentSearch"; pattern: string; root_path: string; limit: number; options: ContentSearchOptions }
+  | { type: "Search";        query: string; root_path?: string; limit: number }
+  | { type: "ContentSearch"; pattern: string; root_path?: string; limit: number; options: ContentSearchOptions }
   | { type: "Status" }
-  | { type: "Reload";        root_path: string }
+  | { type: "Reload";        root_path?: string }
   | { type: "Shutdown" }
   | { type: "Ping" }
   | { type: "Hello";         protocol_version: number }
@@ -139,10 +154,10 @@ type Request =
 
 ```typescript
 type Response =
-  | { type: "Search";        matches: SearchMatchData[]; duration_ms: number; cached: boolean }
-  | { type: "ContentSearch"; matches: ContentMatch[]; duration_ms: number; files_with_matches: number }
+  | { type: "Search";        matches: SearchMatchData[]; duration_ms: number; cached: boolean; resolved_root?: string }
+  | { type: "ContentSearch"; matches: ContentMatch[]; duration_ms: number; files_with_matches: number; resolved_root?: string }
   | { type: "Status";        uptime_secs: number; indexes_loaded: number; total_docs: number; queries_served: number; cache_hit_rate: number; memory_bytes: number; loaded_roots: string[]; protocol_version?: number; server_version?: string }
-  | { type: "Reloaded";      success: boolean; message: string }
+  | { type: "Reloaded";      success: boolean; message: string; resolved_root?: string }
   | { type: "ShuttingDown" }
   | { type: "Pong" }
   | { type: "Error";         message: string }
@@ -173,7 +188,7 @@ Index-based full-text search using the fxi query syntax (supports AND, OR, NOT, 
 | Field | Type | Description |
 |-------|------|-------------|
 | `query` | string | fxi query string (see [Query Syntax](#query-syntax)) |
-| `root_path` | string | Absolute path to the indexed codebase root |
+| `root_path` | string? | Absolute path to the indexed codebase root (optional — see [Path Resolution](#path-resolution)) |
 | `limit` | number | Max results to return. `0` = use the query's `top:N` limit or server default |
 
 **Response**
@@ -190,7 +205,8 @@ Index-based full-text search using the fxi query syntax (supports AND, OR, NOT, 
     }
   ],
   "duration_ms": 12.3,
-  "cached": false
+  "cached": false,
+  "resolved_root": "/home/user/project"
 }
 ```
 
@@ -203,6 +219,7 @@ Index-based full-text search using the fxi query syntax (supports AND, OR, NOT, 
 | `matches[].score` | number (f32) | Relevance score (higher = better) |
 | `duration_ms` | number (f64) | Server-side search time in milliseconds |
 | `cached` | boolean | `true` if result was served from cache |
+| `resolved_root` | string? | Absolute path of the codebase root the server resolved to |
 
 ---
 
@@ -230,7 +247,7 @@ Regex/literal pattern search with context lines (ripgrep-like). Searches file co
 | Field | Type | Description |
 |-------|------|-------------|
 | `pattern` | string | Search pattern (regex or literal) |
-| `root_path` | string | Absolute path to the indexed codebase root |
+| `root_path` | string? | Absolute path to the indexed codebase root (optional — see [Path Resolution](#path-resolution)) |
 | `limit` | number | Max results. `0` = up to 10,000,000 (server cap) |
 | `options.context_before` | number (u32) | Lines of context before each match |
 | `options.context_after` | number (u32) | Lines of context after each match |
@@ -270,6 +287,7 @@ Regex/literal pattern search with context lines (ripgrep-like). Searches file co
 | `matches[].context_after` | [number, string][] | Context lines after: `[line_number, content]` tuples |
 | `duration_ms` | number (f64) | Server-side search time in milliseconds |
 | `files_with_matches` | number | Count of unique files containing matches |
+| `resolved_root` | string? | Absolute path of the codebase root the server resolved to |
 
 ---
 
@@ -327,13 +345,16 @@ Force the daemon to reload the index for a codebase from disk. Clears the query 
 }
 ```
 
+`root_path` is optional — see [Path Resolution](#path-resolution).
+
 **Response**
 
 ```json
 {
   "type": "Reloaded",
   "success": true,
-  "message": "Reloaded 150000 files"
+  "message": "Reloaded 150000 files",
+  "resolved_root": "/home/user/project"
 }
 ```
 
@@ -341,6 +362,7 @@ Force the daemon to reload the index for a codebase from disk. Clears the query 
 |-------|------|-------------|
 | `success` | boolean | Whether the reload succeeded |
 | `message` | string | Human-readable status message |
+| `resolved_root` | string? | Absolute path of the codebase root the server resolved to |
 
 ---
 
@@ -515,7 +537,7 @@ else:
 send_request(sock, {"type": "Ping"})
 print(read_response(sock))  # {"type": "Pong"}
 
-# Search
+# Search (root_path is optional — omit if only one index is loaded)
 send_request(sock, {
     "type": "Search",
     "query": "fn main",
@@ -523,8 +545,18 @@ send_request(sock, {
     "limit": 10
 })
 result = read_response(sock)
+print(f"Resolved root: {result.get('resolved_root', 'N/A')}")
 for match in result["matches"]:
     print(f"{match['path']}:{match['line_number']} (score: {match['score']})")
+
+# Search without root_path (uses single loaded index)
+send_request(sock, {
+    "type": "Search",
+    "query": "fn main",
+    "limit": 10
+})
+result = read_response(sock)
+print(f"Resolved root: {result['resolved_root']}")
 
 # Content search with context
 send_request(sock, {
@@ -616,6 +648,7 @@ function createClient() {
   const pong = await client.send({ type: "Ping" });
   console.log(pong); // { type: "Pong" }
 
+  // Search with explicit root_path
   const result = await client.send({
     type: "ContentSearch",
     pattern: "TODO",
@@ -624,6 +657,15 @@ function createClient() {
     options: { context_before: 0, context_after: 0, case_insensitive: false, files_only: false }
   });
   console.log(`Found ${result.files_with_matches} files with matches`);
+  console.log(`Resolved root: ${result.resolved_root}`);
+
+  // Search without root_path (uses single loaded index)
+  const result2 = await client.send({
+    type: "Search",
+    query: "main",
+    limit: 10
+  });
+  console.log(`Resolved root: ${result2.resolved_root}`);
 
   client.close();
 })();

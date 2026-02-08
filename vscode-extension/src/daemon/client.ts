@@ -222,13 +222,13 @@ export class DaemonClient extends EventEmitter {
     });
   }
 
-  async search(query: string, rootPath: string, limit: number): Promise<SearchResponse> {
+  async search(query: string, rootPath: string | undefined, limit: number): Promise<SearchResponse> {
     const resp = await this.request({
       type: "Search",
       query,
-      root_path: rootPath,
+      ...(rootPath !== undefined && { root_path: rootPath }),
       limit,
-    });
+    } as Request);
     if (resp.type === "Error") {
       throw new Error(resp.message);
     }
@@ -240,17 +240,17 @@ export class DaemonClient extends EventEmitter {
 
   async contentSearch(
     pattern: string,
-    rootPath: string,
+    rootPath: string | undefined,
     limit: number,
     options: ContentSearchOptions
   ): Promise<ContentSearchResponse> {
     const resp = await this.request({
       type: "ContentSearch",
       pattern,
-      root_path: rootPath,
+      ...(rootPath !== undefined && { root_path: rootPath }),
       limit,
       options,
-    });
+    } as Request);
     if (resp.type === "Error") {
       throw new Error(resp.message);
     }
@@ -271,8 +271,11 @@ export class DaemonClient extends EventEmitter {
     return resp;
   }
 
-  async reload(rootPath: string): Promise<{ success: boolean; message: string }> {
-    const resp = await this.request({ type: "Reload", root_path: rootPath });
+  async reload(rootPath?: string): Promise<{ success: boolean; message: string }> {
+    const resp = await this.request({
+      type: "Reload",
+      ...(rootPath !== undefined && { root_path: rootPath }),
+    } as Request);
     if (resp.type === "Error") {
       throw new Error(resp.message);
     }

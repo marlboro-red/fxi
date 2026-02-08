@@ -693,17 +693,13 @@ impl IndexServer {
     }
 
     /// Handle a search request
-    fn handle_search(&self, query: String, root_path: PathBuf, limit: usize) -> Response {
+    fn handle_search(&self, query: String, root_path: Option<PathBuf>, limit: usize) -> Response {
         let start = Instant::now();
 
-        // Canonicalize root path
-        let root_path = match root_path.canonicalize() {
+        // Resolve root path (canonicalize + walk up, or use single loaded index)
+        let root_path = match self.resolve_root(root_path) {
             Ok(p) => p,
-            Err(e) => {
-                return Response::Error {
-                    message: format!("Invalid path: {}", e),
-                }
-            }
+            Err(resp) => return resp,
         };
 
         // Ensure index is loaded (and watcher started)
@@ -746,6 +742,7 @@ impl IndexServer {
                 matches,
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 cached: true,
+                resolved_root: Some(root_path.clone()),
             });
         }
 
@@ -758,6 +755,7 @@ impl IndexServer {
                 matches: vec![],
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 cached: false,
+                resolved_root: Some(root_path.clone()),
             });
         }
 
@@ -799,6 +797,7 @@ impl IndexServer {
             matches: result_matches,
             duration_ms: start.elapsed().as_secs_f64() * 1000.0,
             cached: false,
+            resolved_root: Some(root_path),
         })
     }
 
@@ -806,20 +805,16 @@ impl IndexServer {
     fn handle_content_search(
         &self,
         pattern: String,
-        root_path: PathBuf,
+        root_path: Option<PathBuf>,
         limit: usize,
         options: ContentSearchOptions,
     ) -> Response {
         let start = Instant::now();
 
-        // Canonicalize root path
-        let root_path = match root_path.canonicalize() {
+        // Resolve root path (canonicalize + walk up, or use single loaded index)
+        let root_path = match self.resolve_root(root_path) {
             Ok(p) => p,
-            Err(e) => {
-                return Response::Error {
-                    message: format!("Invalid path: {}", e),
-                }
-            }
+            Err(resp) => return resp,
         };
 
         // Ensure index is loaded (and watcher started)
@@ -863,6 +858,7 @@ impl IndexServer {
                 matches: cached_matches.clone(),
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 files_with_matches: *cached_file_count,
+                resolved_root: Some(root_path.clone()),
             });
         }
 
@@ -884,6 +880,7 @@ impl IndexServer {
                 matches: vec![],
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 files_with_matches: 0,
+                resolved_root: Some(root_path.clone()),
             });
         }
 
@@ -927,6 +924,7 @@ impl IndexServer {
                 matches: match_data,
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 files_with_matches: file_count,
+                resolved_root: Some(root_path.clone()),
             });
         }
 
@@ -978,6 +976,7 @@ impl IndexServer {
             matches: match_data,
             duration_ms: start.elapsed().as_secs_f64() * 1000.0,
             files_with_matches: file_count,
+            resolved_root: Some(root_path),
         })
     }
 
@@ -1012,15 +1011,10 @@ impl IndexServer {
     }
 
     /// Handle reload request
-    fn handle_reload(&self, root_path: PathBuf) -> Response {
-        let root_path = match root_path.canonicalize() {
+    fn handle_reload(&self, root_path: Option<PathBuf>) -> Response {
+        let root_path = match self.resolve_root(root_path) {
             Ok(p) => p,
-            Err(e) => {
-                return Response::Reloaded {
-                    success: false,
-                    message: format!("Invalid path: {}", e),
-                }
-            }
+            Err(resp) => return resp,
         };
 
         // Remove from cache to force reload
@@ -1040,12 +1034,50 @@ impl IndexServer {
                 Response::Reloaded {
                     success: true,
                     message: format!("Reloaded {} files", doc_count),
+                    resolved_root: Some(root_path),
                 }
             }
             Err(e) => Response::Reloaded {
                 success: false,
                 message: format!("Failed to reload: {}", e),
+                resolved_root: Some(root_path),
             },
+        }
+    }
+
+    /// Resolve a root path from an optional client-provided path.
+    /// - Some(path): canonicalize and walk up to find codebase root (.git / indexed parent)
+    /// - None: if exactly one index is loaded, use it; otherwise error
+    fn resolve_root(&self, root_path: Option<PathBuf>) -> Result<PathBuf, Response> {
+        match root_path {
+            Some(path) => {
+                let canonical = path.canonicalize().map_err(|e| Response::Error {
+                    message: format!("Invalid path: {}", e),
+                })?;
+                crate::utils::find_codebase_root(&canonical).map_err(|e| Response::Error {
+                    message: format!("Could not resolve codebase root: {}", e),
+                })
+            }
+            None => {
+                let indexes = self.indexes.read().unwrap();
+                match indexes.len() {
+                    0 => Err(Response::Error {
+                        message: "No indexes loaded; root_path is required".to_string(),
+                    }),
+                    1 => Ok(indexes.keys().next().unwrap().clone()),
+                    n => Err(Response::Error {
+                        message: format!(
+                            "Ambiguous: {} indexes loaded; specify root_path. Loaded: {}",
+                            n,
+                            indexes
+                                .keys()
+                                .map(|k| k.display().to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    }),
+                }
+            }
         }
     }
 
