@@ -86,7 +86,7 @@ describe("Request types match Rust serde format", () => {
     const req: HelloRequest = { type: "Hello", protocol_version: PROTOCOL_VERSION };
     const json = JSON.parse(JSON.stringify(req));
     expect(json.type).toBe("Hello");
-    expect(json.protocol_version).toBe(1);
+    expect(json.protocol_version).toBe(2);
   });
 
   it("Request union includes all request types", () => {
@@ -119,7 +119,7 @@ describe("Response types match Rust serde format", () => {
     const wireJson = {
       type: "Search" as const,
       matches: [
-        { doc_id: 1, path: "src/main.rs", line_number: 42, score: 1.5 },
+        { path: "src/main.rs", line_number: 42, score: 1.5 },
       ],
       duration_ms: 12.5,
       cached: false,
@@ -259,12 +259,11 @@ describe("Response types match Rust serde format", () => {
 describe("SearchMatchData", () => {
   it("all fields are required", () => {
     const match: SearchMatchData = {
-      doc_id: 5,
       path: "src/lib.rs",
       line_number: 100,
       score: 2.3,
     };
-    expect(match.doc_id).toBe(5);
+    expect(match.path).toBe("src/lib.rs");
     expect(match.score).toBe(2.3);
   });
 });

@@ -116,7 +116,7 @@ Client                              Server
 
 ### Protocol Versioning
 
-The protocol uses a single integer version number (`PROTOCOL_VERSION`, currently `1`). The version is bumped only on **breaking** changes (field removal/rename, semantic changes, wire format changes). Adding new optional fields or new request types does **not** require a bump.
+The protocol uses a single integer version number (`PROTOCOL_VERSION`, currently `2`). The version is bumped only on **breaking** changes (field removal/rename, semantic changes, wire format changes). Adding new optional fields or new request types does **not** require a bump.
 
 Two mechanisms expose the version:
 
@@ -198,7 +198,6 @@ Index-based full-text search using the fxi query syntax (supports AND, OR, NOT, 
   "type": "Search",
   "matches": [
     {
-      "doc_id": 5,
       "path": "src/main.rs",
       "line_number": 10,
       "score": 2.5
@@ -213,7 +212,6 @@ Index-based full-text search using the fxi query syntax (supports AND, OR, NOT, 
 | Field | Type | Description |
 |-------|------|-------------|
 | `matches` | SearchMatchData[] | Array of matches |
-| `matches[].doc_id` | number (u32) | Internal document ID |
 | `matches[].path` | string | File path relative to `root_path` |
 | `matches[].line_number` | number (u32) | 1-based line number |
 | `matches[].score` | number (f32) | Relevance score (higher = better) |
@@ -313,7 +311,7 @@ Health check and server statistics.
   "cache_hit_rate": 0.756,
   "memory_bytes": 10485760,
   "loaded_roots": ["/home/user/project1", "/home/user/project2"],
-  "protocol_version": 1,
+  "protocol_version": 2,
   "server_version": "0.1.0"
 }
 ```
@@ -411,7 +409,7 @@ Optional protocol version handshake. Should be the first message after connectin
 ```json
 {
   "type": "Hello",
-  "protocol_version": 1
+  "protocol_version": 2
 }
 ```
 
@@ -424,7 +422,7 @@ Optional protocol version handshake. Should be the first message after connectin
 ```json
 {
   "type": "Hello",
-  "protocol_version": 1,
+  "protocol_version": 2,
   "server_version": "0.1.0"
 }
 ```
@@ -526,7 +524,7 @@ sock.settimeout(30)
 sock.connect(get_socket_path())
 
 # Hello (optional version handshake)
-send_request(sock, {"type": "Hello", "protocol_version": 1})
+send_request(sock, {"type": "Hello", "protocol_version": 2})
 hello = read_response(sock)
 if hello["type"] == "Hello":
     print(f"Server protocol: v{hello['protocol_version']}, version: {hello['server_version']}")
@@ -638,7 +636,7 @@ function createClient() {
   const client = createClient();
 
   // Hello (optional version handshake)
-  const hello = await client.send({ type: "Hello", protocol_version: 1 });
+  const hello = await client.send({ type: "Hello", protocol_version: 2 });
   if (hello.type === "Hello") {
     console.log(`Server protocol: v${hello.protocol_version}, version: ${hello.server_version}`);
   } else {

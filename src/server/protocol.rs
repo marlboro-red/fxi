@@ -11,7 +11,7 @@ use std::path::PathBuf;
 /// Protocol version number. Bumped only on breaking changes
 /// (field removal/rename, semantic changes, wire format changes).
 /// Adding new optional fields or new request types does NOT require a bump.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Options for content search
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -134,7 +134,6 @@ pub struct SearchResponse {
 /// Serializable search match (mirrors SearchMatch but with Serialize/Deserialize)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchMatchData {
-    pub doc_id: u32,
     pub path: PathBuf,
     pub line_number: u32,
     pub score: f32,
@@ -326,7 +325,6 @@ mod tests {
     fn test_roundtrip_response() {
         let resp = Response::Search(SearchResponse {
             matches: vec![SearchMatchData {
-                doc_id: 1,
                 path: PathBuf::from("src/main.rs"),
                 line_number: 42,
                 score: 1.5,
@@ -347,6 +345,29 @@ mod tests {
                 assert_eq!(sr.matches.len(), 1);
                 assert_eq!(sr.matches[0].line_number, 42);
                 assert_eq!(sr.resolved_root, Some(PathBuf::from("/home/user/project")));
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_search_response_with_doc_id_backward_compat() {
+        // Old server sends doc_id in SearchMatchData; new client should ignore it
+        let json = r#"{
+            "type": "Search",
+            "matches": [
+                {"doc_id": 99, "path": "src/main.rs", "line_number": 10, "score": 2.5}
+            ],
+            "duration_ms": 1.0,
+            "cached": false
+        }"#;
+
+        let resp: Response = serde_json::from_str(json).unwrap();
+        match resp {
+            Response::Search(sr) => {
+                assert_eq!(sr.matches.len(), 1);
+                assert_eq!(sr.matches[0].path, PathBuf::from("src/main.rs"));
+                assert_eq!(sr.matches[0].line_number, 10);
             }
             _ => panic!("Wrong variant"),
         }

@@ -4,7 +4,7 @@
 // so inner struct fields are flattened alongside "type".
 
 /// Protocol version number. Bumped only on breaking changes.
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 // --- Request types ---
 
@@ -65,7 +65,6 @@ export type Request =
 // Serde #[serde(tag = "type")] with newtype variants flattens inner fields.
 
 export interface SearchMatchData {
-  doc_id: number;
   path: string;
   line_number: number;
   score: number;

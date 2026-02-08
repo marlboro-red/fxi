@@ -962,7 +962,6 @@ impl IndexServer {
         let match_data: Vec<SearchMatchData> = matches
             .iter()
             .map(|m| SearchMatchData {
-                doc_id: m.doc_id,
                 path: m.path.clone(),
                 line_number: m.line_number,
                 score: m.score,

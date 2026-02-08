@@ -126,7 +126,7 @@ impl IndexClient {
                     .matches
                     .into_iter()
                     .map(|m| SearchMatch {
-                        doc_id: m.doc_id,
+                        doc_id: 0,
                         path: m.path,
                         line_number: m.line_number,
                         score: m.score,

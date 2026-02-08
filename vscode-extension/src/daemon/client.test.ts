@@ -159,7 +159,6 @@ describe("DaemonClient", () => {
         type: "Search",
         matches: [
           {
-            doc_id: 1,
             path: "src/main.rs",
             line_number: 42,
             score: 1.5,
