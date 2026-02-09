@@ -298,6 +298,42 @@ describe("DaemonClient", () => {
       await ping3;
     });
 
+    it("drops stale response with unrecognized request_id instead of matching to next request", async () => {
+      const connPromise = waitForEvent(client, "connectionChange");
+      client.connect();
+      await connPromise;
+
+      // Send request A and complete it normally so we capture its request_id
+      const pingA = client.ping();
+      await new Promise((r) => setTimeout(r, 50));
+      const reqA = mock.lastRequest();
+      const reqAId = reqA.request_id;
+      mock.respond({ type: "Pong", request_id: reqAId });
+      await pingA;
+
+      // Send request B
+      const pingB = client.ping();
+      await new Promise((r) => setTimeout(r, 50));
+      const reqs = mock.allRequests();
+      const reqBId = reqs[reqs.length - 1].request_id;
+
+      // Simulate a stale/duplicate response arriving with A's already-resolved ID.
+      // This is the same code path as a timed-out request whose response arrives late:
+      // the request_id is set but not found in pendingById.
+      mock.respond({ type: "Pong", request_id: reqAId });
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Request B should still be pending (stale response was dropped, not matched via FIFO)
+      let bResolved = false;
+      pingB.then(() => { bResolved = true; }).catch(() => {});
+      await new Promise((r) => setTimeout(r, 50));
+      expect(bResolved).toBe(false);
+
+      // Now respond to request B properly
+      mock.respond({ type: "Pong", request_id: reqBId });
+      await pingB;
+    });
+
     it("falls back to FIFO for old server (no request_id in response)", async () => {
       const connPromise = waitForEvent(client, "connectionChange");
       client.connect();

@@ -153,6 +153,9 @@ export class DaemonClient extends EventEmitter {
       if (idx !== -1) {this.legacyQueue.splice(idx, 1);}
       clearTimeout(pending.timer);
       pending.resolve(response as Response);
+    } else if (responseId !== undefined) {
+      // Response has a request_id we don't recognize — stale response
+      // from a timed-out or cancelled request. Drop it.
     } else if (this.legacyQueue.length > 0) {
       // FIFO fallback for old servers that don't echo request_id
       const oldestId = this.legacyQueue.shift()!;
