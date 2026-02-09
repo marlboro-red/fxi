@@ -187,7 +187,83 @@ pub struct StatusResponse {
     pub server_version: String,
 }
 
+/// Write a message to a stream with length prefix and an optional request_id.
+///
+/// Serializes `msg` to a `serde_json::Value`, injects `request_id` if
+/// provided, then writes the length-prefixed JSON bytes.
+pub fn write_message_with_id<W: Write>(
+    writer: &mut W,
+    msg: &impl Serialize,
+    request_id: Option<&str>,
+) -> std::io::Result<()> {
+    let mut value = serde_json::to_value(msg).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+    })?;
+
+    if let (Some(id), Some(obj)) = (request_id, value.as_object_mut()) {
+        obj.insert(
+            "request_id".to_string(),
+            serde_json::Value::String(id.to_string()),
+        );
+    }
+
+    let json = serde_json::to_vec(&value).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+    })?;
+
+    let len = json.len() as u32;
+    writer.write_all(&len.to_le_bytes())?;
+    writer.write_all(&json)?;
+    writer.flush()?;
+
+    Ok(())
+}
+
+/// Read a message from a stream with length prefix, extracting an optional request_id.
+///
+/// Reads the length-prefixed bytes, parses as `serde_json::Value`, extracts
+/// and removes the `"request_id"` field (only if it is a JSON string),
+/// then deserializes the remaining Value as `T`.
+pub fn read_message_with_id<R: Read, T: for<'de> Deserialize<'de>>(
+    reader: &mut R,
+) -> std::io::Result<(T, Option<String>)> {
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf)?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+
+    // Sanity check: don't allocate more than 100MB
+    if len > 100 * 1024 * 1024 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Message too large",
+        ));
+    }
+
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf)?;
+
+    let mut value: serde_json::Value = serde_json::from_slice(&buf).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+    })?;
+
+    // Extract request_id only if it is a string
+    let request_id = value
+        .as_object_mut()
+        .and_then(|obj| obj.remove("request_id"))
+        .and_then(|v| match v {
+            serde_json::Value::String(s) => Some(s),
+            _ => None,
+        });
+
+    let msg: T = serde_json::from_value(value).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+    })?;
+
+    Ok((msg, request_id))
+}
+
 /// Write a message to a stream with length prefix
+#[cfg(test)]
 pub fn write_message<W: Write>(writer: &mut W, msg: &impl Serialize) -> std::io::Result<()> {
     let json = serde_json::to_vec(msg).map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, e)
@@ -202,6 +278,7 @@ pub fn write_message<W: Write>(writer: &mut W, msg: &impl Serialize) -> std::io:
 }
 
 /// Read a message from a stream with length prefix
+#[cfg(test)]
 pub fn read_message<R: Read, T: for<'de> Deserialize<'de>>(reader: &mut R) -> std::io::Result<T> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf)?;
@@ -420,6 +497,91 @@ mod tests {
         };
         let json = serde_json::to_string(&resp_with_root).unwrap();
         assert!(json.contains("resolved_root"));
+    }
+
+    #[test]
+    fn test_roundtrip_with_request_id() {
+        let req = Request::Ping;
+        let mut buf = Vec::new();
+        write_message_with_id(&mut buf, &req, Some("c-42")).unwrap();
+
+        let mut cursor = Cursor::new(buf);
+        let (decoded, id): (Request, _) = read_message_with_id(&mut cursor).unwrap();
+
+        assert!(matches!(decoded, Request::Ping));
+        assert_eq!(id, Some("c-42".to_string()));
+    }
+
+    #[test]
+    fn test_read_message_without_id_backward_compat() {
+        // Write with old write_message (no request_id), read with read_message_with_id
+        let req = Request::Ping;
+        let mut buf = Vec::new();
+        write_message(&mut buf, &req).unwrap();
+
+        let mut cursor = Cursor::new(buf);
+        let (decoded, id): (Request, _) = read_message_with_id(&mut cursor).unwrap();
+
+        assert!(matches!(decoded, Request::Ping));
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn test_write_message_with_id_read_by_old_reader() {
+        // Write with request_id, read with old read_message — unknown field ignored
+        let req = Request::Ping;
+        let mut buf = Vec::new();
+        write_message_with_id(&mut buf, &req, Some("test-id")).unwrap();
+
+        let mut cursor = Cursor::new(buf);
+        let decoded: Request = read_message(&mut cursor).unwrap();
+        assert!(matches!(decoded, Request::Ping));
+    }
+
+    #[test]
+    fn test_non_string_request_id_ignored() {
+        // Manually craft JSON with numeric request_id — should be ignored
+        let json = r#"{"type":"Ping","request_id":42}"#;
+        let json_bytes = json.as_bytes();
+        let len = json_bytes.len() as u32;
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(json_bytes);
+
+        let mut cursor = Cursor::new(buf);
+        let (decoded, id): (Request, _) = read_message_with_id(&mut cursor).unwrap();
+        assert!(matches!(decoded, Request::Ping));
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn test_search_response_with_request_id() {
+        let resp = Response::Search(SearchResponse {
+            matches: vec![SearchMatchData {
+                path: PathBuf::from("src/main.rs"),
+                line_number: 42,
+                score: 1.5,
+            }],
+            duration_ms: 12.5,
+            cached: false,
+            resolved_root: Some(PathBuf::from("/project")),
+        });
+
+        let mut buf = Vec::new();
+        write_message_with_id(&mut buf, &resp, Some("req-99")).unwrap();
+
+        let mut cursor = Cursor::new(buf);
+        let (decoded, id): (Response, _) = read_message_with_id(&mut cursor).unwrap();
+
+        assert_eq!(id, Some("req-99".to_string()));
+        match decoded {
+            Response::Search(sr) => {
+                assert_eq!(sr.matches.len(), 1);
+                assert_eq!(sr.matches[0].line_number, 42);
+            }
+            _ => panic!("Wrong variant"),
+        }
     }
 
     #[test]

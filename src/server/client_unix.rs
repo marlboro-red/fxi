@@ -2,8 +2,8 @@
 
 use crate::index::types::SearchMatch;
 use crate::server::protocol::{
-    read_message, write_message, ContentSearchOptions, ContentSearchResponse, Request, Response,
-    StatusResponse, PROTOCOL_VERSION,
+    read_message_with_id, write_message_with_id, ContentSearchOptions, ContentSearchResponse,
+    Request, Response, StatusResponse, PROTOCOL_VERSION,
 };
 use crate::server::get_socket_path;
 use std::io::{BufReader, BufWriter};
@@ -68,6 +68,7 @@ impl From<std::io::Error> for ClientError {
 pub struct IndexClient {
     reader: BufReader<UnixStream>,
     writer: BufWriter<UnixStream>,
+    request_counter: u64,
 }
 
 impl IndexClient {
@@ -94,13 +95,36 @@ impl IndexClient {
         let reader = BufReader::new(stream.try_clone().ok()?);
         let writer = BufWriter::new(stream);
 
-        Some(Self { reader, writer })
+        Some(Self {
+            reader,
+            writer,
+            request_counter: 0,
+        })
     }
 
     /// Connect or return an error (for when daemon is required)
     #[allow(dead_code)]
     pub fn connect_required() -> ClientResult<Self> {
         Self::connect().ok_or(ClientError::NotRunning)
+    }
+
+    /// Generate the next request ID
+    fn next_request_id(&mut self) -> String {
+        let id = self.request_counter;
+        self.request_counter += 1;
+        format!("{}", id)
+    }
+
+    /// Send a request with request_id and read the correlated response
+    fn send_recv(&mut self, request: &Request) -> ClientResult<Response> {
+        let id = self.next_request_id();
+        write_message_with_id(&mut self.writer, request, Some(&id))?;
+        let (response, resp_id): (Response, _) = read_message_with_id(&mut self.reader)?;
+        // Advisory: warn on mismatch (old server won't echo)
+        if resp_id.as_deref() != Some(id.as_str()) && resp_id.is_some() {
+            eprintln!("fxi: request_id mismatch: sent {}, got {:?}", id, resp_id);
+        }
+        Ok(response)
     }
 
     /// Execute a search query
@@ -116,9 +140,7 @@ impl IndexClient {
             limit,
         };
 
-        write_message(&mut self.writer, &request)?;
-
-        let response: Response = read_message(&mut self.reader)?;
+        let response = self.send_recv(&request)?;
 
         match response {
             Response::Search(sr) => Ok(SearchResult {
@@ -155,9 +177,7 @@ impl IndexClient {
             options,
         };
 
-        write_message(&mut self.writer, &request)?;
-
-        let response: Response = read_message(&mut self.reader)?;
+        let response = self.send_recv(&request)?;
 
         match response {
             Response::ContentSearch(sr) => Ok(sr),
@@ -168,9 +188,7 @@ impl IndexClient {
 
     /// Get server status
     pub fn status(&mut self) -> ClientResult<StatusResponse> {
-        write_message(&mut self.writer, &Request::Status)?;
-
-        let response: Response = read_message(&mut self.reader)?;
+        let response = self.send_recv(&Request::Status)?;
 
         match response {
             Response::Status(status) => Ok(status),
@@ -185,9 +203,7 @@ impl IndexClient {
             root_path: root_path.map(|p| p.to_path_buf()),
         };
 
-        write_message(&mut self.writer, &request)?;
-
-        let response: Response = read_message(&mut self.reader)?;
+        let response = self.send_recv(&request)?;
 
         match response {
             Response::Reloaded { success, message, .. } => Ok((success, message)),
@@ -198,9 +214,7 @@ impl IndexClient {
 
     /// Request graceful shutdown
     pub fn shutdown(&mut self) -> ClientResult<()> {
-        write_message(&mut self.writer, &Request::Shutdown)?;
-
-        let response: Response = read_message(&mut self.reader)?;
+        let response = self.send_recv(&Request::Shutdown)?;
 
         match response {
             Response::ShuttingDown => Ok(()),
@@ -216,9 +230,7 @@ impl IndexClient {
             protocol_version: PROTOCOL_VERSION,
         };
 
-        write_message(&mut self.writer, &request)?;
-
-        let response: Response = read_message(&mut self.reader)?;
+        let response = self.send_recv(&request)?;
 
         match response {
             Response::Hello {
@@ -241,9 +253,7 @@ impl IndexClient {
 
     /// Ping the server
     pub fn ping(&mut self) -> ClientResult<()> {
-        write_message(&mut self.writer, &Request::Ping)?;
-
-        let response: Response = read_message(&mut self.reader)?;
+        let response = self.send_recv(&Request::Ping)?;
 
         match response {
             Response::Pong => Ok(()),

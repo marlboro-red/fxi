@@ -13,6 +13,7 @@ export interface SearchRequest {
   query: string;
   root_path?: string;
   limit: number;
+  request_id?: string;
 }
 
 export interface ContentSearchRequest {
@@ -21,6 +22,7 @@ export interface ContentSearchRequest {
   root_path?: string;
   limit: number;
   options: ContentSearchOptions;
+  request_id?: string;
 }
 
 export interface ContentSearchOptions {
@@ -32,24 +34,29 @@ export interface ContentSearchOptions {
 
 export interface StatusRequest {
   type: "Status";
+  request_id?: string;
 }
 
 export interface ReloadRequest {
   type: "Reload";
   root_path?: string;
+  request_id?: string;
 }
 
 export interface ShutdownRequest {
   type: "Shutdown";
+  request_id?: string;
 }
 
 export interface PingRequest {
   type: "Ping";
+  request_id?: string;
 }
 
 export interface HelloRequest {
   type: "Hello";
   protocol_version: number;
+  request_id?: string;
 }
 
 export type Request =
@@ -76,6 +83,7 @@ export interface SearchResponse {
   duration_ms: number;
   cached: boolean;
   resolved_root?: string;
+  request_id?: string;
 }
 
 export interface ContentMatch {
@@ -94,6 +102,7 @@ export interface ContentSearchResponse {
   duration_ms: number;
   files_with_matches: number;
   resolved_root?: string;
+  request_id?: string;
 }
 
 export interface StatusResponse {
@@ -107,6 +116,7 @@ export interface StatusResponse {
   loaded_roots: string[];
   protocol_version?: number;
   server_version?: string;
+  request_id?: string;
 }
 
 export interface ReloadedResponse {
@@ -114,25 +124,30 @@ export interface ReloadedResponse {
   success: boolean;
   message: string;
   resolved_root?: string;
+  request_id?: string;
 }
 
 export interface ShuttingDownResponse {
   type: "ShuttingDown";
+  request_id?: string;
 }
 
 export interface PongResponse {
   type: "Pong";
+  request_id?: string;
 }
 
 export interface ErrorResponse {
   type: "Error";
   message: string;
+  request_id?: string;
 }
 
 export interface HelloResponse {
   type: "Hello";
   protocol_version: number;
   server_version: string;
+  request_id?: string;
 }
 
 export type Response =

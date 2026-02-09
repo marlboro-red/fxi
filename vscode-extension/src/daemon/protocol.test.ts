@@ -268,6 +268,45 @@ describe("SearchMatchData", () => {
   });
 });
 
+describe("request_id is optional on all types", () => {
+  it("request_id is optional on request types", () => {
+    // Without request_id
+    const pingNoId: PingRequest = { type: "Ping" };
+    expect(pingNoId.request_id).toBeUndefined();
+
+    // With request_id
+    const pingWithId: PingRequest = { type: "Ping", request_id: "c-42" };
+    expect(pingWithId.request_id).toBe("c-42");
+
+    const searchWithId: SearchRequest = {
+      type: "Search",
+      query: "test",
+      limit: 10,
+      request_id: "req-1",
+    };
+    expect(searchWithId.request_id).toBe("req-1");
+  });
+
+  it("request_id is optional on response types", () => {
+    // Without request_id
+    const pongNoId: PongResponse = { type: "Pong" };
+    expect(pongNoId.request_id).toBeUndefined();
+
+    // With request_id
+    const pongWithId: PongResponse = { type: "Pong", request_id: "c-42" };
+    expect(pongWithId.request_id).toBe("c-42");
+
+    const searchRespWithId: SearchResponse = {
+      type: "Search",
+      matches: [],
+      duration_ms: 0,
+      cached: false,
+      request_id: "req-1",
+    };
+    expect(searchRespWithId.request_id).toBe("req-1");
+  });
+});
+
 describe("ContentMatch", () => {
   it("context arrays use tuple format [line_number, text]", () => {
     const match: ContentMatch = {

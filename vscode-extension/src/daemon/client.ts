@@ -20,14 +20,15 @@ const REQUEST_TIMEOUT_MS = 30000;
 interface PendingRequest {
   resolve: (value: Response) => void;
   reject: (reason: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 export class DaemonClient extends EventEmitter {
   private socket: net.Socket | null = null;
   private buffer: Buffer = Buffer.alloc(0);
-  private pending: PendingRequest | null = null;
-  private queue: Array<{ request: Request; resolve: (v: Response) => void; reject: (e: Error) => void }> = [];
-  private processing = false;
+  private pendingById: Map<string, PendingRequest> = new Map();
+  private legacyQueue: string[] = [];
+  private requestCounter = 0;
   private _connected = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
@@ -49,7 +50,6 @@ export class DaemonClient extends EventEmitter {
       this.socket = socket;
       this._connected = true;
       this.emit("connectionChange", true);
-      this.processQueue();
     });
 
     socket.on("data", (data: Buffer) => {
@@ -81,18 +81,13 @@ export class DaemonClient extends EventEmitter {
     this._connected = false;
     this.buffer = Buffer.alloc(0);
 
-    // Reject pending request
-    if (this.pending) {
-      this.pending.reject(new Error("Connection lost"));
-      this.pending = null;
+    // Reject all pending requests
+    for (const [, pending] of this.pendingById) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("Connection lost"));
     }
-
-    // Reject queued requests
-    for (const item of this.queue) {
-      item.reject(new Error("Connection lost"));
-    }
-    this.queue = [];
-    this.processing = false;
+    this.pendingById.clear();
+    this.legacyQueue = [];
 
     if (wasConnected) {
       this.emit("connectionChange", false);
@@ -130,96 +125,92 @@ export class DaemonClient extends EventEmitter {
       this.buffer = this.buffer.subarray(4 + len);
 
       try {
-        const response: Response = JSON.parse(jsonBuf.toString("utf-8"));
-        if (this.pending) {
-          const p = this.pending;
-          this.pending = null;
-          p.resolve(response);
-          this.processQueue();
-        }
+        const response = JSON.parse(jsonBuf.toString("utf-8"));
+        this.handleResponse(response);
       } catch {
-        if (this.pending) {
-          const p = this.pending;
-          this.pending = null;
-          p.reject(new Error("Invalid JSON response"));
-          this.processQueue();
+        // Invalid JSON — reject the oldest pending request as fallback
+        const oldestId = this.legacyQueue.shift();
+        if (oldestId) {
+          const pending = this.pendingById.get(oldestId);
+          if (pending) {
+            clearTimeout(pending.timer);
+            this.pendingById.delete(oldestId);
+            pending.reject(new Error("Invalid JSON response"));
+          }
         }
       }
     }
+  }
+
+  private handleResponse(response: any): void {
+    const responseId: string | undefined = response.request_id;
+
+    if (responseId !== undefined && this.pendingById.has(responseId)) {
+      // Matched by request_id
+      const pending = this.pendingById.get(responseId)!;
+      this.pendingById.delete(responseId);
+      const idx = this.legacyQueue.indexOf(responseId);
+      if (idx !== -1) {this.legacyQueue.splice(idx, 1);}
+      clearTimeout(pending.timer);
+      pending.resolve(response as Response);
+    } else if (this.legacyQueue.length > 0) {
+      // FIFO fallback for old servers that don't echo request_id
+      const oldestId = this.legacyQueue.shift()!;
+      const pending = this.pendingById.get(oldestId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingById.delete(oldestId);
+        pending.resolve(response as Response);
+      }
+    }
+    // else: orphan response, ignore
   }
 
   private sendRaw(request: Request): Promise<Response> {
-    return new Promise((resolve, reject) => {
-      this.queue.push({ request, resolve, reject });
-      this.processQueue();
-    });
-  }
+    return new Promise<Response>((resolve, reject) => {
+      const id = String(this.requestCounter++);
+      (request as any).request_id = id;
 
-  private processQueue(): void {
-    if (this.processing) {return;}
-    if (!this.socket || !this._connected) {return;}
-    if (this.queue.length === 0) {return;}
+      const timer = setTimeout(() => {
+        this.pendingById.delete(id);
+        const idx = this.legacyQueue.indexOf(id);
+        if (idx !== -1) {this.legacyQueue.splice(idx, 1);}
+        reject(new Error("Request timed out"));
+      }, REQUEST_TIMEOUT_MS);
 
-    this.processing = true;
-    const item = this.queue.shift()!;
-    this.pending = { resolve: item.resolve, reject: item.reject };
+      this.pendingById.set(id, { resolve, reject, timer });
+      this.legacyQueue.push(id);
 
-    const json = JSON.stringify(item.request);
-    const jsonBuf = Buffer.from(json, "utf-8");
-    const lenBuf = Buffer.alloc(4);
-    lenBuf.writeUInt32LE(jsonBuf.length, 0);
+      const json = JSON.stringify(request);
+      const jsonBuf = Buffer.from(json, "utf-8");
+      const lenBuf = Buffer.alloc(4);
+      lenBuf.writeUInt32LE(jsonBuf.length, 0);
 
-    try {
-      this.socket.write(Buffer.concat([lenBuf, jsonBuf]), (err) => {
-        if (err) {
-          if (this.pending) {
-            const p = this.pending;
-            this.pending = null;
-            p.reject(err);
+      try {
+        this.socket!.write(Buffer.concat([lenBuf, jsonBuf]), (err) => {
+          if (err) {
+            clearTimeout(timer);
+            this.pendingById.delete(id);
+            const idx = this.legacyQueue.indexOf(id);
+            if (idx !== -1) {this.legacyQueue.splice(idx, 1);}
+            reject(err);
           }
-          this.processing = false;
-          this.processQueue();
-        }
-      });
-    } catch (e) {
-      if (this.pending) {
-        const p = this.pending;
-        this.pending = null;
-        p.reject(e instanceof Error ? e : new Error(String(e)));
+        });
+      } catch (e) {
+        clearTimeout(timer);
+        this.pendingById.delete(id);
+        const idx = this.legacyQueue.indexOf(id);
+        if (idx !== -1) {this.legacyQueue.splice(idx, 1);}
+        reject(e instanceof Error ? e : new Error(String(e)));
       }
-      this.processing = false;
-    }
-
-    // processing remains true until response arrives (handled in onData)
-    // We set it false after the pending resolves
-    const origResolve = item.resolve;
-    const origReject = item.reject;
-    if (this.pending) {
-      this.pending.resolve = (v) => {
-        this.processing = false;
-        origResolve(v);
-      };
-      this.pending.reject = (e) => {
-        this.processing = false;
-        origReject(e);
-      };
-    }
+    });
   }
 
   private async request(req: Request): Promise<Response> {
     if (!this._connected) {
       throw new Error("Not connected to daemon");
     }
-    return new Promise<Response>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error("Request timed out"));
-      }, REQUEST_TIMEOUT_MS);
-
-      this.sendRaw(req).then(
-        (v) => { clearTimeout(timer); resolve(v); },
-        (e) => { clearTimeout(timer); reject(e); },
-      );
-    });
+    return this.sendRaw(req);
   }
 
   async search(query: string, rootPath: string | undefined, limit: number): Promise<SearchResponse> {
@@ -330,17 +321,13 @@ export class DaemonClient extends EventEmitter {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    // Reject pending request
-    if (this.pending) {
-      this.pending.reject(new Error("Client disposed"));
-      this.pending = null;
+    // Reject all pending requests
+    for (const [, pending] of this.pendingById) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("Client disposed"));
     }
-    // Reject queued requests
-    for (const item of this.queue) {
-      item.reject(new Error("Client disposed"));
-    }
-    this.queue = [];
-    this.processing = false;
+    this.pendingById.clear();
+    this.legacyQueue = [];
     if (this.socket) {
       this.socket.removeAllListeners();
       this.socket.destroy();

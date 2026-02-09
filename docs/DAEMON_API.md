@@ -94,7 +94,7 @@ None. Access is controlled by filesystem permissions (socket is `0o600` on Unix,
 
 ### Connection Lifecycle
 
-The connection is persistent — multiple request/response pairs can be sent over the same connection sequentially. Each request gets exactly one response.
+The connection is persistent — multiple request/response pairs can be sent over the same connection. Clients may **pipeline** multiple requests without waiting for responses; the server processes them concurrently and may respond out of order (see [Request Correlation and Pipelining](#request-correlation-and-pipelining)).
 
 ```
 Client                              Server
@@ -104,11 +104,12 @@ Client                              Server
   │  ┌─ Hello (optional) ───────────►│
   │  │◄── Hello ─────────────────────┤
   │  │                                │
-  │  │─ request 1 ───────────────────►│
-  │  │◄── response 1 ─────────────────┤
-  │  │                                │
-  │  │─ request 2 ───────────────────►│
-  │  │◄── response 2 ─────────────────┤
+  │  │─ request A ──────────────────►│
+  │  │─ request B ──────────────────►│
+  │  │─ request C ──────────────────►│
+  │  │◄── response B ────────────────┤  (out-of-order)
+  │  │◄── response A ────────────────┤
+  │  │◄── response C ────────────────┤
   │  └                                │
   │                                   │
   └─── disconnect ───────────────────►│
@@ -131,6 +132,33 @@ Two mechanisms expose the version:
 | New client + Old server | Hello returns Error (unknown variant), client knows it's pre-versioning. StatusResponse version fields default to `0`/`""`. |
 | New client + New server | Hello succeeds, versions compared. |
 
+### Request Correlation and Pipelining
+
+All requests and responses support an optional `request_id` field (JSON string). When a client includes `request_id` in a request, the server echoes it in the corresponding response. This lets clients send multiple requests on a single connection and match responses by ID, even if the server responds out of order.
+
+**Wire format**: `request_id` is a sibling of the `type` discriminator at the top level of the JSON object:
+
+```json
+{"type": "Search", "query": "main", "limit": 10, "request_id": "c-42"}
+{"type": "Search", "matches": [...], "duration_ms": 5.2, "cached": false, "request_id": "c-42"}
+```
+
+**Rules:**
+- `request_id` is **optional**. Omitting it is fully supported (backward compatible).
+- The value must be a JSON **string**. Non-string values are ignored by the server.
+- The server echoes the exact `request_id` from the request in its response.
+- Clients may use any string format: counters (`"0"`, `"1"`, ...), UUIDs, etc.
+
+**Concurrency limit**: The server processes up to **32** concurrent requests per connection by default. Excess requests receive an `Error` response with the `request_id` preserved. The limit is configurable via the `FXI_MAX_PIPELINED` environment variable.
+
+**Backward compatibility:**
+
+| Scenario | Behavior |
+|----------|----------|
+| Old client + New server | No `request_id` sent. Server responds without `request_id`. Works as before. |
+| New client + Old server | Client sends `request_id`. Old server ignores it (unknown field). Response has no `request_id`. Client falls back to FIFO matching. |
+| New client + New server | Full pipelining with `request_id` correlation. |
+
 ---
 
 ## Message Format
@@ -141,27 +169,27 @@ All requests and responses are JSON objects with a `"type"` discriminator field 
 
 ```typescript
 type Request =
-  | { type: "Search";        query: string; root_path?: string; limit: number }
-  | { type: "ContentSearch"; pattern: string; root_path?: string; limit: number; options: ContentSearchOptions }
-  | { type: "Status" }
-  | { type: "Reload";        root_path?: string }
-  | { type: "Shutdown" }
-  | { type: "Ping" }
-  | { type: "Hello";         protocol_version: number }
+  | { type: "Search";        query: string; root_path?: string; limit: number; request_id?: string }
+  | { type: "ContentSearch"; pattern: string; root_path?: string; limit: number; options: ContentSearchOptions; request_id?: string }
+  | { type: "Status";        request_id?: string }
+  | { type: "Reload";        root_path?: string; request_id?: string }
+  | { type: "Shutdown";      request_id?: string }
+  | { type: "Ping";          request_id?: string }
+  | { type: "Hello";         protocol_version: number; request_id?: string }
 ```
 
 ### Responses
 
 ```typescript
 type Response =
-  | { type: "Search";        matches: SearchMatchData[]; duration_ms: number; cached: boolean; resolved_root?: string }
-  | { type: "ContentSearch"; matches: ContentMatch[]; duration_ms: number; files_with_matches: number; resolved_root?: string }
-  | { type: "Status";        uptime_secs: number; indexes_loaded: number; total_docs: number; queries_served: number; cache_hit_rate: number; memory_bytes: number; loaded_roots: string[]; protocol_version?: number; server_version?: string }
-  | { type: "Reloaded";      success: boolean; message: string; resolved_root?: string }
-  | { type: "ShuttingDown" }
-  | { type: "Pong" }
-  | { type: "Error";         message: string }
-  | { type: "Hello";         protocol_version: number; server_version: string }
+  | { type: "Search";        matches: SearchMatchData[]; duration_ms: number; cached: boolean; resolved_root?: string; request_id?: string }
+  | { type: "ContentSearch"; matches: ContentMatch[]; duration_ms: number; files_with_matches: number; resolved_root?: string; request_id?: string }
+  | { type: "Status";        uptime_secs: number; indexes_loaded: number; total_docs: number; queries_served: number; cache_hit_rate: number; memory_bytes: number; loaded_roots: string[]; protocol_version?: number; server_version?: string; request_id?: string }
+  | { type: "Reloaded";      success: boolean; message: string; resolved_root?: string; request_id?: string }
+  | { type: "ShuttingDown";  request_id?: string }
+  | { type: "Pong";          request_id?: string }
+  | { type: "Error";         message: string; request_id?: string }
+  | { type: "Hello";         protocol_version: number; server_version: string; request_id?: string }
 ```
 
 Any request can return an `Error` response.
@@ -205,7 +233,8 @@ Index-based full-text search using the fxi query syntax (supports AND, OR, NOT, 
   ],
   "duration_ms": 12.3,
   "cached": false,
-  "resolved_root": "/home/user/project"
+  "resolved_root": "/home/user/project",
+  "request_id": "c-42"
 }
 ```
 
@@ -488,6 +517,7 @@ import socket
 import struct
 import json
 import os
+import threading
 
 def get_socket_path():
     # Highest priority: FXI_SOCKET env var override
@@ -524,7 +554,7 @@ sock.settimeout(30)
 sock.connect(get_socket_path())
 
 # Hello (optional version handshake)
-send_request(sock, {"type": "Hello", "protocol_version": 2})
+send_request(sock, {"type": "Hello", "protocol_version": 2, "request_id": "0"})
 hello = read_response(sock)
 if hello["type"] == "Hello":
     print(f"Server protocol: v{hello['protocol_version']}, version: {hello['server_version']}")
@@ -532,51 +562,35 @@ else:
     print("Server predates protocol versioning")
 
 # Ping
-send_request(sock, {"type": "Ping"})
-print(read_response(sock))  # {"type": "Pong"}
+send_request(sock, {"type": "Ping", "request_id": "1"})
+print(read_response(sock))  # {"type": "Pong", "request_id": "1"}
 
-# Search (root_path is optional — omit if only one index is loaded)
+# Sequential search (root_path is optional — omit if only one index is loaded)
 send_request(sock, {
     "type": "Search",
     "query": "fn main",
     "root_path": "/home/user/project",
-    "limit": 10
+    "limit": 10,
+    "request_id": "2"
 })
 result = read_response(sock)
 print(f"Resolved root: {result.get('resolved_root', 'N/A')}")
 for match in result["matches"]:
     print(f"{match['path']}:{match['line_number']} (score: {match['score']})")
 
-# Search without root_path (uses single loaded index)
-send_request(sock, {
-    "type": "Search",
-    "query": "fn main",
-    "limit": 10
-})
-result = read_response(sock)
-print(f"Resolved root: {result['resolved_root']}")
+# Pipelining: send multiple requests, collect responses by request_id
+queries = ["fn main", "struct Config", "impl Display"]
+for i, q in enumerate(queries):
+    send_request(sock, {
+        "type": "Search", "query": q, "limit": 5, "request_id": f"batch-{i}"
+    })
 
-# Content search with context
-send_request(sock, {
-    "type": "ContentSearch",
-    "pattern": "TODO",
-    "root_path": "/home/user/project",
-    "limit": 50,
-    "options": {
-        "context_before": 2,
-        "context_after": 2,
-        "case_insensitive": True,
-        "files_only": False
-    }
-})
-result = read_response(sock)
-for match in result["matches"]:
-    print(f"{match['path']}:{match['line_number']}: {match['line_content']}")
-
-# Status
-send_request(sock, {"type": "Status"})
-status = read_response(sock)
-print(f"Uptime: {status['uptime_secs']}s, Indexes: {status['indexes_loaded']}")
+results = {}
+for _ in queries:
+    resp = read_response(sock)
+    rid = resp.get("request_id", "unknown")
+    results[rid] = resp
+    print(f"Got response for {rid}: {len(resp.get('matches', []))} matches")
 
 sock.close()
 ```
@@ -600,7 +614,8 @@ function getSocketPath() {
 function createClient() {
   const sock = net.createConnection(getSocketPath());
   let buffer = Buffer.alloc(0);
-  let pending = null;
+  const pending = new Map(); // request_id -> { resolve, reject }
+  let counter = 0;
 
   sock.on("data", (chunk) => {
     buffer = Buffer.concat([buffer, chunk]);
@@ -610,9 +625,10 @@ function createClient() {
       const payload = buffer.subarray(4, 4 + length);
       buffer = buffer.subarray(4 + length);
       const response = JSON.parse(payload.toString("utf-8"));
-      if (pending) {
-        const resolve = pending;
-        pending = null;
+      const id = response.request_id;
+      if (id && pending.has(id)) {
+        const { resolve } = pending.get(id);
+        pending.delete(id);
         resolve(response);
       }
     }
@@ -620,7 +636,9 @@ function createClient() {
 
   function send(request) {
     return new Promise((resolve, reject) => {
-      pending = resolve;
+      const id = String(counter++);
+      request.request_id = id;
+      pending.set(id, { resolve, reject });
       const payload = Buffer.from(JSON.stringify(request), "utf-8");
       const header = Buffer.alloc(4);
       header.writeUInt32LE(payload.length);
@@ -644,26 +662,18 @@ function createClient() {
   }
 
   const pong = await client.send({ type: "Ping" });
-  console.log(pong); // { type: "Pong" }
+  console.log(pong); // { type: "Pong", request_id: "1" }
 
-  // Search with explicit root_path
-  const result = await client.send({
-    type: "ContentSearch",
-    pattern: "TODO",
-    root_path: "/home/user/project",
-    limit: 10,
-    options: { context_before: 0, context_after: 0, case_insensitive: false, files_only: false }
-  });
-  console.log(`Found ${result.files_with_matches} files with matches`);
-  console.log(`Resolved root: ${result.resolved_root}`);
-
-  // Search without root_path (uses single loaded index)
-  const result2 = await client.send({
-    type: "Search",
-    query: "main",
-    limit: 10
-  });
-  console.log(`Resolved root: ${result2.resolved_root}`);
+  // Pipelining: send multiple searches concurrently
+  const searches = Promise.all([
+    client.send({ type: "Search", query: "fn main", limit: 5 }),
+    client.send({ type: "Search", query: "struct Config", limit: 5 }),
+    client.send({ type: "Search", query: "impl Display", limit: 5 }),
+  ]);
+  const results = await searches;
+  for (const r of results) {
+    console.log(`${r.request_id}: ${r.matches.length} matches`);
+  }
 
   client.close();
 })();
