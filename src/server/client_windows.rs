@@ -8,7 +8,7 @@ use crate::server::protocol::{
 use crate::server::get_pipe_name;
 use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 /// Read/write timeout (not directly supported for file handles, but we document intent)
@@ -30,6 +30,7 @@ pub enum ClientError {
     /// Invalid response
     InvalidResponse,
     /// Protocol version mismatch
+    #[allow(dead_code)]
     VersionMismatch {
         client_version: u32,
         server_version: u32,
@@ -248,6 +249,7 @@ impl IndexClient {
     }
 
     /// Perform protocol version handshake
+    #[allow(dead_code)]
     pub fn hello(&mut self) -> ClientResult<HelloResponse> {
         let request = Request::Hello {
             protocol_version: PROTOCOL_VERSION,
@@ -287,6 +289,7 @@ impl IndexClient {
 }
 
 /// Response from a Hello handshake
+#[allow(dead_code)]
 pub struct HelloResponse {
     pub protocol_version: u32,
     pub server_version: String,
