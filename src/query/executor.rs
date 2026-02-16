@@ -650,6 +650,19 @@ impl<'a> QueryExecutor<'a> {
                     }
                 }
 
+                PlanStep::PositionalPhrase(phrase_tokens) => {
+                    // Use positional index to resolve phrase adjacency
+                    if let Some(positional_docs) =
+                        self.reader.resolve_phrase_positional(phrase_tokens)
+                    {
+                        candidates = Some(match candidates {
+                            Some(existing) => existing & positional_docs,
+                            None => positional_docs,
+                        });
+                    }
+                    // If None (no positional data), skip — fall back to content verification
+                }
+
                 PlanStep::Filter(filter) => {
                     // Apply document filters
                     let filtered = self.apply_filter(filter, candidates.as_ref())?;

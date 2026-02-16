@@ -22,6 +22,7 @@ struct AssignedFile {
     trigrams: Vec<u32>,
     tokens: Vec<String>,
     line_offsets: Vec<u32>,
+    token_positions: Vec<(String, u32)>,
 }
 
 /// Data needed to write a segment to disk (sent to background thread)
@@ -177,6 +178,7 @@ impl ChunkedIndexWriter {
                 trigrams: processed.trigrams,
                 tokens: processed.tokens,
                 line_offsets: processed.line_offsets,
+                token_positions: processed.token_positions,
             });
         }
 
@@ -209,6 +211,9 @@ impl ChunkedIndexWriter {
         let mut trigram_pairs: Vec<(u32, u32)> = Vec::with_capacity(file_count * 500);
         let mut token_pairs: Vec<(String, DocId)> = Vec::with_capacity(file_count * 50);
         let mut line_maps: Vec<(DocId, Vec<u32>)> = Vec::with_capacity(file_count);
+        // Position triples: (token, doc_id, word_position)
+        let mut position_triples: Vec<(String, DocId, u32)> =
+            Vec::with_capacity(file_count * 50);
 
         // Process each file - just append to flat vectors (no hashing)
         for file in job.files {
@@ -224,6 +229,11 @@ impl ChunkedIndexWriter {
                 token_pairs.push((token, doc_id));
             }
 
+            // Add position triples
+            for (token, pos) in file.token_positions {
+                position_triples.push((token, doc_id, pos));
+            }
+
             // Store line map
             line_maps.push((doc_id, file.line_offsets));
         }
@@ -233,6 +243,7 @@ impl ChunkedIndexWriter {
         // Sort flat pairs — par_sort is very cache-friendly on contiguous data
         trigram_pairs.par_sort_unstable();
         token_pairs.par_sort_unstable();
+        position_triples.par_sort_unstable();
 
         let t_sort = std::time::Instant::now();
 
@@ -275,12 +286,13 @@ impl ChunkedIndexWriter {
 
         let t_freq = std::time::Instant::now();
 
-        // Write all segment files concurrently
+        // Write all segment files concurrently (5 threads)
         thread::scope(|s| {
             let trigram_handle =
                 s.spawn(|| Self::write_trigram_index_flat(&job.segment_path, &trigram_pairs));
-            let token_handle =
-                s.spawn(|| Self::write_token_index_flat(&job.segment_path, &token_pairs));
+            let token_handle = s.spawn(|| {
+                Self::write_token_index_flat(&job.segment_path, &token_pairs, &position_triples)
+            });
             let linemap_handle =
                 s.spawn(|| Self::write_line_maps_flat(&job.segment_path, &line_maps));
             let bloom_handle =
@@ -385,19 +397,26 @@ impl ChunkedIndexWriter {
         Ok(())
     }
 
-    /// Write token index from pre-sorted flat pairs
-    fn write_token_index_flat(segment_path: &Path, pairs: &[(String, DocId)]) -> Result<()> {
+    /// Write token index from pre-sorted flat pairs, and token positions file.
+    /// The token dict is extended with pos_offset and pos_length fields per entry.
+    fn write_token_index_flat(
+        segment_path: &Path,
+        pairs: &[(String, DocId)],
+        position_triples: &[(String, DocId, u32)],
+    ) -> Result<()> {
         let dict_path = segment_path.join("tokens.dict");
         let postings_path = segment_path.join("tokens.postings");
+        let positions_path = segment_path.join("tokens.positions");
 
         if pairs.is_empty() {
             let mut dict_file = BufWriter::new(File::create(&dict_path)?);
             let _ = File::create(&postings_path)?;
+            let _ = File::create(&positions_path)?;
             dict_file.write_all(&0u32.to_le_bytes())?;
             return Ok(());
         }
 
-        // Find group boundaries
+        // Find group boundaries for token pairs
         let mut group_starts: Vec<usize> = Vec::with_capacity(pairs.len() / 10);
         group_starts.push(0);
         for i in 1..pairs.len() {
@@ -407,7 +426,49 @@ impl ChunkedIndexWriter {
         }
         let entry_count = group_starts.len();
 
-        // Parallel encode
+        // Build position data map: token -> encoded positions bytes
+        // position_triples is sorted by (token, doc_id, position)
+        let position_data: HashMap<&str, Vec<u8>> = {
+            let mut map: HashMap<&str, Vec<u8>> = HashMap::new();
+            if !position_triples.is_empty() {
+                // Group by token
+                let mut i = 0;
+                while i < position_triples.len() {
+                    let token = position_triples[i].0.as_str();
+                    let group_start = i;
+                    while i < position_triples.len() && position_triples[i].0 == token {
+                        i += 1;
+                    }
+                    // Now we have all triples for this token in [group_start..i]
+                    // Group by doc_id within this token
+                    let mut doc_positions: Vec<(u32, Vec<u32>)> = Vec::new();
+                    let mut j = group_start;
+                    while j < i {
+                        let doc_id = position_triples[j].1;
+                        let doc_start = j;
+                        while j < i && position_triples[j].1 == doc_id {
+                            j += 1;
+                        }
+                        let positions: Vec<u32> = position_triples[doc_start..j]
+                            .iter()
+                            .map(|(_, _, p)| *p)
+                            .collect();
+                        doc_positions.push((doc_id, positions));
+                    }
+                    // Encode
+                    let refs: Vec<(u32, &[u32])> = doc_positions
+                        .iter()
+                        .map(|(d, p)| (*d, p.as_slice()))
+                        .collect();
+                    let mut buf = Vec::new();
+                    crate::utils::encode_position_postings(&refs, &mut buf);
+                    map.insert(token, buf);
+                }
+            }
+            map
+        };
+
+        // Parallel encode postings
         let encoded: Vec<(&str, Vec<u8>, u32)> = group_starts
             .par_iter()
             .enumerate()
@@ -432,15 +493,18 @@ impl ChunkedIndexWriter {
 
         // Pre-allocate and build buffers
         let total_postings: usize = encoded.iter().map(|(_, e, _)| e.len()).sum();
+        // Dict size: count(4) + entries * (token_len(2) + token + offset(8) + length(4) + doc_freq(4) + pos_offset(8) + pos_length(4))
         let total_dict: usize = 4 + encoded
             .iter()
-            .map(|(t, _, _)| 2 + t.len() + 16)
+            .map(|(t, _, _)| 2 + t.len() + 8 + 4 + 4 + 8 + 4)
             .sum::<usize>();
         let mut dict_buf = Vec::with_capacity(total_dict);
         let mut postings_buf = Vec::with_capacity(total_postings);
+        let mut positions_buf = Vec::new();
 
         dict_buf.extend_from_slice(&(entry_count as u32).to_le_bytes());
         let mut offset: u64 = 0;
+        let mut pos_offset: u64 = 0;
 
         for (token, enc, doc_freq) in &encoded {
             let token_bytes = token.as_bytes();
@@ -449,6 +513,18 @@ impl ChunkedIndexWriter {
             dict_buf.extend_from_slice(&offset.to_le_bytes());
             dict_buf.extend_from_slice(&(enc.len() as u32).to_le_bytes());
             dict_buf.extend_from_slice(&doc_freq.to_le_bytes());
+
+            // Write position offset and length
+            if let Some(pos_data) = position_data.get(*token) {
+                dict_buf.extend_from_slice(&pos_offset.to_le_bytes());
+                dict_buf.extend_from_slice(&(pos_data.len() as u32).to_le_bytes());
+                positions_buf.extend_from_slice(pos_data);
+                pos_offset += pos_data.len() as u64;
+            } else {
+                dict_buf.extend_from_slice(&0u64.to_le_bytes());
+                dict_buf.extend_from_slice(&0u32.to_le_bytes());
+            }
+
             postings_buf.extend_from_slice(enc);
             offset += enc.len() as u64;
         }
@@ -457,6 +533,10 @@ impl ChunkedIndexWriter {
         let mut postings_file = BufWriter::new(File::create(&postings_path)?);
         dict_file.write_all(&dict_buf)?;
         postings_file.write_all(&postings_buf)?;
+
+        // Write positions file
+        let mut positions_file = BufWriter::new(File::create(&positions_path)?);
+        positions_file.write_all(&positions_buf)?;
 
         Ok(())
     }
@@ -665,6 +745,7 @@ impl ChunkedIndexWriter {
             tombstone_count: 0, // Fresh index has no tombstones
             valid_doc_count,
             delta_baseline,
+            has_positions: true,
         };
 
         let meta_path = self.index_path.join("meta.json");
@@ -695,6 +776,8 @@ pub struct IndexWriter {
     trigram_postings: BTreeMap<Trigram, Vec<DocId>>,
     /// Token -> list of doc_ids
     token_postings: BTreeMap<String, Vec<DocId>>,
+    /// Token -> doc_id -> positions (for positional phrase queries)
+    token_position_postings: BTreeMap<String, BTreeMap<DocId, Vec<u32>>>,
     /// Line offsets per document
     line_maps: HashMap<DocId, Vec<u32>>,
     /// Doc IDs from existing index that should be marked as stale (for incremental updates)
@@ -718,6 +801,7 @@ impl IndexWriter {
             segment_id: 1,
             trigram_postings: BTreeMap::new(),
             token_postings: BTreeMap::new(),
+            token_position_postings: BTreeMap::new(),
             line_maps: HashMap::new(),
             external_stale_ids: Vec::new(),
         })
@@ -778,11 +862,20 @@ impl IndexWriter {
                 .push(doc_id);
         }
 
-        // Extract and index tokens
+        // Extract and index tokens + positions
         if let Ok(text) = std::str::from_utf8(content) {
             let tokens = extract_tokens(text);
             for token in tokens {
                 self.token_postings.entry(token).or_default().push(doc_id);
+            }
+            let token_positions = crate::utils::extract_tokens_with_positions(text);
+            for (token, pos) in token_positions {
+                self.token_position_postings
+                    .entry(token)
+                    .or_default()
+                    .entry(doc_id)
+                    .or_default()
+                    .push(pos);
             }
         }
 
@@ -821,6 +914,16 @@ impl IndexWriter {
         // Add tokens to postings
         for token in processed.tokens {
             self.token_postings.entry(token).or_default().push(doc_id);
+        }
+
+        // Add token positions
+        for (token, pos) in processed.token_positions {
+            self.token_position_postings
+                .entry(token)
+                .or_default()
+                .entry(doc_id)
+                .or_default()
+                .push(pos);
         }
 
         // Store line map
@@ -986,18 +1089,21 @@ impl IndexWriter {
         Ok(())
     }
 
-    /// Write token index
+    /// Write token index with position data
     fn write_token_index(&self, segment_path: &Path) -> Result<()> {
         let dict_path = segment_path.join("tokens.dict");
         let postings_path = segment_path.join("tokens.postings");
+        let positions_path = segment_path.join("tokens.positions");
 
         let mut dict_file = BufWriter::new(File::create(&dict_path)?);
         let mut postings_file = BufWriter::new(File::create(&postings_path)?);
+        let mut positions_file = BufWriter::new(File::create(&positions_path)?);
 
         // Write entry count
         dict_file.write_all(&(self.token_postings.len() as u32).to_le_bytes())?;
 
         let mut postings_offset: u64 = 0;
+        let mut pos_offset: u64 = 0;
 
         for (token, doc_ids) in &self.token_postings {
             // Sort and deduplicate
@@ -1019,6 +1125,23 @@ impl IndexWriter {
             dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
             dict_file.write_all(&(sorted_ids.len() as u32).to_le_bytes())?;
 
+            // Write position offset and length
+            if let Some(doc_pos_map) = self.token_position_postings.get(token) {
+                let refs: Vec<(u32, &[u32])> = doc_pos_map
+                    .iter()
+                    .map(|(&d, p)| (d, p.as_slice()))
+                    .collect();
+                let mut pos_buf = Vec::new();
+                crate::utils::encode_position_postings(&refs, &mut pos_buf);
+                dict_file.write_all(&pos_offset.to_le_bytes())?;
+                dict_file.write_all(&(pos_buf.len() as u32).to_le_bytes())?;
+                positions_file.write_all(&pos_buf)?;
+                pos_offset += pos_buf.len() as u64;
+            } else {
+                dict_file.write_all(&0u64.to_le_bytes())?;
+                dict_file.write_all(&0u32.to_le_bytes())?;
+            }
+
             // Write postings
             postings_file.write_all(&encoded)?;
             postings_offset += encoded.len() as u64;
@@ -1026,6 +1149,7 @@ impl IndexWriter {
 
         dict_file.flush()?;
         postings_file.flush()?;
+        positions_file.flush()?;
         Ok(())
     }
 
@@ -1079,6 +1203,7 @@ impl IndexWriter {
             tombstone_count: 0, // Fresh index has no tombstones
             valid_doc_count,
             delta_baseline: 0, // No delta segments in single-segment index
+            has_positions: true,
         };
 
         let meta_path = self.index_path.join("meta.json");
@@ -1136,6 +1261,16 @@ impl IndexWriter {
         // Add tokens to postings
         for token in file.tokens {
             self.token_postings.entry(token).or_default().push(doc_id);
+        }
+
+        // Add token positions
+        for (token, pos) in file.token_positions {
+            self.token_position_postings
+                .entry(token)
+                .or_default()
+                .entry(doc_id)
+                .or_default()
+                .push(pos);
         }
 
         // Store line map
@@ -1279,6 +1414,8 @@ pub struct DeltaSegmentWriter {
     next_path_id: PathId,
     trigram_postings: BTreeMap<Trigram, Vec<DocId>>,
     token_postings: BTreeMap<String, Vec<DocId>>,
+    /// Token -> doc_id -> positions (for positional phrase queries)
+    token_position_postings: BTreeMap<String, BTreeMap<DocId, Vec<u32>>>,
     line_maps: HashMap<DocId, Vec<u32>>,
 
     // Docs to mark as tombstones
@@ -1324,6 +1461,7 @@ impl DeltaSegmentWriter {
             next_path_id,
             trigram_postings: BTreeMap::new(),
             token_postings: BTreeMap::new(),
+            token_position_postings: BTreeMap::new(),
             line_maps: HashMap::new(),
             tombstone_doc_ids: Vec::new(),
         })
@@ -1388,6 +1526,16 @@ impl DeltaSegmentWriter {
         // Add tokens to postings
         for token in processed.tokens {
             self.token_postings.entry(token).or_default().push(doc_id);
+        }
+
+        // Add token positions
+        for (token, pos) in processed.token_positions {
+            self.token_position_postings
+                .entry(token)
+                .or_default()
+                .entry(doc_id)
+                .or_default()
+                .push(pos);
         }
 
         // Store line map
@@ -1531,18 +1679,21 @@ impl DeltaSegmentWriter {
         Ok(())
     }
 
-    /// Write token index
+    /// Write token index with position data
     fn write_token_index(&self, segment_path: &Path) -> Result<()> {
         let dict_path = segment_path.join("tokens.dict");
         let postings_path = segment_path.join("tokens.postings");
+        let positions_path = segment_path.join("tokens.positions");
 
         let mut dict_file = BufWriter::with_capacity(65536, File::create(&dict_path)?);
         let mut postings_file = BufWriter::with_capacity(65536, File::create(&postings_path)?);
+        let mut positions_file = BufWriter::with_capacity(65536, File::create(&positions_path)?);
 
         // Write entry count
         dict_file.write_all(&(self.token_postings.len() as u32).to_le_bytes())?;
 
         let mut postings_offset: u64 = 0;
+        let mut pos_offset: u64 = 0;
 
         for (token, doc_ids) in &self.token_postings {
             // Sort and deduplicate
@@ -1564,6 +1715,23 @@ impl DeltaSegmentWriter {
             dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
             dict_file.write_all(&(sorted_ids.len() as u32).to_le_bytes())?;
 
+            // Write position offset and length
+            if let Some(doc_pos_map) = self.token_position_postings.get(token) {
+                let refs: Vec<(u32, &[u32])> = doc_pos_map
+                    .iter()
+                    .map(|(&d, p)| (d, p.as_slice()))
+                    .collect();
+                let mut pos_buf = Vec::new();
+                crate::utils::encode_position_postings(&refs, &mut pos_buf);
+                dict_file.write_all(&pos_offset.to_le_bytes())?;
+                dict_file.write_all(&(pos_buf.len() as u32).to_le_bytes())?;
+                positions_file.write_all(&pos_buf)?;
+                pos_offset += pos_buf.len() as u64;
+            } else {
+                dict_file.write_all(&0u64.to_le_bytes())?;
+                dict_file.write_all(&0u32.to_le_bytes())?;
+            }
+
             // Write postings
             postings_file.write_all(&encoded)?;
             postings_offset += encoded.len() as u64;
@@ -1571,6 +1739,7 @@ impl DeltaSegmentWriter {
 
         dict_file.flush()?;
         postings_file.flush()?;
+        positions_file.flush()?;
         Ok(())
     }
 
@@ -1714,6 +1883,8 @@ mod tests {
             .split_whitespace()
             .map(|s| s.to_lowercase())
             .collect();
+        let token_positions: Vec<(String, u32)> =
+            crate::utils::extract_tokens_with_positions(content);
         let line_offsets: Vec<u32> = std::iter::once(0)
             .chain(
                 content
@@ -1733,6 +1904,7 @@ mod tests {
             trigrams,
             tokens,
             line_offsets,
+            token_positions,
         }
     }
 

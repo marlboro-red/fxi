@@ -2,8 +2,8 @@ use crate::index::reader::IndexReader;
 use crate::index::types::{DocFlags, IndexConfig, IndexMeta, Language, SegmentId};
 use crate::index::writer::ChunkedIndexWriter;
 use crate::utils::{
-    extract_tokens, extract_trigrams, find_codebase_root, get_index_dir, is_binary,
-    is_minified, remove_index,
+    extract_tokens, extract_tokens_with_positions, extract_trigrams, find_codebase_root,
+    get_index_dir, is_binary, is_minified, remove_index,
 };
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
@@ -49,6 +49,8 @@ pub struct ProcessedFile {
     pub trigrams: Vec<u32>,
     pub tokens: Vec<String>,
     pub line_offsets: Vec<u32>,
+    /// Token positions for positional phrase queries: (token, word_position)
+    pub token_positions: Vec<(String, u32)>,
 }
 
 /// Process a single file's content (can run in parallel)
@@ -74,12 +76,15 @@ fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option
     // Extract trigrams using optimized bitset-based extraction
     let trigrams: Vec<u32> = extract_trigrams(content);
 
-    // Extract tokens
-    let tokens: Vec<String> = if let Ok(text) = std::str::from_utf8(content) {
-        extract_tokens(text).into_iter().collect()
-    } else {
-        Vec::new()
-    };
+    // Extract tokens and token positions
+    let (tokens, token_positions): (Vec<String>, Vec<(String, u32)>) =
+        if let Ok(text) = std::str::from_utf8(content) {
+            let tok = extract_tokens(text).into_iter().collect();
+            let tok_pos = extract_tokens_with_positions(text);
+            (tok, tok_pos)
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
     // Build line map
     let line_offsets = build_line_map(content);
@@ -93,6 +98,7 @@ fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option
         trigrams,
         tokens,
         line_offsets,
+        token_positions,
     })
 }
 

@@ -8,7 +8,10 @@
 use crate::index::reader::{read_documents, read_paths};
 use crate::index::types::*;
 use crate::index::writer::{write_documents_atomic, write_meta_atomic, write_paths_atomic};
-use crate::utils::{delta_decode, delta_encode, find_codebase_root, get_index_dir, BloomFilter};
+use crate::utils::{
+    decode_position_postings, delta_decode, delta_encode, encode_position_postings,
+    find_codebase_root, get_index_dir, BloomFilter,
+};
 use anyhow::{Context, Result};
 use memmap2::Mmap;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -85,12 +88,17 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
     );
 
     // Step 2: Merge all segment postings
-    let (trigram_postings, token_postings, line_maps) =
+    let (trigram_postings, token_postings, line_maps, token_positions, has_positions) =
         merge_all_segments(&index_path, &segment_ids, &remapping)?;
     eprintln!(
-        "  Merged {} trigrams, {} tokens",
+        "  Merged {} trigrams, {} tokens{}",
         trigram_postings.len(),
-        token_postings.len()
+        token_postings.len(),
+        if has_positions {
+            format!(", {} tokens with positions", token_positions.len())
+        } else {
+            String::new()
+        }
     );
 
     // Step 3: Compute stop-grams from merged frequencies
@@ -107,7 +115,15 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
 
     // Write segment files
     write_trigram_index(&new_segment_path, &trigram_postings, &stop_grams)?;
-    write_token_index(&new_segment_path, &token_postings)?;
+    write_token_index_with_positions(
+        &new_segment_path,
+        &token_postings,
+        if has_positions {
+            Some(&token_positions)
+        } else {
+            None
+        },
+    )?;
     write_line_maps(&new_segment_path, &line_maps)?;
     write_bloom_filter(&new_segment_path, &trigram_postings)?;
     eprintln!("  Wrote merged segment to seg_{:04}", new_segment_id);
@@ -138,6 +154,7 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
         tombstone_count: 0,
         valid_doc_count: remapping.valid_docs.len() as u32,
         delta_baseline: 0, // Reset after merge - all segments consolidated
+        has_positions,
     };
     write_meta_atomic(&index_path, &new_meta)?;
     eprintln!("  Updated meta.json");
@@ -221,10 +238,14 @@ fn merge_all_segments(
     BTreeMap<Trigram, Vec<DocId>>,
     BTreeMap<String, Vec<DocId>>,
     HashMap<DocId, Vec<u32>>,
+    BTreeMap<String, BTreeMap<DocId, Vec<u32>>>,
+    bool,
 )> {
     let mut merged_trigrams: BTreeMap<Trigram, Vec<DocId>> = BTreeMap::new();
     let mut merged_tokens: BTreeMap<String, Vec<DocId>> = BTreeMap::new();
     let mut merged_line_maps: HashMap<DocId, Vec<u32>> = HashMap::new();
+    let mut merged_positions: BTreeMap<String, BTreeMap<DocId, Vec<u32>>> = BTreeMap::new();
+    let mut all_have_positions = true;
 
     let segments_path = index_path.join("segments");
 
@@ -242,6 +263,18 @@ fn merge_all_segments(
 
         // Merge line maps
         merge_line_maps_segment(&segment_path, &mut merged_line_maps, remapping)?;
+
+        // Merge position data
+        let positions_path = segment_path.join("tokens.positions");
+        if positions_path.exists() {
+            merge_token_positions_segment(
+                &segment_path,
+                &mut merged_positions,
+                remapping,
+            )?;
+        } else {
+            all_have_positions = false;
+        }
     }
 
     // Sort and deduplicate all posting lists
@@ -255,7 +288,13 @@ fn merge_all_segments(
         postings.dedup();
     }
 
-    Ok((merged_trigrams, merged_tokens, merged_line_maps))
+    Ok((
+        merged_trigrams,
+        merged_tokens,
+        merged_line_maps,
+        merged_positions,
+        all_have_positions,
+    ))
 }
 
 /// Merge trigram postings from a single segment.
@@ -328,6 +367,9 @@ fn merge_token_segment(
         return Ok(());
     }
 
+    // Check if this segment has positions (affects dict entry size)
+    let has_positions = segment_path.join("tokens.positions").exists();
+
     // Read dictionary
     let mut dict_file = BufReader::new(File::open(&dict_path)?);
     let mut buf2 = [0u8; 2];
@@ -361,6 +403,12 @@ fn merge_token_segment(
 
         // Read doc_freq (skip)
         dict_file.read_exact(&mut buf4)?;
+
+        // Skip position offset/length if present
+        if has_positions {
+            dict_file.read_exact(&mut buf8)?; // pos_offset
+            dict_file.read_exact(&mut buf4)?; // pos_length
+        }
 
         // Decode posting list
         if offset + length <= postings_mmap.len() {
@@ -417,6 +465,82 @@ fn merge_line_maps_segment(
         if let Some(&new_doc_id) = remapping.old_to_new.get(&old_doc_id) {
             let offsets = delta_decode(&encoded);
             merged.insert(new_doc_id, offsets);
+        }
+    }
+
+    Ok(())
+}
+
+/// Merge token position data from a single segment.
+/// Reads the token dict (with position offsets) and the tokens.positions file,
+/// then remaps doc_ids and merges into the accumulator.
+fn merge_token_positions_segment(
+    segment_path: &Path,
+    merged: &mut BTreeMap<String, BTreeMap<DocId, Vec<u32>>>,
+    remapping: &DocIdRemapping,
+) -> Result<()> {
+    let dict_path = segment_path.join("tokens.dict");
+    let positions_path = segment_path.join("tokens.positions");
+
+    if !dict_path.exists() || !positions_path.exists() {
+        return Ok(());
+    }
+
+    // Read dictionary
+    let mut dict_file = BufReader::new(File::open(&dict_path)?);
+    let mut buf2 = [0u8; 2];
+    let mut buf4 = [0u8; 4];
+    let mut buf8 = [0u8; 8];
+
+    dict_file.read_exact(&mut buf4)?;
+    let entry_count = u32::from_le_bytes(buf4) as usize;
+
+    // mmap positions file
+    let positions_file = File::open(&positions_path)?;
+    let positions_mmap = unsafe { Mmap::map(&positions_file)? };
+
+    for _ in 0..entry_count {
+        // Read token length
+        dict_file.read_exact(&mut buf2)?;
+        let token_len = u16::from_le_bytes(buf2) as usize;
+
+        // Read token
+        let mut token_bytes = vec![0u8; token_len];
+        dict_file.read_exact(&mut token_bytes)?;
+        let token = String::from_utf8_lossy(&token_bytes).to_string();
+
+        // Read postings offset, length, doc_freq (skip for position merging)
+        dict_file.read_exact(&mut buf8)?; // offset
+        dict_file.read_exact(&mut buf4)?; // length
+        dict_file.read_exact(&mut buf4)?; // doc_freq
+
+        // Read position offset and length
+        dict_file.read_exact(&mut buf8)?;
+        let pos_offset = u64::from_le_bytes(buf8) as usize;
+        dict_file.read_exact(&mut buf4)?;
+        let pos_length = u32::from_le_bytes(buf4) as usize;
+
+        if pos_length == 0 {
+            continue;
+        }
+
+        // Decode position postings
+        let end = pos_offset + pos_length;
+        if end > positions_mmap.len() {
+            continue;
+        }
+
+        let doc_positions = decode_position_postings(&positions_mmap[pos_offset..end]);
+
+        // Remap doc_ids and merge
+        let token_entry = merged.entry(token).or_default();
+        for (old_doc_id, positions) in doc_positions {
+            if let Some(&new_doc_id) = remapping.old_to_new.get(&old_doc_id) {
+                token_entry
+                    .entry(new_doc_id)
+                    .or_default()
+                    .extend(positions);
+            }
         }
     }
 
@@ -483,10 +607,11 @@ fn write_trigram_index(
     Ok(())
 }
 
-/// Write token index files.
-fn write_token_index(
+/// Write token index files with optional position data.
+fn write_token_index_with_positions(
     segment_path: &Path,
     postings: &BTreeMap<String, Vec<DocId>>,
+    token_positions: Option<&BTreeMap<String, BTreeMap<DocId, Vec<u32>>>>,
 ) -> Result<()> {
     let dict_path = segment_path.join("tokens.dict");
     let postings_path = segment_path.join("tokens.postings");
@@ -494,15 +619,27 @@ fn write_token_index(
     let mut dict_file = BufWriter::with_capacity(131072, File::create(&dict_path)?);
     let mut postings_file = BufWriter::with_capacity(131072, File::create(&postings_path)?);
 
+    // Write positions file if we have position data
+    let mut positions_file = if token_positions.is_some() {
+        let positions_path = segment_path.join("tokens.positions");
+        Some(BufWriter::with_capacity(
+            131072,
+            File::create(&positions_path)?,
+        ))
+    } else {
+        None
+    };
+
     // Write entry count
     dict_file.write_all(&(postings.len() as u32).to_le_bytes())?;
 
     let mut postings_offset: u64 = 0;
+    let mut pos_offset: u64 = 0;
 
     for (token, doc_ids) in postings {
         let token_bytes = token.as_bytes();
 
-        // Delta-encode
+        // Delta-encode postings
         let mut encoded = Vec::with_capacity(doc_ids.len() * 2);
         delta_encode(doc_ids, &mut encoded);
 
@@ -515,6 +652,28 @@ fn write_token_index(
         dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
         dict_file.write_all(&(doc_ids.len() as u32).to_le_bytes())?;
 
+        // Write position data if available
+        if let Some(ref mut pf) = positions_file {
+            let mut pos_encoded = Vec::new();
+            if let Some(positions) = token_positions.and_then(|tp| tp.get(token)) {
+                // Sort by doc_id and encode
+                let mut sorted: Vec<_> = positions
+                    .iter()
+                    .map(|(&doc_id, pos)| (doc_id, pos.as_slice()))
+                    .collect();
+                sorted.sort_by_key(|&(d, _)| d);
+                encode_position_postings(&sorted, &mut pos_encoded);
+            }
+
+            dict_file.write_all(&pos_offset.to_le_bytes())?;
+            dict_file.write_all(&(pos_encoded.len() as u32).to_le_bytes())?;
+
+            if !pos_encoded.is_empty() {
+                pf.write_all(&pos_encoded)?;
+                pos_offset += pos_encoded.len() as u64;
+            }
+        }
+
         // Write postings
         postings_file.write_all(&encoded)?;
         postings_offset += encoded.len() as u64;
@@ -522,6 +681,9 @@ fn write_token_index(
 
     dict_file.flush()?;
     postings_file.flush()?;
+    if let Some(ref mut pf) = positions_file {
+        pf.flush()?;
+    }
 
     Ok(())
 }

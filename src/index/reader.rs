@@ -43,6 +43,10 @@ struct TokenDictEntry {
     length: u32,
     #[allow(dead_code)]
     doc_freq: u32,
+    /// Offset into tokens.positions file (0 if no positions)
+    pos_offset: u64,
+    /// Length of position data in tokens.positions file
+    pos_length: u32,
 }
 
 /// Token dictionary
@@ -67,6 +71,8 @@ struct SegmentReader {
     trigram_postings: Mmap,
     token_dict: TokenDict,
     token_postings: Mmap,
+    /// Memory-mapped token positions file (optional for backwards compat)
+    token_positions: Option<Mmap>,
     /// Lazily loaded line maps - only loaded when first accessed
     line_maps: OnceLock<HashMap<DocId, Vec<u32>>>,
     /// Path to segment directory for lazy loading
@@ -107,8 +113,12 @@ impl SegmentReader {
             }
         };
 
+        // Check if positions file exists (determines dict format)
+        let positions_path = segment_path.join("tokens.positions");
+        let has_positions = positions_path.exists();
+
         // Read token dictionary (already sorted from BTreeMap write)
-        let token_dict = read_token_dict(segment_path)?;
+        let token_dict = read_token_dict(segment_path, has_positions)?;
 
         // mmap token postings
         let token_postings_path = segment_path.join("tokens.postings");
@@ -126,6 +136,14 @@ impl SegmentReader {
             }
         };
 
+        // mmap token positions if present
+        let token_positions = if has_positions {
+            let file = File::open(&positions_path)?;
+            Some(unsafe { Mmap::map(&file)? })
+        } else {
+            None
+        };
+
         // Line maps are NOT loaded here - loaded lazily on first access
 
         // Load bloom filter if it exists (optional for backwards compat)
@@ -137,6 +155,7 @@ impl SegmentReader {
             trigram_postings,
             token_dict,
             token_postings,
+            token_positions,
             line_maps: OnceLock::new(),
             segment_path: segment_path.to_path_buf(),
             bloom_filter,
@@ -169,6 +188,22 @@ impl SegmentReader {
             }
         }
         RoaringBitmap::new()
+    }
+
+    /// Get position postings for a token: Vec<(doc_id, positions)>
+    /// Returns None if no position data is available for this segment.
+    fn get_token_positions(&self, token: &str) -> Option<Vec<(u32, Vec<u32>)>> {
+        let positions_mmap = self.token_positions.as_ref()?;
+        let entry = self.token_dict.lookup(token)?;
+        if entry.pos_length == 0 {
+            return None;
+        }
+        let start = entry.pos_offset as usize;
+        let end = start + entry.pos_length as usize;
+        if end > positions_mmap.len() {
+            return None;
+        }
+        Some(crate::utils::decode_position_postings(&positions_mmap[start..end]))
     }
 
     /// Get line map for a document in this segment (lazy loads on first access)
@@ -502,6 +537,93 @@ impl IndexReader {
             })
     }
 
+    /// Resolve a phrase query positionally: check if phrase tokens appear in
+    /// adjacent positions across the index.
+    /// Returns None if any segment lacks position data (graceful fallback).
+    /// Returns Some(bitmap) of doc_ids where the phrase appears.
+    pub fn resolve_phrase_positional(
+        &self,
+        phrase_tokens: &[(String, u32)],
+    ) -> Option<RoaringBitmap> {
+        if phrase_tokens.len() < 2 {
+            return None;
+        }
+
+        // Check all segments have position data
+        if self.segments.iter().any(|s| s.token_positions.is_none()) {
+            return None;
+        }
+
+        let mut result = RoaringBitmap::new();
+
+        for segment in &self.segments {
+            // Load positions for each phrase token in this segment
+            let mut all_positions: Vec<Option<Vec<(u32, Vec<u32>)>>> = Vec::new();
+            for (token, _) in phrase_tokens {
+                all_positions.push(segment.get_token_positions(&token.to_lowercase()));
+            }
+
+            // If any token has no positions in this segment, skip it
+            if all_positions.iter().any(|p| p.is_none()) {
+                continue;
+            }
+
+            let positions: Vec<Vec<(u32, Vec<u32>)>> = all_positions
+                .into_iter()
+                .map(|p| p.unwrap())
+                .collect();
+
+            // Merge-intersect by doc_id checking position gaps
+            // Start with the first token's doc set
+            let first_positions = &positions[0];
+
+            for &(doc_id, ref first_pos) in first_positions {
+                let mut found = false;
+
+                // Check each position in the first token
+                'outer: for &start_pos in first_pos {
+                    // Check if all subsequent tokens have the expected position
+                    let mut all_match = true;
+                    for (tok_idx, (_, expected_offset)) in phrase_tokens.iter().enumerate().skip(1) {
+                        let expected_pos =
+                            start_pos + expected_offset - phrase_tokens[0].1;
+
+                        // Find this doc_id in the token's positions (binary search)
+                        let tok_positions = &positions[tok_idx];
+                        let doc_entry = tok_positions
+                            .binary_search_by_key(&doc_id, |&(d, _)| d)
+                            .ok()
+                            .map(|idx| &tok_positions[idx].1);
+
+                        match doc_entry {
+                            Some(pos_list) => {
+                                if pos_list.binary_search(&expected_pos).is_err() {
+                                    all_match = false;
+                                    break;
+                                }
+                            }
+                            None => {
+                                all_match = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if all_match {
+                        found = true;
+                        break 'outer;
+                    }
+                }
+
+                if found {
+                    result.insert(doc_id);
+                }
+            }
+        }
+
+        Some(result)
+    }
+
     /// Get all valid (non-stale, non-tombstone) doc IDs as a RoaringBitmap
     pub fn valid_doc_ids(&self) -> RoaringBitmap {
         self.documents
@@ -693,7 +815,7 @@ fn read_trigram_dict(segment_path: &Path) -> Result<TrigramDict> {
 }
 
 /// Read token dictionary
-fn read_token_dict(segment_path: &Path) -> Result<TokenDict> {
+fn read_token_dict(segment_path: &Path, has_positions: bool) -> Result<TokenDict> {
     let dict_path = segment_path.join("tokens.dict");
 
     if !dict_path.exists() {
@@ -741,11 +863,24 @@ fn read_token_dict(segment_path: &Path) -> Result<TokenDict> {
         file.read_exact(&mut buf4)?;
         let doc_freq = u32::from_le_bytes(buf4);
 
+        // Position offset and length (only present in new indexes with positions)
+        let (pos_offset, pos_length) = if has_positions {
+            file.read_exact(&mut buf8)?;
+            let po = u64::from_le_bytes(buf8);
+            file.read_exact(&mut buf4)?;
+            let pl = u32::from_le_bytes(buf4);
+            (po, pl)
+        } else {
+            (0, 0)
+        };
+
         entries.push(TokenDictEntry {
             token,
             offset,
             length,
             doc_freq,
+            pos_offset,
+            pos_length,
         });
     }
 

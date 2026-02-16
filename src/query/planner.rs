@@ -1,6 +1,6 @@
 use crate::index::types::Trigram;
 use crate::query::parser::{Query, QueryNode};
-use crate::utils::query_trigrams;
+use crate::utils::{query_trigrams, tokenize_query_with_positions};
 
 /// Query execution plan
 #[derive(Debug)]
@@ -25,6 +25,8 @@ pub enum PlanStep {
     Exclude(Box<QueryPlan>),
     /// Apply document filters
     Filter(FilterStep),
+    /// Positional phrase resolution: check token adjacency from position index
+    PositionalPhrase(Vec<(String, u32)>),
 }
 
 /// Filter step for post-narrowing
@@ -285,15 +287,20 @@ impl QueryPlanner {
 
             QueryNode::Phrase(text) => {
                 let trigrams = query_trigrams(text);
+                let phrase_tokens = tokenize_query_with_positions(text);
 
-                if trigrams.is_empty() {
-                    (Vec::new(), Some(VerificationStep::Phrase(text.clone())))
-                } else {
-                    (
-                        vec![PlanStep::TrigramIntersect(trigrams)],
-                        Some(VerificationStep::Phrase(text.clone())),
-                    )
+                let mut steps = Vec::new();
+
+                if !trigrams.is_empty() {
+                    steps.push(PlanStep::TrigramIntersect(trigrams));
                 }
+
+                // Add positional phrase step if we have at least 2 tokens
+                if phrase_tokens.len() >= 2 {
+                    steps.push(PlanStep::PositionalPhrase(phrase_tokens));
+                }
+
+                (steps, Some(VerificationStep::Phrase(text.clone())))
             }
 
             QueryNode::Regex(pattern) => {

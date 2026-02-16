@@ -148,6 +148,71 @@ pub fn read_u16_le<R: Read>(reader: &mut R) -> io::Result<u16> {
     Ok(u16::from_le_bytes(buf))
 }
 
+/// Encode position postings: a list of (doc_id, positions) pairs.
+/// Format: for each entry, delta-encoded doc_id followed by position count,
+/// then delta-encoded positions within that document.
+pub fn encode_position_postings(doc_positions: &[(u32, &[u32])], buf: &mut Vec<u8>) {
+    let mut prev_doc_id = 0u32;
+    for &(doc_id, positions) in doc_positions {
+        // Delta-encode doc_id
+        let delta = doc_id - prev_doc_id;
+        encode_varint(delta, buf);
+        prev_doc_id = doc_id;
+
+        // Position count
+        encode_varint(positions.len() as u32, buf);
+
+        // Delta-encode positions
+        let mut prev_pos = 0u32;
+        for &pos in positions {
+            let pos_delta = pos - prev_pos;
+            encode_varint(pos_delta, buf);
+            prev_pos = pos;
+        }
+    }
+}
+
+/// Decode position postings back to a list of (doc_id, positions) pairs.
+pub fn decode_position_postings(buf: &[u8]) -> Vec<(u32, Vec<u32>)> {
+    let mut result = Vec::new();
+    let mut pos = 0;
+    let mut prev_doc_id = 0u32;
+
+    while pos < buf.len() {
+        // Decode doc_id delta
+        let (delta, consumed) = match decode_varint(&buf[pos..]) {
+            Some(v) => v,
+            None => break,
+        };
+        pos += consumed;
+        prev_doc_id = prev_doc_id.saturating_add(delta);
+
+        // Decode position count
+        let (count, consumed) = match decode_varint(&buf[pos..]) {
+            Some(v) => v,
+            None => break,
+        };
+        pos += consumed;
+
+        // Decode positions
+        let mut positions = Vec::with_capacity(count as usize);
+        let mut prev_pos = 0u32;
+        for _ in 0..count {
+            let (pos_delta, consumed) = match decode_varint(&buf[pos..]) {
+                Some(v) => v,
+                None => break,
+            };
+            pos += consumed;
+            prev_pos = prev_pos.saturating_add(pos_delta);
+            positions.push(prev_pos);
+        }
+
+        result.push((prev_doc_id, positions));
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +235,58 @@ mod tests {
         delta_encode(&values, &mut buf);
         let decoded = delta_decode(&buf);
         assert_eq!(values, decoded);
+    }
+
+    #[test]
+    fn test_position_postings_roundtrip() {
+        let data: Vec<(u32, &[u32])> = vec![
+            (1, &[0, 3, 7]),
+            (5, &[2, 10]),
+            (100, &[0]),
+        ];
+
+        let mut buf = Vec::new();
+        encode_position_postings(&data, &mut buf);
+        let decoded = decode_position_postings(&buf);
+
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[0], (1, vec![0, 3, 7]));
+        assert_eq!(decoded[1], (5, vec![2, 10]));
+        assert_eq!(decoded[2], (100, vec![0]));
+    }
+
+    #[test]
+    fn test_position_postings_empty() {
+        let data: Vec<(u32, &[u32])> = vec![];
+        let mut buf = Vec::new();
+        encode_position_postings(&data, &mut buf);
+        let decoded = decode_position_postings(&buf);
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_position_postings_single_doc() {
+        let data: Vec<(u32, &[u32])> = vec![(42, &[0, 1, 2, 3, 100])];
+        let mut buf = Vec::new();
+        encode_position_postings(&data, &mut buf);
+        let decoded = decode_position_postings(&buf);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0], (42, vec![0, 1, 2, 3, 100]));
+    }
+
+    #[test]
+    fn test_position_postings_consecutive_docs() {
+        let data: Vec<(u32, &[u32])> = vec![
+            (1, &[0]),
+            (2, &[5]),
+            (3, &[10, 20]),
+        ];
+        let mut buf = Vec::new();
+        encode_position_postings(&data, &mut buf);
+        let decoded = decode_position_postings(&buf);
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[0], (1, vec![0]));
+        assert_eq!(decoded[1], (2, vec![5]));
+        assert_eq!(decoded[2], (3, vec![10, 20]));
     }
 }

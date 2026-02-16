@@ -228,6 +228,10 @@ pub struct IndexMeta {
     /// This allows chunked initial indexes to not immediately trigger merging.
     #[serde(default)]
     pub delta_baseline: usize,
+    /// Whether segments contain token position data for phrase queries.
+    /// Old indexes default to false; new indexes set this to true.
+    #[serde(default)]
+    pub has_positions: bool,
 }
 
 impl Default for IndexMeta {
@@ -245,6 +249,7 @@ impl Default for IndexMeta {
             tombstone_count: 0,
             valid_doc_count: 0,
             delta_baseline: 0,
+            has_positions: false,
         }
     }
 }
