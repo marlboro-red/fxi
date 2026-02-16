@@ -114,8 +114,6 @@ const PIPE_BUFFER_SIZE: u32 = 65536;
 /// Maximum concurrent connection handlers
 const MAX_CONCURRENT_CONNECTIONS: u64 = 64;
 
-/// Default maximum pipelined requests per connection
-const DEFAULT_MAX_PIPELINED: usize = 32;
 
 /// A Send-safe wrapper for a Windows HANDLE
 #[derive(Clone, Copy)]
@@ -361,13 +359,6 @@ struct PendingChanges {
     first_change: Instant,
 }
 
-/// Read per-connection pipelining limit from env or use default
-fn max_pipelined() -> usize {
-    std::env::var("FXI_MAX_PIPELINED")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MAX_PIPELINED)
-}
 
 /// The index server daemon
 pub struct IndexServer {
@@ -513,86 +504,46 @@ impl IndexServer {
         Ok(())
     }
 
-    /// Handle a single client connection with pipelining support.
+    /// Handle a single client connection.
     ///
-    /// Uses `std::thread::scope` to spawn a writer thread and per-request
-    /// handler threads. Requests are read with `read_message_with_id` and
-    /// responses are written with `write_message_with_id`, preserving the
-    /// optional `request_id` for client-side correlation.
+    /// Windows synchronous named pipes do not support concurrent ReadFile and
+    /// WriteFile on the same handle — a pending read blocks all writes. So we
+    /// process requests sequentially: read → handle → write → loop. Request
+    /// IDs are still echoed back for client-side correlation.
     fn handle_connection(&self, pipe: PipeHandle) -> Result<()> {
-        let handle = pipe.handle; // Copy for disconnect after scope
-        let (tx, rx) = std::sync::mpsc::channel::<(Response, Option<String>)>();
-        let max_handlers = max_pipelined();
-        let active = std::sync::atomic::AtomicUsize::new(0);
+        let handle = pipe.handle;
+        let mut reader = BufReader::new(pipe);
+        let mut writer = BufWriter::new(PipeWriter(handle));
 
-        std::thread::scope(|s| {
-            // Writer thread (PipeWriter to avoid double-close)
-            let writer_handle = handle;
-            s.spawn(move || {
-                let mut writer = BufWriter::new(PipeWriter(writer_handle));
-                while let Ok((response, request_id)) = rx.recv() {
-                    if write_message_with_id(&mut writer, &response, request_id.as_deref())
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            });
-
-            // Reader loop
-            let mut reader = BufReader::new(pipe);
-            loop {
-                let (request, request_id): (Request, _) = match read_message_with_id(&mut reader)
-                {
-                    Ok(r) => r,
-                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => break,
-                    Err(e) => {
-                        let _ = tx.send((
-                            Response::Error {
-                                message: format!("Invalid request: {}", e),
-                            },
-                            None,
-                        ));
-                        continue;
-                    }
-                };
-
-                // Concurrency limit
-                if active.fetch_add(1, Ordering::Relaxed) >= max_handlers {
-                    active.fetch_sub(1, Ordering::Relaxed);
-                    let _ = tx.send((
-                        Response::Error {
-                            message: "Too many concurrent requests".into(),
-                        },
-                        request_id,
-                    ));
+        loop {
+            let (request, request_id): (Request, _) = match read_message_with_id(&mut reader) {
+                Ok(r) => r,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => break,
+                Err(e) => {
+                    let resp = Response::Error {
+                        message: format!("Invalid request: {}", e),
+                    };
+                    let _ = write_message_with_id(&mut writer, &resp, None);
                     continue;
                 }
+            };
 
-                let is_shutdown = matches!(request, Request::Shutdown);
-                let tx = tx.clone();
-                let active = &active;
+            let is_shutdown = matches!(request, Request::Shutdown);
+            let response = self.handle_request(request);
 
-                s.spawn(move || {
-                    let response = self.handle_request(request);
-                    let _ = tx.send((response, request_id));
-                    active.fetch_sub(1, Ordering::Relaxed);
-                });
-
-                if is_shutdown {
-                    break;
-                }
+            if write_message_with_id(&mut writer, &response, request_id.as_deref()).is_err() {
+                break;
             }
 
-            drop(tx); // signal writer to finish after in-flight handlers complete
-        });
-
-        // Disconnect pipe after all threads finish
-        unsafe {
-            DisconnectNamedPipe(handle.as_raw());
+            if is_shutdown {
+                break;
+            }
         }
-        // pipe (reader) was consumed by BufReader, it drops here closing the handle
+
+        unsafe {
+            DisconnectNamedPipe(reader.get_ref().handle.as_raw());
+        }
 
         Ok(())
     }
