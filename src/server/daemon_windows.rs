@@ -8,7 +8,7 @@ use crate::index::reader::IndexReader;
 use crate::index::types::{DocFlags, IndexMeta, Language};
 use crate::index::writer::DeltaSegmentWriter;
 use crate::query::{parse_query, QueryExecutor};
-use crate::utils::{extract_tokens, extract_trigrams, get_index_dir, is_binary, is_minified};
+use crate::utils::{extract_tokens, extract_tokens_with_positions, extract_trigrams, get_index_dir, is_binary, is_minified};
 use crate::server::debouncer::EventDebouncer;
 use crate::server::protocol::{
     read_message_with_id, write_message_with_id, ContentMatch, ContentSearchOptions,
@@ -1417,12 +1417,15 @@ fn process_file_for_delta(full_path: &std::path::Path, rel_path: &std::path::Pat
     // Extract trigrams
     let trigrams: Vec<u32> = extract_trigrams(&content);
 
-    // Extract tokens
-    let tokens: Vec<String> = if let Ok(text) = std::str::from_utf8(&content) {
-        extract_tokens(text).into_iter().collect()
-    } else {
-        Vec::new()
-    };
+    // Extract tokens and token positions
+    let (tokens, token_positions): (Vec<String>, Vec<(String, u32)>) =
+        if let Ok(text) = std::str::from_utf8(&content) {
+            let tok = extract_tokens(text).into_iter().collect();
+            let tok_pos = extract_tokens_with_positions(text);
+            (tok, tok_pos)
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
     // Build line map
     let line_offsets = build_line_map_simple(&content);
@@ -1441,6 +1444,7 @@ fn process_file_for_delta(full_path: &std::path::Path, rel_path: &std::path::Pat
         flags,
         trigrams,
         tokens,
+        token_positions,
         line_offsets,
     })
 }
