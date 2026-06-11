@@ -187,7 +187,67 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
     // Use parallel walker for faster file discovery
     let file_entries: Vec<(PathBuf, PathBuf)> = {
         let entries = Arc::new(Mutex::new(Vec::new()));
-        let root_clone = root.clone();
+
+        struct CollectVisitor {
+            root: PathBuf,
+            shared: Arc<Mutex<Vec<(PathBuf, PathBuf)>>>,
+            // Per-thread buffer flushed on drop — the shared mutex is taken
+            // once per walker thread instead of once per file
+            local: Vec<(PathBuf, PathBuf)>,
+        }
+
+        impl CollectVisitor {
+            fn flush(&mut self) {
+                if !self.local.is_empty() {
+                    let mut entries = self
+                        .shared
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    entries.append(&mut self.local);
+                }
+            }
+        }
+
+        impl ignore::ParallelVisitor for CollectVisitor {
+            fn visit(&mut self, result: Result<ignore::DirEntry, ignore::Error>) -> ignore::WalkState {
+                if let Ok(entry) = result
+                    // file_type() comes from the directory entry — no extra
+                    // stat(2) per file like path().is_file()
+                    && entry.file_type().is_some_and(|t| t.is_file())
+                    && let Ok(rel_path) = entry.path().strip_prefix(&self.root)
+                {
+                    let rel_path = rel_path.to_path_buf();
+                    self.local.push((entry.into_path(), rel_path));
+                }
+                ignore::WalkState::Continue
+            }
+        }
+
+        impl Drop for CollectVisitor {
+            fn drop(&mut self) {
+                self.flush();
+            }
+        }
+
+        struct CollectBuilder {
+            root: PathBuf,
+            shared: Arc<Mutex<Vec<(PathBuf, PathBuf)>>>,
+        }
+
+        impl<'s> ignore::ParallelVisitorBuilder<'s> for CollectBuilder {
+            fn build(&mut self) -> Box<dyn ignore::ParallelVisitor + 's> {
+                Box::new(CollectVisitor {
+                    root: self.root.clone(),
+                    shared: Arc::clone(&self.shared),
+                    local: Vec::with_capacity(1024),
+                })
+            }
+        }
+
+        let mut builder = CollectBuilder {
+            root: root.clone(),
+            shared: Arc::clone(&entries),
+        };
 
         WalkBuilder::new(&root)
             .hidden(true)
@@ -203,23 +263,9 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
                 )
             })
             .build_parallel()
-            .run(|| {
-                let entries = Arc::clone(&entries);
-                let root = root_clone.clone();
-                Box::new(move |result| {
-                    if let Ok(entry) = result
-                        && entry.path().is_file()
-                        && let Ok(rel_path) = entry.path().strip_prefix(&root)
-                    {
-                        let mut entries = entries
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        entries.push((entry.path().to_path_buf(), rel_path.to_path_buf()));
-                    }
-                    ignore::WalkState::Continue
-                })
-            });
+            .visit(&mut builder);
 
+        drop(builder);
         Arc::try_unwrap(entries).unwrap().into_inner().unwrap()
     };
 
@@ -567,7 +613,8 @@ fn compute_index_diff(root: &Path, indexed_files: &HashMap<PathBuf, (u32, u64)>)
     let mut seen_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     for entry in walker.filter_map(|e| e.ok()) {
-        if !entry.path().is_file() {
+        // file_type() comes from the directory entry — no extra stat(2)
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
 
@@ -577,8 +624,8 @@ fn compute_index_diff(root: &Path, indexed_files: &HashMap<PathBuf, (u32, u64)>)
             Err(_) => continue,
         };
 
-        // Check file size
-        let metadata = match fs::metadata(&full_path) {
+        // Check file size (metadata() reuses walker data where possible)
+        let metadata = match entry.metadata() {
             Ok(m) => m,
             Err(_) => continue,
         };

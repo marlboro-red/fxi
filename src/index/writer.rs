@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,7 +30,7 @@ struct SegmentWriteJob {
     segment_id: SegmentId,
     segment_path: PathBuf,
     files: Vec<AssignedFile>,
-    trigram_frequencies: Arc<Mutex<HashMap<Trigram, u32>>>,
+    trigram_frequencies: Arc<Mutex<ahash::AHashMap<Trigram, u32>>>,
 }
 
 /// Chunked index writer for memory-bounded index building.
@@ -47,10 +47,11 @@ pub struct ChunkedIndexWriter {
     path_to_id: HashMap<PathBuf, PathId>,
     next_doc_id: DocId,
     segment_ids: Vec<SegmentId>,
-    // Accumulated trigram frequencies for stop-gram computation (shared with background thread)
-    trigram_frequencies: Arc<Mutex<HashMap<Trigram, u32>>>,
+    // Accumulated trigram frequencies for stop-gram computation (shared with
+    // background thread). ahash: 3-byte trigram keys don't need SipHash.
+    trigram_frequencies: Arc<Mutex<ahash::AHashMap<Trigram, u32>>>,
     // Background writer thread
-    write_sender: Option<Sender<SegmentWriteJob>>,
+    write_sender: Option<SyncSender<SegmentWriteJob>>,
     write_thread: Option<JoinHandle<Vec<anyhow::Error>>>,
     // Channel for receiving segment completion notifications
     completion_receiver: Option<Receiver<SegmentId>>,
@@ -67,8 +68,11 @@ impl ChunkedIndexWriter {
         let segments_path = index_path.join("segments");
         fs::create_dir_all(&segments_path)?;
 
-        // Create channel for async segment writes
-        let (tx, rx) = mpsc::channel::<SegmentWriteJob>();
+        // Create channel for async segment writes. Bounded so file
+        // processing applies backpressure instead of queueing unbounded
+        // SegmentWriteJobs (each holds full token/trigram data for a whole
+        // chunk) when the writer thread falls behind.
+        let (tx, rx) = mpsc::sync_channel::<SegmentWriteJob>(2);
 
         // Create channel for completion notifications
         let (completion_tx, completion_rx) = mpsc::channel::<SegmentId>();
@@ -97,7 +101,7 @@ impl ChunkedIndexWriter {
             path_to_id: HashMap::new(),
             next_doc_id: 1,
             segment_ids: Vec::new(),
-            trigram_frequencies: Arc::new(Mutex::new(HashMap::new())),
+            trigram_frequencies: Arc::new(Mutex::new(ahash::AHashMap::new())),
             write_sender: Some(tx),
             write_thread: Some(write_thread),
             completion_receiver: Some(completion_rx),
@@ -580,10 +584,12 @@ impl ChunkedIndexWriter {
         let bits = bloom_filter.bits();
         file.write_all(&(bits.len() as u32).to_le_bytes())?;
 
-        // Write bit data
+        // Write bit data in one buffer instead of one write per u64 word
+        let mut bit_buf = Vec::with_capacity(bits.len() * 8);
         for &word in bits {
-            file.write_all(&word.to_le_bytes())?;
+            bit_buf.extend_from_slice(&word.to_le_bytes());
         }
+        file.write_all(&bit_buf)?;
 
         file.flush()?;
         Ok(())
@@ -678,13 +684,16 @@ impl ChunkedIndexWriter {
         file.write_all(&(self.all_documents.len() as u32).to_le_bytes())?;
 
         for doc in &self.all_documents {
-            file.write_all(&doc.doc_id.to_le_bytes())?;
-            file.write_all(&doc.path_id.to_le_bytes())?;
-            file.write_all(&doc.size.to_le_bytes())?;
-            file.write_all(&doc.mtime.to_le_bytes())?;
-            file.write_all(&(doc.language as u16).to_le_bytes())?;
-            file.write_all(&doc.flags.0.to_le_bytes())?;
-            file.write_all(&doc.segment_id.to_le_bytes())?;
+            // One write per record instead of seven
+            let mut rec = [0u8; 30];
+            rec[0..4].copy_from_slice(&doc.doc_id.to_le_bytes());
+            rec[4..8].copy_from_slice(&doc.path_id.to_le_bytes());
+            rec[8..16].copy_from_slice(&doc.size.to_le_bytes());
+            rec[16..24].copy_from_slice(&doc.mtime.to_le_bytes());
+            rec[24..26].copy_from_slice(&(doc.language as u16).to_le_bytes());
+            rec[26..28].copy_from_slice(&doc.flags.0.to_le_bytes());
+            rec[28..30].copy_from_slice(&doc.segment_id.to_le_bytes());
+            file.write_all(&rec)?;
         }
 
         file.flush()?;

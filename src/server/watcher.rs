@@ -141,6 +141,12 @@ pub struct ChangeBatch {
     pub modified: Vec<PathBuf>,
     /// Files that were deleted
     pub deleted: Vec<PathBuf>,
+    /// Membership indexes so add() is O(1) instead of scanning the vectors
+    /// (a mass event like a branch switch funnels tens of thousands of adds
+    /// through here per accumulation cycle)
+    created_set: std::collections::HashSet<PathBuf>,
+    modified_set: std::collections::HashSet<PathBuf>,
+    deleted_set: std::collections::HashSet<PathBuf>,
 }
 
 impl ChangeBatch {
@@ -163,27 +169,34 @@ impl ChangeBatch {
     pub fn add(&mut self, change: FileChange) {
         match change.kind {
             ChangeKind::Created => {
-                if !self.created.contains(&change.path) {
+                if self.created_set.insert(change.path.clone()) {
                     self.created.push(change.path);
                 }
             }
             ChangeKind::Modified => {
                 // If file was just created, don't add to modified
-                if !self.created.contains(&change.path) && !self.modified.contains(&change.path) {
+                if !self.created_set.contains(&change.path)
+                    && self.modified_set.insert(change.path.clone())
+                {
                     self.modified.push(change.path);
                 }
             }
             ChangeKind::Deleted => {
-                // Remove from created/modified if present (create+delete = noop)
-                self.created.retain(|p| p != &change.path);
-                self.modified.retain(|p| p != &change.path);
-                if !self.deleted.contains(&change.path) {
+                // Remove from created/modified if present (create+delete = noop);
+                // the retain scan only runs when the path is actually present
+                if self.created_set.remove(&change.path) {
+                    self.created.retain(|p| p != &change.path);
+                }
+                if self.modified_set.remove(&change.path) {
+                    self.modified.retain(|p| p != &change.path);
+                }
+                if self.deleted_set.insert(change.path.clone()) {
                     self.deleted.push(change.path);
                 }
             }
             ChangeKind::Renamed => {
                 // Treat as deleted (the new path will come as a separate created event)
-                if !self.deleted.contains(&change.path) {
+                if self.deleted_set.insert(change.path.clone()) {
                     self.deleted.push(change.path);
                 }
             }
@@ -219,6 +232,9 @@ impl ChangeBatch {
         self.created.clear();
         self.modified.clear();
         self.deleted.clear();
+        self.created_set.clear();
+        self.modified_set.clear();
+        self.deleted_set.clear();
     }
 }
 
