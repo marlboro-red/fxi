@@ -312,12 +312,21 @@ impl<'a> QueryExecutor<'a> {
                 .read_file_cached(&full_path)
                 .or_else(|| read_file_mmap(&full_path));
 
+            // Split into lines once per file, not once per match
+            let lines: Option<Vec<&str>> = match &content {
+                Some(c) if context_before > 0 || context_after > 0 => Some(c.lines().collect()),
+                _ => None,
+            };
+
             for (line_num, line_content, start, end) in file_matches {
-                let (ctx_before, ctx_after) = match &content {
-                    Some(c) if context_before > 0 || context_after > 0 => {
-                        Self::extract_context_lines(c, line_num, context_before, context_after)
-                    }
-                    _ => (Vec::new(), Vec::new()),
+                let (ctx_before, ctx_after) = match &lines {
+                    Some(lines) => Self::extract_context_from_lines(
+                        lines,
+                        line_num,
+                        context_before,
+                        context_after,
+                    ),
+                    None => (Vec::new(), Vec::new()),
                 };
 
                 all_results.push(ContentMatchResult {
@@ -508,47 +517,30 @@ impl<'a> QueryExecutor<'a> {
 
     /// Extract context lines around a match.
     ///
-    /// OPTIMIZATION: Uses iterator-based approach that only scans the relevant
-    /// portion of the file, avoiding allocation of a full line vector.
-    /// For a match at line N with B context before and A after, we only need
-    /// to scan lines [N-B, N+A], not the entire file.
-    fn extract_context_lines(
-        content: &str,
+    /// The caller splits the file into lines once (`lines`); each match then
+    /// slices its context window directly instead of re-scanning the file
+    /// from line 0 per match.
+    fn extract_context_from_lines(
+        lines: &[&str],
         match_line: u32,
         before: u32,
         after: u32,
     ) -> (ContextLines, ContextLines) {
-        // Early return if no context needed
-        if before == 0 && after == 0 {
-            return (Vec::new(), Vec::new());
-        }
-
         let match_idx = (match_line - 1) as usize;
         let start_line = match_idx.saturating_sub(before as usize);
-        let end_line = match_idx + 1 + after as usize;
 
         let mut ctx_before = Vec::with_capacity(before as usize);
-        let mut ctx_after = Vec::with_capacity(after as usize);
-
-        // Iterate only through the lines we need
-        for (i, line) in content.lines().enumerate() {
-            // Skip lines before our context window
-            if i < start_line {
-                continue;
-            }
-
-            // Stop after we've collected all needed context
-            if i >= end_line {
-                break;
-            }
-
-            // Categorize the line
-            if i < match_idx {
+        for i in start_line..match_idx {
+            if let Some(&line) = lines.get(i) {
                 ctx_before.push(((i + 1) as u32, line.to_string()));
-            } else if i > match_idx {
+            }
+        }
+
+        let mut ctx_after = Vec::with_capacity(after as usize);
+        for i in (match_idx + 1)..(match_idx + 1 + after as usize) {
+            if let Some(&line) = lines.get(i) {
                 ctx_after.push(((i + 1) as u32, line.to_string()));
             }
-            // Skip the match line itself (i == match_idx)
         }
 
         (ctx_before, ctx_after)
@@ -1445,18 +1437,14 @@ impl<'a> QueryExecutor<'a> {
                 });
             }
             SortOrder::Recency => {
-                results.sort_by(|a, b| {
-                    let mtime_a = self
-                        .reader
-                        .get_document(a.doc_id)
-                        .map(|d| d.mtime)
-                        .unwrap_or(0);
-                    let mtime_b = self
-                        .reader
-                        .get_document(b.doc_id)
-                        .map(|d| d.mtime)
-                        .unwrap_or(0);
-                    mtime_b.cmp(&mtime_a)
+                // One document lookup per element instead of two per comparison
+                results.sort_by_cached_key(|m| {
+                    std::cmp::Reverse(
+                        self.reader
+                            .get_document(m.doc_id)
+                            .map(|d| d.mtime)
+                            .unwrap_or(0),
+                    )
                 });
             }
             SortOrder::Path => {
@@ -1717,8 +1705,9 @@ def format_warning(msg: str) -> str:
     #[test]
     fn test_extract_context_lines() {
         let content = "line1\nline2\nline3\nline4\nline5\n";
+        let lines: Vec<&str> = content.lines().collect();
 
-        let (before, after) = QueryExecutor::extract_context_lines(content, 3, 1, 1);
+        let (before, after) = QueryExecutor::extract_context_from_lines(&lines, 3, 1, 1);
 
         assert_eq!(before.len(), 1, "Should have 1 line before");
         assert_eq!(after.len(), 1, "Should have 1 line after");
@@ -1729,8 +1718,9 @@ def format_warning(msg: str) -> str:
     #[test]
     fn test_extract_context_lines_at_start() {
         let content = "line1\nline2\nline3\n";
+        let lines: Vec<&str> = content.lines().collect();
 
-        let (before, after) = QueryExecutor::extract_context_lines(content, 1, 2, 1);
+        let (before, after) = QueryExecutor::extract_context_from_lines(&lines, 1, 2, 1);
 
         assert!(before.is_empty(), "Should have no lines before line 1");
         assert_eq!(after.len(), 1, "Should have 1 line after");
@@ -1739,8 +1729,9 @@ def format_warning(msg: str) -> str:
     #[test]
     fn test_extract_context_lines_at_end() {
         let content = "line1\nline2\nline3\n";
+        let lines: Vec<&str> = content.lines().collect();
 
-        let (before, after) = QueryExecutor::extract_context_lines(content, 3, 1, 2);
+        let (before, after) = QueryExecutor::extract_context_from_lines(&lines, 3, 1, 2);
 
         assert_eq!(before.len(), 1, "Should have 1 line before");
         assert!(after.is_empty(), "Should have no lines after line 3");
