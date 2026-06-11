@@ -623,9 +623,11 @@ impl<'a> QueryExecutor<'a> {
                 }
 
                 PlanStep::PositionalPhrase(phrase_tokens) => {
-                    // Use positional index to resolve phrase adjacency
-                    if let Some(positional_docs) =
-                        self.reader.resolve_phrase_positional(phrase_tokens)
+                    // Use positional index to resolve phrase adjacency,
+                    // decoding positions only for already-narrowed candidates
+                    if let Some(positional_docs) = self
+                        .reader
+                        .resolve_phrase_positional(phrase_tokens, candidates.as_ref())
                     {
                         candidates = Some(match candidates {
                             Some(existing) => existing & positional_docs,
