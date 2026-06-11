@@ -29,7 +29,48 @@
 
 use crate::server::protocol::ContentMatch;
 use std::io::{self, Write};
-use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
+use termcolor::{BufferedStandardStream, Color, ColorChoice, ColorSpec, WriteColor};
+
+/// Color specs built once per print call instead of per output line.
+struct Colors {
+    path: ColorSpec,
+    path_heading: ColorSpec,
+    line_num: ColorSpec,
+    separator: ColorSpec,
+    highlight: ColorSpec,
+}
+
+impl Colors {
+    fn new() -> Self {
+        let mut path = ColorSpec::new();
+        path.set_fg(Some(Color::Magenta));
+        let mut path_heading = ColorSpec::new();
+        path_heading.set_fg(Some(Color::Magenta)).set_bold(true);
+        let mut line_num = ColorSpec::new();
+        line_num.set_fg(Some(Color::Green));
+        let mut separator = ColorSpec::new();
+        separator.set_fg(Some(Color::Cyan));
+        let mut highlight = ColorSpec::new();
+        highlight.set_fg(Some(Color::Red)).set_bold(true);
+        Self {
+            path,
+            path_heading,
+            line_num,
+            separator,
+            highlight,
+        }
+    }
+}
+
+/// Buffered stdout: one syscall per buffer instead of one per line.
+fn buffered_stdout(color: bool) -> BufferedStandardStream {
+    let choice = if color {
+        ColorChoice::Auto
+    } else {
+        ColorChoice::Never
+    };
+    BufferedStandardStream::stdout(choice)
+}
 
 /// Print content matches in ripgrep-style format
 pub fn print_content_matches(
@@ -37,17 +78,13 @@ pub fn print_content_matches(
     color: bool,
     heading: bool,
 ) -> io::Result<()> {
-    let choice = if color {
-        ColorChoice::Auto
-    } else {
-        ColorChoice::Never
-    };
-    let mut stdout = StandardStream::stdout(choice);
+    let mut stdout = buffered_stdout(color);
 
     if matches.is_empty() {
         return Ok(());
     }
 
+    let colors = Colors::new();
     let mut current_file: Option<&std::path::Path> = None;
     let mut last_line_num: Option<u32> = None;
 
@@ -62,7 +99,7 @@ pub fn print_content_matches(
 
             if heading {
                 // Print filename header
-                stdout.set_color(ColorSpec::new().set_fg(Some(Color::Magenta)).set_bold(true))?;
+                stdout.set_color(&colors.path_heading)?;
                 writeln!(stdout, "{}", m.path.display())?;
                 stdout.reset()?;
             }
@@ -81,7 +118,7 @@ pub fn print_content_matches(
                 .unwrap_or(m.line_number);
 
             if first_ctx_line > expected_next {
-                stdout.set_color(ColorSpec::new().set_fg(Some(Color::Cyan)))?;
+                stdout.set_color(&colors.separator)?;
                 writeln!(stdout, "--")?;
                 stdout.reset()?;
             }
@@ -89,12 +126,13 @@ pub fn print_content_matches(
 
         // Print context before
         for (line_num, content) in &m.context_before {
-            print_context_line(&mut stdout, &m.path, *line_num, content, heading)?;
+            print_context_line(&mut stdout, &colors, &m.path, *line_num, content, heading)?;
         }
 
         // Print the match line
         print_match_line(
             &mut stdout,
+            &colors,
             &m.path,
             m.line_number,
             &m.line_content,
@@ -105,7 +143,7 @@ pub fn print_content_matches(
 
         // Print context after
         for (line_num, content) in &m.context_after {
-            print_context_line(&mut stdout, &m.path, *line_num, content, heading)?;
+            print_context_line(&mut stdout, &colors, &m.path, *line_num, content, heading)?;
         }
 
         // Track last line for gap detection
@@ -117,12 +155,13 @@ pub fn print_content_matches(
         );
     }
 
-    Ok(())
+    stdout.flush()
 }
 
 /// Print a context line (non-matching)
 fn print_context_line(
-    stdout: &mut StandardStream,
+    stdout: &mut BufferedStandardStream,
+    colors: &Colors,
     path: &std::path::Path,
     line_num: u32,
     content: &str,
@@ -130,14 +169,14 @@ fn print_context_line(
 ) -> io::Result<()> {
     if !heading {
         // Print path prefix when not using heading mode
-        stdout.set_color(ColorSpec::new().set_fg(Some(Color::Magenta)))?;
+        stdout.set_color(&colors.path)?;
         write!(stdout, "{}", path.display())?;
         stdout.reset()?;
         write!(stdout, "-")?;
     }
 
     // Print line number
-    stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
+    stdout.set_color(&colors.line_num)?;
     write!(stdout, "{}", line_num)?;
     stdout.reset()?;
     write!(stdout, "-")?;
@@ -149,8 +188,10 @@ fn print_context_line(
 }
 
 /// Print a match line with highlighted match
+#[allow(clippy::too_many_arguments)]
 fn print_match_line(
-    stdout: &mut StandardStream,
+    stdout: &mut BufferedStandardStream,
+    colors: &Colors,
     path: &std::path::Path,
     line_num: u32,
     content: &str,
@@ -160,14 +201,14 @@ fn print_match_line(
 ) -> io::Result<()> {
     if !heading {
         // Print path prefix when not using heading mode
-        stdout.set_color(ColorSpec::new().set_fg(Some(Color::Magenta)))?;
+        stdout.set_color(&colors.path)?;
         write!(stdout, "{}", path.display())?;
         stdout.reset()?;
         write!(stdout, ":")?;
     }
 
     // Print line number
-    stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
+    stdout.set_color(&colors.line_num)?;
     write!(stdout, "{}", line_num)?;
     stdout.reset()?;
     write!(stdout, ":")?;
@@ -184,7 +225,7 @@ fn print_match_line(
 
     // The match itself (highlighted)
     if safe_end > safe_start {
-        stdout.set_color(ColorSpec::new().set_fg(Some(Color::Red)).set_bold(true))?;
+        stdout.set_color(&colors.highlight)?;
         write!(stdout, "{}", &content[safe_start..safe_end])?;
         stdout.reset()?;
     }
@@ -201,34 +242,26 @@ fn print_match_line(
 
 /// Print only filenames (for -l flag)
 pub fn print_files_only(matches: &[ContentMatch], color: bool) -> io::Result<()> {
-    let choice = if color {
-        ColorChoice::Auto
-    } else {
-        ColorChoice::Never
-    };
-    let mut stdout = StandardStream::stdout(choice);
+    let mut stdout = buffered_stdout(color);
+    let colors = Colors::new();
 
     let mut seen_files = std::collections::HashSet::new();
 
     for m in matches {
-        if seen_files.insert(m.path.clone()) {
-            stdout.set_color(ColorSpec::new().set_fg(Some(Color::Magenta)))?;
+        if seen_files.insert(m.path.as_path()) {
+            stdout.set_color(&colors.path)?;
             writeln!(stdout, "{}", m.path.display())?;
             stdout.reset()?;
         }
     }
 
-    Ok(())
+    stdout.flush()
 }
 
 /// Print match count per file (for -c flag)
 pub fn print_match_counts(matches: &[ContentMatch], color: bool) -> io::Result<()> {
-    let choice = if color {
-        ColorChoice::Auto
-    } else {
-        ColorChoice::Never
-    };
-    let mut stdout = StandardStream::stdout(choice);
+    let mut stdout = buffered_stdout(color);
+    let colors = Colors::new();
 
     let mut counts: std::collections::HashMap<&std::path::Path, usize> =
         std::collections::HashMap::new();
@@ -241,14 +274,14 @@ pub fn print_match_counts(matches: &[ContentMatch], color: bool) -> io::Result<(
     sorted.sort_by(|a, b| a.0.cmp(b.0));
 
     for (path, count) in sorted {
-        stdout.set_color(ColorSpec::new().set_fg(Some(Color::Magenta)))?;
+        stdout.set_color(&colors.path)?;
         write!(stdout, "{}", path.display())?;
         stdout.reset()?;
         write!(stdout, ":")?;
-        stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
+        stdout.set_color(&colors.line_num)?;
         writeln!(stdout, "{}", count)?;
         stdout.reset()?;
     }
 
-    Ok(())
+    stdout.flush()
 }
