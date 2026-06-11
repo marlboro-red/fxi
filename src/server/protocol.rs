@@ -187,27 +187,45 @@ pub struct StatusResponse {
     pub server_version: String,
 }
 
+/// Serialization envelope that appends an optional `request_id` field to a
+/// message without an intermediate `serde_json::Value` round-trip. The
+/// flattened message must serialize as a JSON object (all Request/Response
+/// variants do).
+#[derive(Serialize)]
+struct TaggedMessage<'a, T: Serialize> {
+    #[serde(flatten)]
+    msg: &'a T,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<&'a str>,
+}
+
+/// Deserialization helper that extracts only the `request_id` field, skipping
+/// everything else without building any intermediate structure.
+#[derive(Deserialize)]
+struct RequestIdOnly {
+    #[serde(default, deserialize_with = "string_or_none")]
+    request_id: Option<String>,
+}
+
+/// Tolerate a non-string `request_id` by ignoring it (matches the previous
+/// behavior of only extracting string-valued ids).
+fn string_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => Some(s),
+        _ => None,
+    })
+}
+
 /// Write a message to a stream with length prefix and an optional request_id.
 ///
-/// Serializes `msg` to a `serde_json::Value`, injects `request_id` if
-/// provided, then writes the length-prefixed JSON bytes.
+/// The message is serialized in a single pass; `request_id`, if provided, is
+/// appended as an extra field of the serialized object.
 pub fn write_message_with_id<W: Write>(
     writer: &mut W,
     msg: &impl Serialize,
     request_id: Option<&str>,
 ) -> std::io::Result<()> {
-    let mut value = serde_json::to_value(msg).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-    })?;
-
-    if let (Some(id), Some(obj)) = (request_id, value.as_object_mut()) {
-        obj.insert(
-            "request_id".to_string(),
-            serde_json::Value::String(id.to_string()),
-        );
-    }
-
-    let json = serde_json::to_vec(&value).map_err(|e| {
+    let json = serde_json::to_vec(&TaggedMessage { msg, request_id }).map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, e)
     })?;
 
@@ -221,9 +239,9 @@ pub fn write_message_with_id<W: Write>(
 
 /// Read a message from a stream with length prefix, extracting an optional request_id.
 ///
-/// Reads the length-prefixed bytes, parses as `serde_json::Value`, extracts
-/// and removes the `"request_id"` field (only if it is a JSON string),
-/// then deserializes the remaining Value as `T`.
+/// The message is deserialized directly into `T` (serde ignores the unknown
+/// `request_id` field); the id itself is recovered with a second, allocation-
+/// free skim of the buffer rather than a `serde_json::Value` round-trip.
 pub fn read_message_with_id<R: Read, T: for<'de> Deserialize<'de>>(
     reader: &mut R,
 ) -> std::io::Result<(T, Option<String>)> {
@@ -242,22 +260,13 @@ pub fn read_message_with_id<R: Read, T: for<'de> Deserialize<'de>>(
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
 
-    let mut value: serde_json::Value = serde_json::from_slice(&buf).map_err(|e| {
+    let msg: T = serde_json::from_slice(&buf).map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, e)
     })?;
 
-    // Extract request_id only if it is a string
-    let request_id = value
-        .as_object_mut()
-        .and_then(|obj| obj.remove("request_id"))
-        .and_then(|v| match v {
-            serde_json::Value::String(s) => Some(s),
-            _ => None,
-        });
-
-    let msg: T = serde_json::from_value(value).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-    })?;
+    let request_id = serde_json::from_slice::<RequestIdOnly>(&buf)
+        .map(|e| e.request_id)
+        .unwrap_or(None);
 
     Ok((msg, request_id))
 }
