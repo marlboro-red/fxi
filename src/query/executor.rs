@@ -1,4 +1,4 @@
-use crate::index::reader::IndexReader;
+use crate::index::reader::{FileContent, IndexReader};
 use crate::index::types::{DocId, Language, SearchMatch};
 use crate::query::parser::{Query, SortOrder};
 use crate::query::planner::{FilterStep, PlanStep, QueryPlan, VerificationStep};
@@ -9,7 +9,6 @@ use memmap2::Mmap;
 use rayon::prelude::*;
 use regex::Regex;
 use roaring::RoaringBitmap;
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -72,30 +71,29 @@ fn should_use_parallel(candidate_count: usize) -> bool {
 const MMAP_THRESHOLD: u64 = 4096;
 
 /// Read file content using memory mapping for large files, regular read for small files.
-/// This avoids copying file contents into memory and lets the OS handle caching.
+/// Memory-mapped content is borrowed directly (zero-copy); the OS handles caching.
 /// Returns None if the file cannot be read or contains invalid UTF-8.
 #[inline]
-fn read_file_mmap(path: &Path) -> Option<Cow<'static, str>> {
+fn read_file_mmap(path: &Path) -> Option<FileContent> {
     let file = File::open(path).ok()?;
     let metadata = file.metadata().ok()?;
     let size = metadata.len();
 
     if size == 0 {
-        return Some(Cow::Borrowed(""));
+        return Some(FileContent::Owned(String::new()));
     }
 
     if size < MMAP_THRESHOLD {
         // Small file: regular read is faster (avoids mmap syscall overhead)
         let content = fs::read_to_string(path).ok()?;
-        Some(Cow::Owned(content))
+        Some(FileContent::Owned(content))
     } else {
         // Large file: use memory mapping
         let mmap = unsafe { Mmap::map(&file).ok()? };
 
-        // Validate UTF-8 and convert to string
-        // We need to copy here because mmap lifetime is tied to the file
-        let content = std::str::from_utf8(&mmap).ok()?.to_string();
-        Some(Cow::Owned(content))
+        // Validate UTF-8 once; deref borrows the mapped pages directly
+        std::str::from_utf8(&mmap).ok()?;
+        Some(FileContent::Mapped(mmap))
     }
 }
 
@@ -309,7 +307,7 @@ impl<'a> QueryExecutor<'a> {
             let content = self
                 .reader
                 .read_file_cached(&full_path)
-                .or_else(|| read_file_mmap(&full_path).map(|c| c.into_owned().into()));
+                .or_else(|| read_file_mmap(&full_path));
 
             for (line_num, line_content, start, end) in file_matches {
                 let (ctx_before, ctx_after) = match &content {
