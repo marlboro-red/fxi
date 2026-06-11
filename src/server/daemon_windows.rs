@@ -114,6 +114,12 @@ const PIPE_BUFFER_SIZE: u32 = 65536;
 /// Maximum concurrent connection handlers
 const MAX_CONCURRENT_CONNECTIONS: u64 = 64;
 
+/// Acceptor threads, each keeping one pipe instance pending in
+/// ConnectNamedPipe. With a single acceptor, a client that connects between
+/// ConnectNamedPipe returning and the next CreateNamedPipeW call gets
+/// ERROR_PIPE_BUSY and falls back to a cold search.
+const ACCEPT_THREADS: usize = 4;
+
 
 /// A Send-safe wrapper for a Windows HANDLE
 #[derive(Clone, Copy)]
@@ -419,15 +425,46 @@ impl IndexServer {
             server_for_watcher.run_watcher_processor();
         });
 
-        // Main server loop - create pipe instances and accept connections
+        // Main server loop - acceptor threads create pipe instances and
+        // accept connections. Each acceptor re-creates its pipe instance
+        // immediately after handing a connection off, so concurrent clients
+        // always find a pending instance instead of ERROR_PIPE_BUSY.
         let active_connections = Arc::new(AtomicU64::new(0));
+        let mut acceptors = Vec::with_capacity(ACCEPT_THREADS);
+        for _ in 0..ACCEPT_THREADS {
+            let server = Arc::clone(self);
+            let pipe_name = pipe_name.clone();
+            let conn_count = Arc::clone(&active_connections);
+            acceptors.push(thread::spawn(move || {
+                server.run_accept_loop(&pipe_name, &conn_count);
+            }));
+        }
+
+        for acceptor in acceptors {
+            let _ = acceptor.join();
+        }
+
+        // Stop all watchers
+        self.stop_all_watchers();
+
+        // Wait for watcher processor to finish
+        let _ = watcher_processor.join();
+
+        // Cleanup
+        let _ = fs::remove_file(&pid_path);
+
+        Ok(())
+    }
+
+    /// Accept connections on one pipe instance at a time until shutdown.
+    fn run_accept_loop(self: &Arc<Self>, pipe_name: &str, active_connections: &Arc<AtomicU64>) {
         loop {
             if self.shutdown.load(Ordering::Relaxed) {
                 break;
             }
 
             // Create a new pipe instance
-            let wide_name = to_wide_string(&pipe_name);
+            let wide_name = to_wide_string(pipe_name);
             let pipe_handle = unsafe {
                 CreateNamedPipeW(
                     wide_name.as_ptr(),
@@ -477,7 +514,7 @@ impl IndexServer {
             // Handle connection in new thread
             let server = Arc::clone(self);
             let sendable_handle = SendableHandle::from_raw(pipe_handle);
-            let conn_count = Arc::clone(&active_connections);
+            let conn_count = Arc::clone(active_connections);
             conn_count.fetch_add(1, Ordering::Relaxed);
             thread::spawn(move || {
                 let handle = PipeHandle { handle: sendable_handle };
@@ -487,17 +524,6 @@ impl IndexServer {
                 conn_count.fetch_sub(1, Ordering::Relaxed);
             });
         }
-
-        // Stop all watchers
-        self.stop_all_watchers();
-
-        // Wait for watcher processor to finish
-        let _ = watcher_processor.join();
-
-        // Cleanup
-        let _ = fs::remove_file(&pid_path);
-
-        Ok(())
     }
 
     /// Handle a single client connection.
@@ -543,6 +569,16 @@ impl IndexServer {
             // has read everything — DisconnectNamedPipe discards unread data.
             FlushFileBuffers(reader.get_ref().handle.as_raw());
             DisconnectNamedPipe(reader.get_ref().handle.as_raw());
+        }
+
+        // On shutdown, unblock the acceptor threads parked in
+        // ConnectNamedPipe with dummy connections; each wakes, sees the
+        // shutdown flag, and exits, letting run() finish cleanup.
+        if self.shutdown.load(Ordering::Relaxed) {
+            let pipe_name = crate::server::get_pipe_name();
+            for _ in 0..ACCEPT_THREADS {
+                let _ = fs::OpenOptions::new().read(true).write(true).open(&pipe_name);
+            }
         }
 
         Ok(())

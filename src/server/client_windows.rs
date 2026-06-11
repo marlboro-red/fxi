@@ -6,13 +6,29 @@ use crate::server::protocol::{
     Request, Response, StatusResponse, PROTOCOL_VERSION,
 };
 use crate::server::get_pipe_name;
+use std::ffi::OsStr;
 use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::time::Duration;
 
 /// Read/write timeout (not directly supported for file handles, but we document intent)
 const _IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// All pipe instances busy (every instance has a client or pending open)
+const ERROR_PIPE_BUSY: i32 = 231;
+
+/// How long each WaitNamedPipeW call waits for a free pipe instance
+const BUSY_WAIT_TIMEOUT_MS: u32 = 200;
+
+/// How many busy-wait-retry rounds before giving up to the cold fallback
+const BUSY_RETRIES: u32 = 5;
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn WaitNamedPipeW(lpNamedPipeName: *const u16, nTimeOut: u32) -> i32;
+}
 
 /// Result type for client operations
 pub type ClientResult<T> = Result<T, ClientError>;
@@ -106,14 +122,30 @@ impl IndexClient {
     pub fn connect() -> Option<Self> {
         let pipe_name = get_pipe_name();
 
-        // Try to connect to named pipe
-        let handle = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&pipe_name)
-        {
-            Ok(h) => h,
-            Err(_) => return None,
+        // Try to connect to named pipe. ERROR_PIPE_BUSY means the daemon is
+        // running but has no pending pipe instance right now (e.g. another
+        // client connected in the same instant) — wait for one instead of
+        // silently falling back to a ~30-70x slower cold search.
+        let mut attempts = 0;
+        let handle = loop {
+            match OpenOptions::new().read(true).write(true).open(&pipe_name) {
+                Ok(h) => break h,
+                Err(e)
+                    if e.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                        && attempts < BUSY_RETRIES =>
+                {
+                    attempts += 1;
+                    let wide: Vec<u16> = OsStr::new(&pipe_name)
+                        .encode_wide()
+                        .chain(std::iter::once(0))
+                        .collect();
+                    // Retry the open even if the wait fails or times out:
+                    // success here only means an instance was free at that
+                    // instant — another waiter can still win the race.
+                    unsafe { WaitNamedPipeW(wide.as_ptr(), BUSY_WAIT_TIMEOUT_MS) };
+                }
+                Err(_) => return None,
+            }
         };
 
         let stream = PipeStream { handle };
