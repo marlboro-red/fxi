@@ -88,7 +88,15 @@ impl QueryPlanner {
     }
 
     fn plan(&mut self, query: &Query) -> QueryPlan {
-        // Add filter step if we have any filters
+        // Plan the main query
+        let (narrowing_steps, verification) = self.plan_node(&query.root);
+        self.steps.extend(narrowing_steps);
+
+        // Add filter step if we have any filters. Filters run after the
+        // narrowing steps: per-document checks (glob matching, metadata
+        // comparisons) are far more expensive than the index lookups above,
+        // so they should only see the already-narrowed candidate set instead
+        // of scanning every document in the index.
         if query.filters.path.is_some()
             || query.filters.filename.is_some()
             || query.filters.ext.is_some()
@@ -113,10 +121,6 @@ impl QueryPlanner {
                 line_end: query.filters.line_end,
             }));
         }
-
-        // Plan the main query
-        let (narrowing_steps, verification) = self.plan_node(&query.root);
-        self.steps.extend(narrowing_steps);
 
         QueryPlan {
             steps: self.steps.drain(..).collect(),
