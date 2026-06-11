@@ -14,11 +14,23 @@ pub fn encode_varint(mut value: u32, buf: &mut Vec<u8>) {
 
 /// Decode a variable-length integer from a slice
 /// Returns (value, bytes_consumed)
+#[inline]
 pub fn decode_varint(buf: &[u8]) -> Option<(u32, usize)> {
-    let mut result: u32 = 0;
-    let mut shift = 0;
+    // Fast path: single-byte varint (the common case for posting deltas)
+    let first = *buf.first()?;
+    if first < 0x80 {
+        return Some((first as u32, 1));
+    }
 
-    for (i, &byte) in buf.iter().enumerate() {
+    decode_varint_slow(buf, first)
+}
+
+#[cold]
+fn decode_varint_slow(buf: &[u8], first: u8) -> Option<(u32, usize)> {
+    let mut result: u32 = (first & 0x7F) as u32;
+    let mut shift = 7;
+
+    for (i, &byte) in buf.iter().enumerate().skip(1) {
         if shift >= 32 {
             return None; // Overflow
         }
@@ -104,6 +116,64 @@ pub fn delta_decode(buf: &[u8]) -> Vec<u32> {
     }
 
     result
+}
+
+/// Delta-decode a posting list directly into a RoaringBitmap.
+///
+/// Decoded values are non-decreasing (deltas are unsigned), so they can be
+/// appended to the bitmap in order without materializing an intermediate
+/// Vec<u32>. Duplicate values (delta 0, possible only in corrupted data) are
+/// dropped, matching the set semantics of the previous Vec + collect path.
+pub fn delta_decode_bitmap(buf: &[u8]) -> roaring::RoaringBitmap {
+    let mut bitmap = roaring::RoaringBitmap::new();
+    let mut prev = 0u32;
+    let mut pos = 0;
+
+    while pos < buf.len() {
+        if let Some((delta, consumed)) = decode_varint(&buf[pos..]) {
+            prev = prev.saturating_add(delta);
+            let _ = bitmap.try_push(prev);
+            pos += consumed;
+        } else {
+            break;
+        }
+    }
+
+    bitmap
+}
+
+/// Delta-decode a posting list, keeping only values present in `filter`.
+///
+/// Used for posting-list intersection: instead of materializing the full
+/// bitmap for a common trigram and intersecting afterwards, values are
+/// tested against the current candidate set during decode, and decoding
+/// stops as soon as the remaining values cannot be in `filter` (all decoded
+/// values from then on exceed its maximum).
+pub fn delta_decode_intersect(buf: &[u8], filter: &roaring::RoaringBitmap) -> roaring::RoaringBitmap {
+    let mut bitmap = roaring::RoaringBitmap::new();
+    let max = match filter.max() {
+        Some(m) => m,
+        None => return bitmap,
+    };
+    let mut prev = 0u32;
+    let mut pos = 0;
+
+    while pos < buf.len() {
+        if let Some((delta, consumed)) = decode_varint(&buf[pos..]) {
+            prev = prev.saturating_add(delta);
+            if prev > max {
+                break;
+            }
+            if filter.contains(prev) {
+                let _ = bitmap.try_push(prev);
+            }
+            pos += consumed;
+        } else {
+            break;
+        }
+    }
+
+    bitmap
 }
 
 /// Write a u32 in little-endian format
@@ -235,6 +305,55 @@ mod tests {
         delta_encode(&values, &mut buf);
         let decoded = delta_decode(&buf);
         assert_eq!(values, decoded);
+    }
+
+    #[test]
+    fn test_delta_decode_bitmap_matches_vec_decode() {
+        let values = vec![1, 5, 10, 15, 100, 1000, 70000, 70001];
+        let mut buf = Vec::new();
+        delta_encode(&values, &mut buf);
+
+        let bitmap = delta_decode_bitmap(&buf);
+        let from_vec: roaring::RoaringBitmap = delta_decode(&buf).into_iter().collect();
+        assert_eq!(bitmap, from_vec);
+        assert_eq!(bitmap.len(), values.len() as u64);
+    }
+
+    #[test]
+    fn test_delta_decode_bitmap_empty() {
+        assert!(delta_decode_bitmap(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_delta_decode_intersect_matches_full_intersection() {
+        let values = vec![1, 5, 10, 15, 100, 1000, 70000];
+        let mut buf = Vec::new();
+        delta_encode(&values, &mut buf);
+
+        let filter: roaring::RoaringBitmap = [5u32, 15, 99, 100, 80000].into_iter().collect();
+        let intersected = delta_decode_intersect(&buf, &filter);
+        let expected: roaring::RoaringBitmap = delta_decode_bitmap(&buf) & &filter;
+        assert_eq!(intersected, expected);
+    }
+
+    #[test]
+    fn test_delta_decode_intersect_empty_filter() {
+        let values = vec![1, 2, 3];
+        let mut buf = Vec::new();
+        delta_encode(&values, &mut buf);
+        assert!(delta_decode_intersect(&buf, &roaring::RoaringBitmap::new()).is_empty());
+    }
+
+    #[test]
+    fn test_varint_multibyte_boundaries() {
+        // Exercise both the 1-byte fast path and the multi-byte slow path
+        for value in [0u32, 1, 127, 128, 129, 16383, 16384, 2097151, 2097152, u32::MAX] {
+            let mut buf = Vec::new();
+            encode_varint(value, &mut buf);
+            let (decoded, consumed) = decode_varint(&buf).unwrap();
+            assert_eq!(value, decoded);
+            assert_eq!(consumed, buf.len());
+        }
     }
 
     #[test]
