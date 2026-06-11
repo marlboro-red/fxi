@@ -169,6 +169,52 @@ fn bench_index_reading(c: &mut Criterion) {
     });
 }
 
+fn bench_protocol(c: &mut Criterion) {
+    use fxi::server::protocol::{
+        read_message_with_id, write_message_with_id, ContentMatch, ContentSearchResponse, Response,
+    };
+
+    // A realistic large content-search response: 5k matches with context lines
+    let matches: Vec<ContentMatch> = (0..5000)
+        .map(|i| ContentMatch {
+            path: PathBuf::from(format!("src/module_{}/handler.rs", i % 100)),
+            line_number: i as u32 + 1,
+            line_content: format!("    let result_{i} = process_request(&ctx, request_{i});"),
+            match_start: 8,
+            match_end: 18,
+            context_before: vec![(i as u32, format!("// context before line {i}"))],
+            context_after: vec![(i as u32 + 2, format!("// context after line {i}"))],
+        })
+        .collect();
+    let response = Response::ContentSearch(ContentSearchResponse {
+        matches,
+        duration_ms: 12.5,
+        files_with_matches: 100,
+        resolved_root: Some(PathBuf::from("/home/user/project")),
+    });
+
+    let mut encoded = Vec::new();
+    write_message_with_id(&mut encoded, &response, Some("req-1")).unwrap();
+
+    let mut group = c.benchmark_group("protocol");
+    group.bench_function("write_5k_matches", |b| {
+        let mut buf = Vec::with_capacity(encoded.len());
+        b.iter(|| {
+            buf.clear();
+            write_message_with_id(&mut buf, black_box(&response), Some("req-1")).unwrap();
+            buf.len()
+        })
+    });
+    group.bench_function("read_5k_matches", |b| {
+        b.iter(|| {
+            let mut cursor = std::io::Cursor::new(black_box(&encoded[..]));
+            let (msg, id): (Response, _) = read_message_with_id(&mut cursor).unwrap();
+            (matches!(msg, Response::ContentSearch(_)), id)
+        })
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_query_parsing,
@@ -176,6 +222,7 @@ criterion_group!(
     bench_token_extraction,
     bench_search,
     bench_index_reading,
+    bench_protocol,
 );
 
 criterion_main!(benches);
