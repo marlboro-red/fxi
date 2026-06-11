@@ -11,7 +11,7 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Trigram dictionary entry
 struct TrigramDictEntry {
@@ -231,6 +231,34 @@ const DEFAULT_FILE_CACHE_SIZE: usize = 256;
 /// Maximum file size to cache (files larger than this are not cached)
 const MAX_CACHEABLE_FILE_SIZE: usize = 512 * 1024; // 512KB
 
+/// File content backed by an owned String, a shared cache entry, or a memory
+/// map. UTF-8 is validated once at construction; `Deref<Target = str>` lets
+/// callers borrow the bytes without copying them.
+pub enum FileContent {
+    Owned(String),
+    Cached(Arc<str>),
+    Mapped(Mmap),
+}
+
+impl std::ops::Deref for FileContent {
+    type Target = str;
+
+    #[inline]
+    fn deref(&self) -> &str {
+        match self {
+            FileContent::Owned(s) => s,
+            FileContent::Cached(s) => s,
+            // SAFETY: validated as UTF-8 when the map was created (see
+            // read_file_mmap in the query executor), and the map is never
+            // written through. If another process rewrites the file while it
+            // is mapped the content may change underneath us — the same race
+            // existed when the map was copied into a String, just with a
+            // shorter window.
+            FileContent::Mapped(m) => unsafe { std::str::from_utf8_unchecked(m) },
+        }
+    }
+}
+
 /// Memory-mapped index reader for fast queries
 pub struct IndexReader {
     root_path: PathBuf,
@@ -246,7 +274,7 @@ pub struct IndexReader {
     /// O(1) stop-gram lookup (converted from Vec on load)
     stop_grams: AHashSet<Trigram>,
     /// LRU cache for file contents (speeds up repeated queries on same files)
-    file_cache: Mutex<LruCache<PathBuf, String>>,
+    file_cache: Mutex<LruCache<PathBuf, Arc<str>>>,
 }
 
 impl IndexReader {
@@ -640,13 +668,16 @@ impl IndexReader {
 
     /// Read file content with LRU caching.
     /// This speeds up repeated queries that access the same files.
+    /// The cache stores Arc<str>, so a hit is a refcount bump rather than a
+    /// copy of the file content; files too large to cache are returned as
+    /// plain Strings without the Arc conversion copy.
     /// Returns None if the file cannot be read.
-    pub fn read_file_cached(&self, path: &Path) -> Option<String> {
+    pub fn read_file_cached(&self, path: &Path) -> Option<FileContent> {
         // Check cache first
         {
             let mut cache = self.file_cache.lock().ok()?;
             if let Some(content) = cache.get(path) {
-                return Some(content.clone());
+                return Some(FileContent::Cached(Arc::clone(content)));
             }
         }
 
@@ -654,13 +685,15 @@ impl IndexReader {
         let content = std::fs::read_to_string(path).ok()?;
 
         // Only cache if file is small enough
-        if content.len() <= MAX_CACHEABLE_FILE_SIZE
-            && let Ok(mut cache) = self.file_cache.lock()
-        {
-            cache.put(path.to_path_buf(), content.clone());
+        if content.len() <= MAX_CACHEABLE_FILE_SIZE {
+            let content: Arc<str> = content.into();
+            if let Ok(mut cache) = self.file_cache.lock() {
+                cache.put(path.to_path_buf(), Arc::clone(&content));
+            }
+            Some(FileContent::Cached(content))
+        } else {
+            Some(FileContent::Owned(content))
         }
-
-        Some(content)
     }
 
     /// Read file content without caching (for parallel access).
@@ -1159,7 +1192,11 @@ mod tests {
         // Second read (should come from cache)
         let content2 = reader.read_file_cached(&test_file_path);
         assert!(content2.is_some(), "Should read file from cache");
-        assert_eq!(content1, content2, "Cached content should match");
+        assert_eq!(
+            &*content1.unwrap(),
+            &*content2.unwrap(),
+            "Cached content should match"
+        );
     }
 
     #[test]
