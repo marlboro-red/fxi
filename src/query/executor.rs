@@ -251,14 +251,17 @@ impl<'a> QueryExecutor<'a> {
         if !search_terms_lower.is_empty() {
             let filename_matches = self.find_filename_matches(&search_terms_lower, limit)?;
 
-            // Merge filename matches, avoiding duplicates
-            let existing_paths: std::collections::HashSet<PathBuf> =
-                results.iter().map(|m| m.path.clone()).collect();
-            for m in filename_matches {
-                if !existing_paths.contains(&m.path) {
-                    results.push(m);
-                }
-            }
+            // Merge filename matches, avoiding duplicates (dedup by borrowed
+            // path — no PathBuf clones)
+            let to_add: Vec<SearchMatch> = {
+                let existing_paths: std::collections::HashSet<&Path> =
+                    results.iter().map(|m| m.path.as_path()).collect();
+                filename_matches
+                    .into_iter()
+                    .filter(|m| !existing_paths.contains(m.path.as_path()))
+                    .collect()
+            };
+            results.extend(to_add);
         }
 
         // Sort results
@@ -677,7 +680,7 @@ impl<'a> QueryExecutor<'a> {
         }
 
         // If no narrowing steps, start with all valid documents
-        Ok(candidates.unwrap_or_else(|| self.reader.valid_doc_ids()))
+        Ok(candidates.unwrap_or_else(|| self.reader.valid_doc_ids().clone()))
     }
 
     /// Verify which of the candidate docs actually contain the excluded term.
@@ -848,14 +851,38 @@ impl<'a> QueryExecutor<'a> {
         Ok(result)
     }
 
+    /// Case-insensitive substring check for short ASCII haystacks (filenames)
+    /// that avoids allocating a lowercased copy per call.
+    #[inline]
+    fn contains_ignore_ascii_case(haystack: &str, needle_lower: &str) -> bool {
+        let h = haystack.as_bytes();
+        let n = needle_lower.as_bytes();
+        if n.is_empty() {
+            return true;
+        }
+        if h.len() < n.len() {
+            return false;
+        }
+        h.windows(n.len())
+            .any(|w| w.iter().zip(n).all(|(&a, &b)| a.to_ascii_lowercase() == b))
+    }
+
     /// Check if filename contains any search term (all terms must already be lowercase).
+    /// This runs once per document in the index on scored searches, so the
+    /// ASCII path must not allocate.
     #[inline]
     fn filename_matches_terms(path: &Path, terms_lower: &[String]) -> bool {
         path.file_name()
             .and_then(|n| n.to_str())
             .map(|filename| {
-                let filename_lower = filename.to_lowercase();
-                terms_lower.iter().any(|term| filename_lower.contains(term))
+                if filename.is_ascii() {
+                    terms_lower
+                        .iter()
+                        .any(|term| Self::contains_ignore_ascii_case(filename, term))
+                } else {
+                    let filename_lower = filename.to_lowercase();
+                    terms_lower.iter().any(|term| filename_lower.contains(term))
+                }
             })
             .unwrap_or(false)
     }

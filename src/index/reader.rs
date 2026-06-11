@@ -291,6 +291,9 @@ pub struct IndexReader {
     stop_grams: AHashSet<Trigram>,
     /// LRU cache for file contents (speeds up repeated queries on same files)
     file_cache: Mutex<LruCache<PathBuf, Arc<str>>>,
+    /// Lazily-built bitmap of valid doc IDs. Safe to cache: documents are
+    /// immutable after open (index updates swap in a whole new reader).
+    valid_docs_cache: OnceLock<RoaringBitmap>,
 }
 
 impl IndexReader {
@@ -385,6 +388,7 @@ impl IndexReader {
             segments,
             stop_grams,
             file_cache,
+            valid_docs_cache: OnceLock::new(),
         })
     }
 
@@ -522,7 +526,7 @@ impl IndexReader {
     /// set sizes and reduces overall work.
     pub fn get_trigram_docs_with_bloom(&self, trigrams: &[Trigram]) -> RoaringBitmap {
         if trigrams.is_empty() {
-            return self.valid_doc_ids();
+            return self.valid_doc_ids().clone();
         }
 
         if self.segments.len() <= 1 {
@@ -668,13 +672,17 @@ impl IndexReader {
         Some(result)
     }
 
-    /// Get all valid (non-stale, non-tombstone) doc IDs as a RoaringBitmap
-    pub fn valid_doc_ids(&self) -> RoaringBitmap {
-        self.documents
-            .iter()
-            .filter(|d| d.is_valid())
-            .map(|d| d.doc_id)
-            .collect()
+    /// Get all valid (non-stale, non-tombstone) doc IDs as a RoaringBitmap.
+    /// Built once per reader and cached; callers needing ownership clone the
+    /// bitmap, which is far cheaper than rescanning every document.
+    pub fn valid_doc_ids(&self) -> &RoaringBitmap {
+        self.valid_docs_cache.get_or_init(|| {
+            self.documents
+                .iter()
+                .filter(|d| d.is_valid())
+                .map(|d| d.doc_id)
+                .collect()
+        })
     }
 
     /// Get the root path
