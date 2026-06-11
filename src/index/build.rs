@@ -2,7 +2,7 @@ use crate::index::reader::IndexReader;
 use crate::index::types::{DocFlags, IndexConfig, IndexMeta, Language, SegmentId};
 use crate::index::writer::ChunkedIndexWriter;
 use crate::utils::{
-    extract_tokens, extract_tokens_with_positions, extract_trigrams, find_codebase_root,
+    extract_tokens_and_positions, extract_trigrams, find_codebase_root,
     get_index_dir, is_binary, is_minified, remove_index,
 };
 use anyhow::{Context, Result};
@@ -76,12 +76,10 @@ fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option
     // Extract trigrams using optimized bitset-based extraction
     let trigrams: Vec<u32> = extract_trigrams(content);
 
-    // Extract tokens and token positions
+    // Extract tokens and token positions in a single scan of the content
     let (tokens, token_positions): (Vec<String>, Vec<(String, u32)>) =
         if let Ok(text) = std::str::from_utf8(content) {
-            let tok = extract_tokens(text).into_iter().collect();
-            let tok_pos = extract_tokens_with_positions(text);
-            (tok, tok_pos)
+            extract_tokens_and_positions(text)
         } else {
             (Vec::new(), Vec::new())
         };
@@ -100,6 +98,25 @@ fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option
         line_offsets,
         token_positions,
     })
+}
+
+/// File bytes backed by either a memory map (borrowed zero-copy) or an
+/// owned buffer. Extraction only needs `&[u8]`.
+enum FileBytes {
+    Mapped(Mmap),
+    Owned(Vec<u8>),
+}
+
+impl std::ops::Deref for FileBytes {
+    type Target = [u8];
+
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        match self {
+            FileBytes::Mapped(m) => m,
+            FileBytes::Owned(v) => v,
+        }
+    }
 }
 
 /// Build line offset map from content using fast memchr search
@@ -314,12 +331,13 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
                     return None;
                 }
 
-                // Use mmap for larger files, fall back to read for small files
-                let content: Vec<u8> = if file_size > 4096 {
+                // Use mmap for larger files (borrowed zero-copy — extraction
+                // only needs &[u8]), fall back to read for small files
+                let content: FileBytes = if file_size > 4096 {
                     match unsafe { Mmap::map(&file) } {
-                        Ok(mmap) => mmap.to_vec(),
+                        Ok(mmap) => FileBytes::Mapped(mmap),
                         Err(_) => match fs::read(full_path) {
-                            Ok(c) => c,
+                            Ok(c) => FileBytes::Owned(c),
                             Err(_) => {
                                 error_count_clone.fetch_add(1, Ordering::Relaxed);
                                 if let Some(ref pb) = pb_clone {
@@ -331,7 +349,7 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
                     }
                 } else {
                     match fs::read(full_path) {
-                        Ok(c) => c,
+                        Ok(c) => FileBytes::Owned(c),
                         Err(_) => {
                             error_count_clone.fetch_add(1, Ordering::Relaxed);
                             if let Some(ref pb) = pb_clone {
