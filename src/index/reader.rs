@@ -206,9 +206,16 @@ impl SegmentReader {
         RoaringBitmap::new()
     }
 
-    /// Get position postings for a token: Vec<(doc_id, positions)>
+    /// Get position postings for a token: Vec<(doc_id, positions)>.
+    /// When `filter` is provided, only candidate docs are decoded — other
+    /// docs' position data is skipped byte-wise, and decoding stops once doc
+    /// ids exceed the filter's maximum.
     /// Returns None if no position data is available for this segment.
-    fn get_token_positions(&self, token: &str) -> Option<Vec<(u32, Vec<u32>)>> {
+    fn get_token_positions(
+        &self,
+        token: &str,
+        filter: Option<&RoaringBitmap>,
+    ) -> Option<Vec<(u32, Vec<u32>)>> {
         let positions_mmap = self.token_positions.as_ref()?;
         let entry = self.token_dict.lookup(token)?;
         if entry.pos_length == 0 {
@@ -219,7 +226,11 @@ impl SegmentReader {
         if end > positions_mmap.len() {
             return None;
         }
-        Some(crate::utils::decode_position_postings(&positions_mmap[start..end]))
+        let bytes = &positions_mmap[start..end];
+        Some(match filter {
+            Some(f) => crate::utils::decode_position_postings_filtered(bytes, f),
+            None => crate::utils::decode_position_postings(bytes),
+        })
     }
 
     /// Get line map for a document in this segment (lazy loads on first access)
@@ -587,11 +598,15 @@ impl IndexReader {
 
     /// Resolve a phrase query positionally: check if phrase tokens appear in
     /// adjacent positions across the index.
+    /// When `candidates` is provided (the trigram-narrowed set), only those
+    /// docs' positions are decoded — a phrase containing a common token no
+    /// longer decodes that token's entire position posting list.
     /// Returns None if any segment lacks position data (graceful fallback).
     /// Returns Some(bitmap) of doc_ids where the phrase appears.
     pub fn resolve_phrase_positional(
         &self,
         phrase_tokens: &[(String, u32)],
+        candidates: Option<&RoaringBitmap>,
     ) -> Option<RoaringBitmap> {
         if phrase_tokens.len() < 2 {
             return None;
@@ -602,18 +617,44 @@ impl IndexReader {
             return None;
         }
 
+        // Lowercase tokens once, not once per segment
+        let tokens_lower: Vec<String> = phrase_tokens
+            .iter()
+            .map(|(t, _)| t.to_lowercase())
+            .collect();
+
+        let result = self
+            .segments
+            .par_iter()
+            .map(|segment| self.resolve_phrase_in_segment(segment, phrase_tokens, &tokens_lower, candidates))
+            .reduce(RoaringBitmap::new, |mut a, b| {
+                a |= b;
+                a
+            });
+
+        Some(result)
+    }
+
+    /// Resolve a phrase within one segment (see resolve_phrase_positional).
+    fn resolve_phrase_in_segment(
+        &self,
+        segment: &SegmentReader,
+        phrase_tokens: &[(String, u32)],
+        tokens_lower: &[String],
+        candidates: Option<&RoaringBitmap>,
+    ) -> RoaringBitmap {
         let mut result = RoaringBitmap::new();
 
-        for segment in &self.segments {
+        {
             // Load positions for each phrase token in this segment
             let mut all_positions: Vec<Option<Vec<(u32, Vec<u32>)>>> = Vec::new();
-            for (token, _) in phrase_tokens {
-                all_positions.push(segment.get_token_positions(&token.to_lowercase()));
+            for token_lower in tokens_lower {
+                all_positions.push(segment.get_token_positions(token_lower, candidates));
             }
 
             // If any token has no positions in this segment, skip it
             if all_positions.iter().any(|p| p.is_none()) {
-                continue;
+                return result;
             }
 
             let positions: Vec<Vec<(u32, Vec<u32>)>> = all_positions
@@ -669,7 +710,7 @@ impl IndexReader {
             }
         }
 
-        Some(result)
+        result
     }
 
     /// Get all valid (non-stale, non-tombstone) doc IDs as a RoaringBitmap.

@@ -283,6 +283,73 @@ pub fn decode_position_postings(buf: &[u8]) -> Vec<(u32, Vec<u32>)> {
     result
 }
 
+/// Decode position postings, keeping only docs present in `filter`.
+///
+/// Non-candidate docs' position lists are skipped byte-wise without being
+/// decoded or allocated, and decoding stops entirely once doc ids exceed the
+/// filter's maximum. Equivalent to decode_position_postings followed by
+/// retaining filtered docs.
+pub fn decode_position_postings_filtered(
+    buf: &[u8],
+    filter: &roaring::RoaringBitmap,
+) -> Vec<(u32, Vec<u32>)> {
+    let mut result = Vec::new();
+    let max = match filter.max() {
+        Some(m) => m,
+        None => return result,
+    };
+    let mut pos = 0;
+    let mut prev_doc_id = 0u32;
+
+    while pos < buf.len() {
+        // Decode doc_id delta
+        let (delta, consumed) = match decode_varint(&buf[pos..]) {
+            Some(v) => v,
+            None => break,
+        };
+        pos += consumed;
+        prev_doc_id = prev_doc_id.saturating_add(delta);
+
+        // Decode position count
+        let (count, consumed) = match decode_varint(&buf[pos..]) {
+            Some(v) => v,
+            None => break,
+        };
+        pos += consumed;
+
+        if prev_doc_id > max {
+            // Doc ids are ascending: nothing further can be in the filter
+            break;
+        }
+
+        if filter.contains(prev_doc_id) {
+            let mut positions = Vec::with_capacity(count as usize);
+            let mut prev_pos = 0u32;
+            for _ in 0..count {
+                let (pos_delta, consumed) = match decode_varint(&buf[pos..]) {
+                    Some(v) => v,
+                    None => break,
+                };
+                pos += consumed;
+                prev_pos = prev_pos.saturating_add(pos_delta);
+                positions.push(prev_pos);
+            }
+            result.push((prev_doc_id, positions));
+        } else {
+            // Skip `count` varints byte-wise without decoding values
+            let mut remaining = count;
+            while remaining > 0 && pos < buf.len() {
+                if buf[pos] < 0x80 {
+                    remaining -= 1;
+                }
+                pos += 1;
+            }
+        }
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +421,46 @@ mod tests {
             assert_eq!(value, decoded);
             assert_eq!(consumed, buf.len());
         }
+    }
+
+    #[test]
+    fn test_decode_position_postings_filtered_matches_full() {
+        let data: Vec<(u32, &[u32])> = vec![
+            (1, &[0, 3, 7]),
+            (5, &[2, 10]),
+            (100, &[0, 1]),
+            (70000, &[42]),
+        ];
+        let mut buf = Vec::new();
+        encode_position_postings(&data, &mut buf);
+
+        let filter: roaring::RoaringBitmap = [5u32, 100, 99999].into_iter().collect();
+        let filtered = decode_position_postings_filtered(&buf, &filter);
+        let expected: Vec<(u32, Vec<u32>)> = decode_position_postings(&buf)
+            .into_iter()
+            .filter(|(d, _)| filter.contains(*d))
+            .collect();
+        assert_eq!(filtered, expected);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn test_decode_position_postings_filtered_early_exit_and_empty() {
+        let data: Vec<(u32, &[u32])> = vec![(10, &[1, 2]), (20, &[3])];
+        let mut buf = Vec::new();
+        encode_position_postings(&data, &mut buf);
+
+        // Filter max below all doc ids -> empty
+        let low: roaring::RoaringBitmap = [3u32].into_iter().collect();
+        assert!(decode_position_postings_filtered(&buf, &low).is_empty());
+
+        // Empty filter -> empty
+        assert!(decode_position_postings_filtered(&buf, &roaring::RoaringBitmap::new()).is_empty());
+
+        // Filter containing only the first doc still decodes it correctly
+        let first: roaring::RoaringBitmap = [10u32].into_iter().collect();
+        let r = decode_position_postings_filtered(&buf, &first);
+        assert_eq!(r, vec![(10, vec![1, 2])]);
     }
 
     #[test]
