@@ -554,7 +554,7 @@ impl<'a> QueryExecutor<'a> {
     /// Execute the narrowing phase using RoaringBitmap for efficient set operations
     fn execute_plan(&self, plan: &QueryPlan) -> Result<RoaringBitmap> {
         let mut candidates: Option<RoaringBitmap> = None;
-        let mut exclude_set = RoaringBitmap::new();
+        let mut exclude_plans: Vec<&QueryPlan> = Vec::new();
 
         for step in &plan.steps {
             match step {
@@ -621,30 +621,10 @@ impl<'a> QueryExecutor<'a> {
                 }
 
                 PlanStep::Exclude(sub_plan) => {
-                    let excluded = self.execute_plan(sub_plan)?;
-                    // Verify excluded candidates to avoid trigram false positives.
-                    // Without verification, files that share trigrams with the
-                    // negated term (but don't actually contain it) get incorrectly excluded.
-                    if let Some(ref verification) = sub_plan.verification {
-                        for doc_id in excluded.iter() {
-                            if let Some(doc) = self.reader.get_document(doc_id)
-                                && let Some(full_path) = self.reader.get_full_path(doc)
-                            {
-                                let content = match self.reader.read_file_cached(&full_path) {
-                                    Some(c) => c,
-                                    None => continue,
-                                };
-                                let matches =
-                                    Self::verify_content_static(&content, verification, doc_id);
-                                if !matches.is_empty() {
-                                    exclude_set.insert(doc_id);
-                                }
-                            }
-                        }
-                    } else {
-                        // No verification available, fall back to trigram-only exclusion
-                        exclude_set |= excluded;
-                    }
+                    // Deferred: exclusion is resolved after all narrowing steps,
+                    // so its (expensive) content verification only runs against
+                    // docs that are actually in the final candidate set.
+                    exclude_plans.push(sub_plan);
                 }
 
                 PlanStep::PositionalPhrase(phrase_tokens) => {
@@ -674,13 +654,68 @@ impl<'a> QueryExecutor<'a> {
             }
         }
 
-        // Remove excluded documents using bitmap difference
+        // Resolve exclusions against the narrowed candidate set. Only docs
+        // that are both candidates and trigram matches for the negated term
+        // need content verification (to avoid trigram false positives) —
+        // not every doc that merely shares trigrams with the negated term.
         if let Some(ref mut cands) = candidates {
-            *cands -= exclude_set;
+            for sub_plan in exclude_plans {
+                if cands.is_empty() {
+                    break;
+                }
+                let excluded = self.execute_plan(sub_plan)?;
+
+                if let Some(ref verification) = sub_plan.verification {
+                    let to_check = excluded & &*cands;
+                    let confirmed = self.verify_excluded_docs(to_check, verification);
+                    *cands -= confirmed;
+                } else {
+                    // No verification available, fall back to trigram-only exclusion
+                    *cands -= excluded;
+                }
+            }
         }
 
         // If no narrowing steps, start with all valid documents
         Ok(candidates.unwrap_or_else(|| self.reader.valid_doc_ids()))
+    }
+
+    /// Verify which of the candidate docs actually contain the excluded term.
+    /// Uses early-exit matching (any match disqualifies) and goes parallel for
+    /// larger sets.
+    fn verify_excluded_docs(
+        &self,
+        to_check: RoaringBitmap,
+        verification: &VerificationStep,
+    ) -> RoaringBitmap {
+        if !should_use_parallel(to_check.len() as usize) {
+            let mut confirmed = RoaringBitmap::new();
+            for doc_id in to_check.iter() {
+                if let Some(doc) = self.reader.get_document(doc_id)
+                    && let Some(full_path) = self.reader.get_full_path(doc)
+                    && let Some(content) = self.reader.read_file_cached(&full_path)
+                    && Self::has_match(&content, verification)
+                {
+                    confirmed.insert(doc_id);
+                }
+            }
+            confirmed
+        } else {
+            let doc_ids: Vec<u32> = to_check.iter().collect();
+            doc_ids
+                .into_par_iter()
+                .filter(|&doc_id| {
+                    self.reader
+                        .get_document(doc_id)
+                        .and_then(|doc| self.reader.get_full_path(doc))
+                        .and_then(|full_path| read_file_mmap(&full_path))
+                        .map(|content| Self::has_match(&content, verification))
+                        .unwrap_or(false)
+                })
+                .collect::<Vec<u32>>()
+                .into_iter()
+                .collect()
+        }
     }
 
     /// Apply document filters using RoaringBitmap
