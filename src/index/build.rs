@@ -510,8 +510,8 @@ struct IndexDiff {
     new_files: Vec<(PathBuf, PathBuf)>, // (full_path, rel_path)
     /// Modified files (mtime changed)
     modified_files: Vec<(PathBuf, PathBuf, u32)>, // (full_path, rel_path, old_doc_id)
-    /// Deleted files (doc_ids to mark as tombstones)
-    deleted_doc_ids: Vec<u32>,
+    /// Deleted files (relative paths, to mark as tombstones)
+    deleted_files: Vec<PathBuf>,
     /// Total files currently in index
     indexed_count: usize,
 }
@@ -551,7 +551,7 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
     // Compute diff with filesystem
     let diff = compute_index_diff(&root, &indexed_files)?;
 
-    let total_changes = diff.new_files.len() + diff.modified_files.len() + diff.deleted_doc_ids.len();
+    let total_changes = diff.new_files.len() + diff.modified_files.len() + diff.deleted_files.len();
 
     if total_changes == 0 {
         println!("Index is up to date, no changes detected.");
@@ -570,7 +570,7 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
         total_changes,
         diff.new_files.len(),
         diff.modified_files.len(),
-        diff.deleted_doc_ids.len(),
+        diff.deleted_files.len(),
         change_percent as f64
     );
 
@@ -583,7 +583,7 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
 
     // Perform incremental update
     println!("Performing incremental update...");
-    perform_incremental_update(&root, &index_path, &meta, diff)?;
+    perform_incremental_update(&root, &meta, diff)?;
 
     Ok(true)
 }
@@ -653,34 +653,127 @@ fn compute_index_diff(root: &Path, indexed_files: &HashMap<PathBuf, (u32, u64)>)
     }
 
     // Find deleted files
-    let deleted_doc_ids: Vec<u32> = indexed_files
-        .iter()
-        .filter(|(path, _)| !seen_paths.contains(*path))
-        .map(|(_, (doc_id, _))| *doc_id)
+    let deleted_files: Vec<PathBuf> = indexed_files
+        .keys()
+        .filter(|path| !seen_paths.contains(*path))
+        .cloned()
         .collect();
 
     Ok(IndexDiff {
         new_files,
         modified_files,
-        deleted_doc_ids,
+        deleted_files,
         indexed_count: indexed_files.len(),
     })
 }
 
-/// Perform incremental update
-/// For now, this does a targeted rebuild which is simpler than true delta segments
-/// The main optimization is change detection - skipping rebuild when nothing changed
-fn perform_incremental_update(
-    root: &Path,
-    _index_path: &Path,
-    _meta: &IndexMeta,
-    _diff: IndexDiff,
-) -> Result<()> {
-    // For small changes, a full rebuild is fast enough and simpler than delta segments
-    // The key optimization is the change detection that happens before this function
-    // which allows us to skip rebuilding entirely when the index is up-to-date
-    println!("Rebuilding index with changes...");
-    build_index(root, true)
+/// Read and process a single file for an incremental update.
+/// Returns None for binary, empty, oversized or unreadable files.
+fn process_file_for_update(
+    full_path: &Path,
+    rel_path: &Path,
+    max_file_size: u64,
+) -> Option<ProcessedFile> {
+    let ext = rel_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if is_known_binary_ext(ext) {
+        return None;
+    }
+
+    let metadata = fs::metadata(full_path).ok()?;
+    if metadata.len() == 0 || metadata.len() > max_file_size {
+        return None;
+    }
+
+    // Seconds, matching the full-build path (compute_index_diff compares
+    // against this for change detection)
+    let mtime = metadata
+        .modified()
+        .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
+        .unwrap_or(0);
+
+    let content = fs::read(full_path).ok()?;
+    process_file_content(rel_path.to_path_buf(), &content, mtime)
+}
+
+/// Perform incremental update by writing the diff as a delta segment:
+/// deleted and modified files are tombstoned, new and modified files are
+/// indexed into a new segment, and the index metadata is committed
+/// atomically. This is the same mechanism the daemon's file watcher uses.
+fn perform_incremental_update(root: &Path, meta: &IndexMeta, diff: IndexDiff) -> Result<()> {
+    use crate::index::writer::DeltaSegmentWriter;
+
+    let config = IndexConfig::default();
+    let mut meta = meta.clone();
+
+    // Next segment id after base + existing deltas
+    let next_segment_id = meta
+        .delta_segments
+        .iter()
+        .max()
+        .copied()
+        .unwrap_or(meta.base_segment.unwrap_or(0))
+        + 1;
+
+    let mut writer = DeltaSegmentWriter::new(root, next_segment_id)?;
+
+    // Tombstone deleted and modified files (a modified file gets a fresh
+    // doc entry in the delta segment; its old entry must die)
+    for rel_path in &diff.deleted_files {
+        writer.mark_tombstone(rel_path);
+    }
+    for (_, rel_path, _) in &diff.modified_files {
+        writer.mark_tombstone(rel_path);
+    }
+
+    // Index new and modified files (in parallel - extraction is the
+    // expensive part; add_file itself is cheap)
+    let to_index: Vec<(&PathBuf, &PathBuf)> = diff
+        .new_files
+        .iter()
+        .map(|(full, rel)| (full, rel))
+        .chain(diff.modified_files.iter().map(|(full, rel, _)| (full, rel)))
+        .collect();
+
+    let processed: Vec<ProcessedFile> = to_index
+        .par_iter()
+        .filter_map(|(full, rel)| process_file_for_update(full, rel, config.max_file_size))
+        .collect();
+
+    let added_count = processed.len();
+    for file in processed {
+        writer.add_file(file);
+    }
+
+    if !writer.has_changes() {
+        println!("No indexable changes to apply.");
+        return Ok(());
+    }
+
+    // Commits segment -> docs.bin -> paths.bin -> meta.json atomically
+    writer.finalize(&mut meta)?;
+    println!(
+        "Wrote delta segment seg_{:04}: {} files indexed, {} tombstones",
+        next_segment_id,
+        added_count,
+        diff.deleted_files.len() + diff.modified_files.len()
+    );
+
+    // Compact when fragmentation builds up (same policy as the daemon)
+    let tombstone_ratio = if meta.doc_count > 0 {
+        meta.tombstone_count as f32 / meta.doc_count as f32
+    } else {
+        0.0
+    };
+    let new_deltas = meta.delta_segments.len().saturating_sub(meta.delta_baseline);
+    if tombstone_ratio > 0.15 || new_deltas >= crate::server::watcher::DEFAULT_MERGE_SEGMENT_THRESHOLD {
+        println!(
+            "Index is fragmented ({} delta segments, {} tombstones), compacting...",
+            new_deltas, meta.tombstone_count
+        );
+        crate::index::compact::merge_segments(root)?;
+    }
+
+    Ok(())
 }
 
 /// Build index, detecting codebase root from current directory
