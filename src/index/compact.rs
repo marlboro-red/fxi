@@ -22,8 +22,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Result of building doc_id remapping
 struct DocIdRemapping {
-    /// Maps old doc_id -> new contiguous doc_id (only valid docs)
-    old_to_new: HashMap<DocId, DocId>,
+    /// Maps old doc_id -> new contiguous doc_id, densely indexed by old id
+    /// (doc ids start at 1; 0 = tombstoned/unknown). Probed once per posting
+    /// element during merge, so this must be an O(1) array lookup, not a hash.
+    old_to_new: Vec<DocId>,
     /// Valid documents with remapped IDs
     valid_docs: Vec<Document>,
     /// Valid paths (deduplicated)
@@ -31,6 +33,17 @@ struct DocIdRemapping {
     /// Maps old path_id -> new path_id (used during remapping)
     #[allow(dead_code)]
     path_id_remap: HashMap<PathId, PathId>,
+}
+
+impl DocIdRemapping {
+    /// Remap an old doc_id; None if tombstoned or unknown.
+    #[inline]
+    fn remap(&self, old_id: DocId) -> Option<DocId> {
+        match self.old_to_new.get(old_id as usize) {
+            Some(&new_id) if new_id != 0 => Some(new_id),
+            _ => None,
+        }
+    }
 }
 
 /// Merge all segments into a single compacted segment.
@@ -187,7 +200,8 @@ fn build_doc_id_remapping(index_path: &Path) -> Result<DocIdRemapping> {
     let documents = read_documents(index_path)?;
     let paths = read_paths(index_path)?;
 
-    let mut old_to_new: HashMap<DocId, DocId> = HashMap::new();
+    let max_doc_id = documents.iter().map(|d| d.doc_id).max().unwrap_or(0);
+    let mut old_to_new: Vec<DocId> = vec![0; max_doc_id as usize + 1];
     let mut valid_docs = Vec::new();
     let mut path_id_remap: HashMap<PathId, PathId> = HashMap::new();
     let mut valid_paths = Vec::new();
@@ -209,7 +223,7 @@ fn build_doc_id_remapping(index_path: &Path) -> Result<DocIdRemapping> {
                 }
             };
 
-            old_to_new.insert(doc.doc_id, next_doc_id);
+            old_to_new[doc.doc_id as usize] = next_doc_id;
 
             let mut new_doc = doc.clone();
             new_doc.doc_id = next_doc_id;
@@ -340,12 +354,22 @@ fn merge_trigram_segment(
 
         // Decode posting list
         if offset + length <= postings_mmap.len() {
-            let doc_ids = delta_decode(&postings_mmap[offset..offset + length]);
-
             // Remap doc_ids, filtering out tombstoned docs
-            for old_id in doc_ids {
-                if let Some(&new_id) = remapping.old_to_new.get(&old_id) {
-                    merged.entry(trigram).or_default().push(new_id);
+            let remapped: Vec<DocId> = delta_decode(&postings_mmap[offset..offset + length])
+                .into_iter()
+                .filter_map(|old_id| remapping.remap(old_id))
+                .collect();
+
+            if !remapped.is_empty() {
+                // One map lookup per posting list, not per element; the first
+                // segment to contribute a trigram moves its list in wholesale
+                match merged.entry(trigram) {
+                    std::collections::btree_map::Entry::Vacant(e) => {
+                        e.insert(remapped);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut e) => {
+                        e.get_mut().extend_from_slice(&remapped);
+                    }
                 }
             }
         }
@@ -388,10 +412,11 @@ fn merge_token_segment(
         dict_file.read_exact(&mut buf2)?;
         let token_len = u16::from_le_bytes(buf2) as usize;
 
-        // Read token
+        // Read token (moves the byte buffer when valid UTF-8 — no copy)
         let mut token_bytes = vec![0u8; token_len];
         dict_file.read_exact(&mut token_bytes)?;
-        let token = String::from_utf8_lossy(&token_bytes).to_string();
+        let token = String::from_utf8(token_bytes)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
 
         // Read offset
         dict_file.read_exact(&mut buf8)?;
@@ -412,12 +437,22 @@ fn merge_token_segment(
 
         // Decode posting list
         if offset + length <= postings_mmap.len() {
-            let doc_ids = delta_decode(&postings_mmap[offset..offset + length]);
-
             // Remap doc_ids, filtering out tombstoned docs
-            for old_id in doc_ids {
-                if let Some(&new_id) = remapping.old_to_new.get(&old_id) {
-                    merged.entry(token.clone()).or_default().push(new_id);
+            let remapped: Vec<DocId> = delta_decode(&postings_mmap[offset..offset + length])
+                .into_iter()
+                .filter_map(|old_id| remapping.remap(old_id))
+                .collect();
+
+            if !remapped.is_empty() {
+                // The token String is moved into the map once instead of
+                // cloned per posting element
+                match merged.entry(token) {
+                    std::collections::btree_map::Entry::Vacant(e) => {
+                        e.insert(remapped);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut e) => {
+                        e.get_mut().extend_from_slice(&remapped);
+                    }
                 }
             }
         }
@@ -462,7 +497,7 @@ fn merge_line_maps_segment(
         file.read_exact(&mut encoded)?;
 
         // Only keep if doc is still valid
-        if let Some(&new_doc_id) = remapping.old_to_new.get(&old_doc_id) {
+        if let Some(new_doc_id) = remapping.remap(old_doc_id) {
             let offsets = delta_decode(&encoded);
             merged.insert(new_doc_id, offsets);
         }
@@ -535,7 +570,7 @@ fn merge_token_positions_segment(
         // Remap doc_ids and merge
         let token_entry = merged.entry(token).or_default();
         for (old_doc_id, positions) in doc_positions {
-            if let Some(&new_doc_id) = remapping.old_to_new.get(&old_doc_id) {
+            if let Some(new_doc_id) = remapping.remap(old_doc_id) {
                 token_entry
                     .entry(new_doc_id)
                     .or_default()
