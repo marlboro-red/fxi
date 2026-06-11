@@ -186,12 +186,12 @@ impl Write for PipeHandle {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let ok = unsafe { FlushFileBuffers(self.handle.as_raw()) };
-        if ok == 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
+        // No-op: WriteFile on a named pipe already delivers the data, and
+        // FlushFileBuffers here would block until the client reads — a full
+        // sync round-trip per response. The only place a real flush is needed
+        // is connection teardown, before DisconnectNamedPipe, which calls
+        // FlushFileBuffers directly.
+        Ok(())
     }
 }
 
@@ -220,12 +220,8 @@ impl Write for PipeWriter {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let ok = unsafe { FlushFileBuffers(self.0.as_raw()) };
-        if ok == 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
+        // No-op for the same reason as PipeHandle::flush — see above.
+        Ok(())
     }
 }
 
@@ -542,6 +538,10 @@ impl IndexServer {
         }
 
         unsafe {
+            // Pipe writes haven't been synchronized with the client (the
+            // writers' flush() is a no-op), so block here until the client
+            // has read everything — DisconnectNamedPipe discards unread data.
+            FlushFileBuffers(reader.get_ref().handle.as_raw());
             DisconnectNamedPipe(reader.get_ref().handle.as_raw());
         }
 
