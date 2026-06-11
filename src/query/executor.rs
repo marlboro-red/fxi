@@ -468,15 +468,8 @@ impl<'a> QueryExecutor<'a> {
             VerificationStep::Or(steps) => steps.iter().any(|step| Self::has_match(content, step)),
             VerificationStep::Not(inner) => !Self::has_match(content, inner),
             VerificationStep::Near { terms, distance } => {
-                // Simplified check for proximity - just verify all terms exist
-                let content_lower = content.to_lowercase();
-                let terms_exist = terms
-                    .iter()
-                    .all(|t| content_lower.contains(&t.to_lowercase()));
-                if !terms_exist {
-                    return false;
-                }
-                // Full proximity check (reuse existing logic)
+                // find_proximity_matches_static early-exits as soon as any
+                // term is missing, so no separate existence pre-check needed
                 !Self::find_proximity_matches_static(content, terms, *distance, 0).is_empty()
             }
         }
@@ -490,16 +483,22 @@ impl<'a> QueryExecutor<'a> {
         let needle_lower = text.to_lowercase();
         let finder = memmem::Finder::new(needle_lower.as_bytes());
 
+        if content.is_ascii()
+            && text.is_ascii()
+            && !needle_lower.contains('\n')
+            && !needle_lower.contains('\r')
+        {
+            // Lowercase once and run a single SIMD search over the whole
+            // content instead of allocating a lowercased String per line
+            return finder
+                .find(content.to_ascii_lowercase().as_bytes())
+                .is_some();
+        }
+
         for line in content.lines() {
-            if line.is_ascii() && text.is_ascii() {
-                if line.to_ascii_lowercase().contains(&needle_lower) {
-                    return true;
-                }
-            } else {
-                let line_lower = line.to_lowercase();
-                if finder.find(line_lower.as_bytes()).is_some() {
-                    return true;
-                }
+            let line_lower = line.to_lowercase();
+            if finder.find(line_lower.as_bytes()).is_some() {
+                return true;
             }
         }
 
@@ -1152,9 +1151,11 @@ impl<'a> QueryExecutor<'a> {
 
     /// Find proximity matches: all terms must appear within distance lines of each other (static)
     ///
-    /// OPTIMIZATION: Uses lazy lowercasing - only lowercases lines that might contain
-    /// search terms. First pass uses fast byte search to identify candidate lines,
-    /// then only those lines are lowercased for precise matching.
+    /// OPTIMIZATION: Lowercases the content once, then locates each term with a
+    /// single SIMD substring search over the whole haystack. Match offsets are
+    /// mapped to line numbers via precomputed line starts; newlines are
+    /// unaffected by lowercasing, so line numbers computed on the lowered copy
+    /// are valid for the original content.
     fn find_proximity_matches_static(
         content: &str,
         terms: &[String],
@@ -1170,49 +1171,48 @@ impl<'a> QueryExecutor<'a> {
         // Pre-lowercase all terms once
         let terms_lower: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
 
-        // Create finders for fast byte-level search
-        let finders: Vec<memmem::Finder> = terms_lower
-            .iter()
-            .map(|t| memmem::Finder::new(t.as_bytes()))
-            .collect();
+        // A term containing a line break can never match within a single line
+        if terms_lower.iter().any(|t| t.contains('\n') || t.contains('\r')) {
+            return Vec::new();
+        }
 
-        // Collect lines as references (no allocation)
-        let lines: Vec<&str> = content.lines().collect();
+        let content_lower = if content.is_ascii() {
+            content.to_ascii_lowercase()
+        } else {
+            content.to_lowercase()
+        };
+        let lower_bytes = content_lower.as_bytes();
 
-        // For each term, collect line numbers where it appears
-        // OPTIMIZATION: Only lowercase lines that pass the fast byte-level check
+        // Line start offsets in the lowered content (for offset → line mapping)
+        let mut line_starts: Vec<usize> = Vec::with_capacity(256);
+        line_starts.push(0);
+        for nl in memchr::memchr_iter(b'\n', lower_bytes) {
+            line_starts.push(nl + 1);
+        }
+
+        // For each term, the sorted, deduped 1-based line numbers where it
+        // appears; for the first term, also the column of its first occurrence
+        // in each of those lines (byte offset in the lowered line).
         let mut term_lines: Vec<Vec<u32>> = Vec::with_capacity(terms.len());
+        let mut first_term_cols: Vec<usize> = Vec::new();
 
         for (term_idx, term_lower) in terms_lower.iter().enumerate() {
-            let finder = &finders[term_idx];
-            let mut lines_with_term = Vec::new();
+            let finder = memmem::Finder::new(term_lower.as_bytes());
+            let mut lines_with_term: Vec<u32> = Vec::new();
+            let mut line_cursor = 0usize;
 
-            for (line_num, &line) in lines.iter().enumerate() {
-                // Fast path: check if line could possibly contain term
-                // For ASCII, we can do case-insensitive check without allocation
-                let might_contain = if line.is_ascii() && term_lower.is_ascii() {
-                    // ASCII fast path: case-insensitive byte search
-                    let line_bytes = line.as_bytes();
-                    let term_bytes = term_lower.as_bytes();
-                    if line_bytes.len() >= term_bytes.len() {
-                        // Check if lowercased bytes match anywhere
-                        (0..=(line_bytes.len() - term_bytes.len())).any(|i| {
-                            term_bytes
-                                .iter()
-                                .enumerate()
-                                .all(|(j, &tb)| line_bytes[i + j].to_ascii_lowercase() == tb)
-                        })
-                    } else {
-                        false
-                    }
-                } else {
-                    // Non-ASCII: must lowercase the line (lazy - only when needed)
-                    let line_lower = line.to_lowercase();
-                    finder.find(line_lower.as_bytes()).is_some()
-                };
-
-                if might_contain {
-                    lines_with_term.push((line_num + 1) as u32);
+            for pos in finder.find_iter(lower_bytes) {
+                // Match positions are ascending, so the cursor only moves forward
+                while line_cursor + 1 < line_starts.len() && line_starts[line_cursor + 1] <= pos {
+                    line_cursor += 1;
+                }
+                let line_num = (line_cursor + 1) as u32;
+                if lines_with_term.last() == Some(&line_num) {
+                    continue;
+                }
+                lines_with_term.push(line_num);
+                if term_idx == 0 {
+                    first_term_cols.push(pos - line_starts[line_cursor]);
                 }
             }
 
@@ -1225,32 +1225,26 @@ impl<'a> QueryExecutor<'a> {
         }
 
         // Find line combinations where all terms are within distance
+        let lines: Vec<&str> = content.lines().collect();
         let mut matches = Vec::new();
 
         // Start with lines containing the first term
-        for &first_line in &term_lines[0] {
-            let mut all_within_distance = true;
-
+        for (idx, &first_line) in term_lines[0].iter().enumerate() {
             // Check if all other terms have a match within distance
-            for other_term_lines in term_lines.iter().skip(1) {
-                let has_nearby = other_term_lines
-                    .iter()
-                    .any(|&other_line| first_line.abs_diff(other_line) <= distance);
-
-                if !has_nearby {
-                    all_within_distance = false;
-                    break;
-                }
-            }
+            // (each term's line list is sorted, so binary search the window)
+            let all_within_distance = term_lines[1..].iter().all(|other_term_lines| {
+                let lo = first_line.saturating_sub(distance);
+                let hi = first_line + distance;
+                let i = other_term_lines.partition_point(|&l| l < lo);
+                i < other_term_lines.len() && other_term_lines[i] <= hi
+            });
 
             if all_within_distance {
                 // Found a valid proximity match - return the first term's match
                 let line_idx = (first_line - 1) as usize;
                 if let Some(&line) = lines.get(line_idx) {
-                    let line_lower = line.to_lowercase();
-                    if let Some(pos) = line_lower.find(&terms_lower[0]) {
-                        matches.push((first_line, line.to_string(), pos, pos + terms[0].len()));
-                    }
+                    let pos = first_term_cols[idx];
+                    matches.push((first_line, line.to_string(), pos, pos + terms[0].len()));
                 }
             }
         }
@@ -1284,51 +1278,71 @@ impl<'a> QueryExecutor<'a> {
                 }
             }
         } else {
-            // Case-insensitive: pre-lowercase needle once, lowercase each line
+            // Case-insensitive: pre-lowercase needle once
             let needle_lower = needle.to_lowercase();
             let finder = memmem::Finder::new(needle_lower.as_bytes());
 
-            for (line_num, line) in content.lines().enumerate() {
-                // Fast path: check if line could possibly match using ASCII comparison first
-                // This avoids expensive to_lowercase() for lines that can't match
-                let line_bytes = line.as_bytes();
+            if content.is_ascii()
+                && needle.is_ascii()
+                && !needle_lower.contains('\n')
+                && !needle_lower.contains('\r')
+            {
+                // ASCII fast path: lowercase the whole haystack once so byte
+                // offsets map 1:1 to the original content, then run a single
+                // SIMD substring search and map hits back to lines.
+                let content_lower = content.to_ascii_lowercase();
+                let bytes = content.as_bytes();
+                let mut line_start = 0usize;
+                let mut line_num: u32 = 1;
+                let mut last_matched_line: u32 = 0;
 
-                // Quick rejection: if line is shorter than needle, skip
-                if line_bytes.len() < needle_lower.len() {
-                    continue;
-                }
-
-                // Try ASCII lowercase comparison first (common case, avoids allocation)
-                let mut found_ascii = false;
-                if line.is_ascii() && needle.is_ascii() {
-                    // Fast ASCII-only path: compare in-place without allocation
-                    let needle_bytes = needle_lower.as_bytes();
-                    for i in 0..=(line_bytes.len() - needle_bytes.len()) {
-                        let mut matched = true;
-                        for j in 0..needle_bytes.len() {
-                            let line_char = line_bytes[i + j].to_ascii_lowercase();
-                            if line_char != needle_bytes[j] {
-                                matched = false;
-                                break;
-                            }
-                        }
-                        if matched {
-                            matches.push((
-                                (line_num + 1) as u32,
-                                line.to_string(),
-                                i,
-                                i + needle.len(),
-                            ));
-                            found_ascii = true;
-                            break; // Only report first match per line
-                        }
+                for pos in finder.find_iter(content_lower.as_bytes()) {
+                    // Advance line tracking to the line containing this match
+                    while let Some(nl) = memchr::memchr(b'\n', &bytes[line_start..pos]) {
+                        line_start += nl + 1;
+                        line_num += 1;
                     }
-                }
+                    if line_num == last_matched_line {
+                        continue; // Only report first match per line
+                    }
+                    last_matched_line = line_num;
 
-                // Fallback to full Unicode lowercase for non-ASCII
-                if !found_ascii && (!line.is_ascii() || !needle.is_ascii()) {
-                    let line_lower = line.to_lowercase();
-                    if let Some(pos) = finder.find(line_lower.as_bytes()) {
+                    let mut line_end = memchr::memchr(b'\n', &bytes[line_start..])
+                        .map(|nl| line_start + nl)
+                        .unwrap_or(bytes.len());
+                    if line_end > line_start && bytes[line_end - 1] == b'\r' {
+                        line_end -= 1;
+                    }
+                    let col = pos - line_start;
+                    matches.push((
+                        line_num,
+                        content[line_start..line_end].to_string(),
+                        col,
+                        col + needle.len(),
+                    ));
+                }
+            } else {
+                // Unicode path: lowercasing changes byte offsets, so match
+                // line by line. ASCII lines reuse a scratch buffer to avoid
+                // a String allocation per line.
+                let mut scratch: Vec<u8> = Vec::new();
+
+                for (line_num, line) in content.lines().enumerate() {
+                    // Quick rejection: if line is shorter than needle, skip
+                    if line.len() < needle_lower.len() {
+                        continue;
+                    }
+
+                    let pos = if line.is_ascii() && needle.is_ascii() {
+                        scratch.clear();
+                        scratch.extend(line.as_bytes().iter().map(|b| b.to_ascii_lowercase()));
+                        finder.find(&scratch)
+                    } else {
+                        let line_lower = line.to_lowercase();
+                        finder.find(line_lower.as_bytes())
+                    };
+
+                    if let Some(pos) = pos {
                         matches.push((
                             (line_num + 1) as u32,
                             line.to_string(),
@@ -1708,6 +1722,89 @@ def format_warning(msg: str) -> str:
             3,
             "Case-insensitive should find all 3 matches"
         );
+    }
+
+    #[test]
+    fn test_find_literal_matches_first_per_line_and_columns() {
+        let content = "foo foo foo\nbar\nFOO\n";
+
+        let matches = QueryExecutor::find_literal_matches_static(content, "foo", false, 1);
+
+        // Only first match per line is reported
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0], (1, "foo foo foo".to_string(), 0, 3));
+        assert_eq!(matches[1], (3, "FOO".to_string(), 0, 3));
+    }
+
+    #[test]
+    fn test_find_literal_matches_crlf() {
+        let content = "alpha\r\nBETA gamma\r\ndelta\r\n";
+
+        let matches = QueryExecutor::find_literal_matches_static(content, "beta", false, 1);
+
+        assert_eq!(matches.len(), 1);
+        // Line content must not include the trailing \r
+        assert_eq!(matches[0], (2, "BETA gamma".to_string(), 0, 4));
+    }
+
+    #[test]
+    fn test_find_literal_matches_no_trailing_newline() {
+        let content = "first\nlast line match";
+
+        let matches = QueryExecutor::find_literal_matches_static(content, "MATCH", false, 1);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], (2, "last line match".to_string(), 10, 15));
+    }
+
+    #[test]
+    fn test_find_literal_matches_unicode() {
+        let content = "héllo wörld\nplain ascii line\nHÉLLO again\n";
+
+        let matches = QueryExecutor::find_literal_matches_static(content, "héllo", false, 1);
+
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].0, 1);
+        assert_eq!(matches[1].0, 3);
+
+        // ASCII needle in a file with non-ASCII lines (scratch-buffer path)
+        let matches = QueryExecutor::find_literal_matches_static(content, "ASCII", false, 1);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], (2, "plain ascii line".to_string(), 6, 11));
+    }
+
+    #[test]
+    fn test_find_proximity_matches_within_distance() {
+        let content = "error here\nfiller\nfiller\nhandle it\n";
+
+        // 3 lines apart, distance 3 → match reported on the first term's line
+        let terms = vec!["error".to_string(), "handle".to_string()];
+        let matches = QueryExecutor::find_proximity_matches_static(content, &terms, 3, 1);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], (1, "error here".to_string(), 0, 5));
+
+        // distance 2 → too far apart
+        let matches = QueryExecutor::find_proximity_matches_static(content, &terms, 2, 1);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_find_proximity_matches_missing_term() {
+        let content = "error here\nsomething else\n";
+        let terms = vec!["error".to_string(), "nonexistent".to_string()];
+
+        let matches = QueryExecutor::find_proximity_matches_static(content, &terms, 10, 1);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_find_proximity_matches_case_insensitive() {
+        let content = "ERROR detected\nHANDLE this\n";
+        let terms = vec!["error".to_string(), "handle".to_string()];
+
+        let matches = QueryExecutor::find_proximity_matches_static(content, &terms, 5, 1);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0, 1);
     }
 
     // ========================================================================
