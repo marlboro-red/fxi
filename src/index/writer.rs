@@ -211,15 +211,21 @@ impl ChunkedIndexWriter {
         let file_count = job.files.len();
         let t_start = std::time::Instant::now();
 
-        // Flat vectors instead of HashMaps — just collect pairs, sort later
+        // Flat vectors instead of HashMaps — just collect pairs, sort later.
+        // Tokens are interned to dense u32 ids while collecting so the big
+        // sorts below compare integers instead of Strings; the ids are then
+        // remapped to lexicographic ranks so group order (and thus the
+        // on-disk dict order) is identical to sorting by token string.
         let mut trigram_pairs: Vec<(u32, u32)> = Vec::with_capacity(file_count * 500);
-        let mut token_pairs: Vec<(String, DocId)> = Vec::with_capacity(file_count * 50);
+        let mut token_pairs: Vec<(u32, DocId)> = Vec::with_capacity(file_count * 50);
         let mut line_maps: Vec<(DocId, Vec<u32>)> = Vec::with_capacity(file_count);
-        // Position triples: (token, doc_id, word_position)
-        let mut position_triples: Vec<(String, DocId, u32)> =
-            Vec::with_capacity(file_count * 50);
+        // Position triples: (token_id, doc_id, word_position)
+        let mut position_triples: Vec<(u32, DocId, u32)> = Vec::with_capacity(file_count * 50);
 
-        // Process each file - just append to flat vectors (no hashing)
+        let mut token_ids: ahash::AHashMap<String, u32> =
+            ahash::AHashMap::with_capacity(file_count * 32);
+
+        // Process each file - just append to flat vectors
         for file in job.files {
             let doc_id = file.doc_id;
 
@@ -228,19 +234,48 @@ impl ChunkedIndexWriter {
                 trigram_pairs.push((trigram, doc_id));
             }
 
-            // Add token pairs
+            // Add token pairs (interned)
             for token in file.tokens {
-                token_pairs.push((token, doc_id));
+                let next_id = token_ids.len() as u32;
+                let id = *token_ids.entry(token).or_insert(next_id);
+                token_pairs.push((id, doc_id));
             }
 
-            // Add position triples
+            // Add position triples (interned)
             for (token, pos) in file.token_positions {
-                position_triples.push((token, doc_id, pos));
+                let next_id = token_ids.len() as u32;
+                let id = *token_ids.entry(token).or_insert(next_id);
+                position_triples.push((id, doc_id, pos));
             }
 
             // Store line map
             line_maps.push((doc_id, file.line_offsets));
         }
+
+        // Compute lexicographic ranks: only the unique tokens are sorted as
+        // strings (typically orders of magnitude fewer than occurrences)
+        let unique_count = token_ids.len();
+        let mut symbols: Vec<String> = vec![String::new(); unique_count];
+        for (token, id) in token_ids {
+            symbols[id as usize] = token;
+        }
+        let mut order: Vec<u32> = (0..unique_count as u32).collect();
+        order.par_sort_unstable_by(|&a, &b| symbols[a as usize].cmp(&symbols[b as usize]));
+        let mut rank = vec![0u32; unique_count];
+        for (r, &id) in order.iter().enumerate() {
+            rank[id as usize] = r as u32;
+        }
+        // Unique tokens in lexicographic order (indexed by rank)
+        let symbols_sorted: Vec<String> = order
+            .iter()
+            .map(|&id| std::mem::take(&mut symbols[id as usize]))
+            .collect();
+
+        // Remap intern ids to ranks so integer sort order == string sort order
+        token_pairs.par_iter_mut().for_each(|p| p.0 = rank[p.0 as usize]);
+        position_triples
+            .par_iter_mut()
+            .for_each(|t| t.0 = rank[t.0 as usize]);
 
         let t_collect = std::time::Instant::now();
 
@@ -295,7 +330,12 @@ impl ChunkedIndexWriter {
             let trigram_handle =
                 s.spawn(|| Self::write_trigram_index_flat(&job.segment_path, &trigram_pairs));
             let token_handle = s.spawn(|| {
-                Self::write_token_index_flat(&job.segment_path, &token_pairs, &position_triples)
+                Self::write_token_index_flat(
+                    &job.segment_path,
+                    &token_pairs,
+                    &position_triples,
+                    &symbols_sorted,
+                )
             });
             let linemap_handle =
                 s.spawn(|| Self::write_line_maps_flat(&job.segment_path, &line_maps));
@@ -403,10 +443,15 @@ impl ChunkedIndexWriter {
 
     /// Write token index from pre-sorted flat pairs, and token positions file.
     /// The token dict is extended with pos_offset and pos_length fields per entry.
+    ///
+    /// `pairs` and `position_triples` are keyed by lexicographic token rank
+    /// (see process_and_write_segment); `symbols_sorted[rank]` is the token
+    /// string. Both lists are sorted, so group order equals dict order.
     fn write_token_index_flat(
         segment_path: &Path,
-        pairs: &[(String, DocId)],
-        position_triples: &[(String, DocId, u32)],
+        pairs: &[(u32, DocId)],
+        position_triples: &[(u32, DocId, u32)],
+        symbols_sorted: &[String],
     ) -> Result<()> {
         let dict_path = segment_path.join("tokens.dict");
         let postings_path = segment_path.join("tokens.postings");
@@ -430,55 +475,51 @@ impl ChunkedIndexWriter {
         }
         let entry_count = group_starts.len();
 
-        // Build position data map: token -> encoded positions bytes
-        // position_triples is sorted by (token, doc_id, position)
-        let position_data: HashMap<&str, Vec<u8>> = {
-            let mut map: HashMap<&str, Vec<u8>> = HashMap::new();
-            if !position_triples.is_empty() {
-                // Group by token
-                let mut i = 0;
-                while i < position_triples.len() {
-                    let token = position_triples[i].0.as_str();
-                    let group_start = i;
-                    while i < position_triples.len() && position_triples[i].0 == token {
-                        i += 1;
-                    }
-                    // Now we have all triples for this token in [group_start..i]
-                    // Group by doc_id within this token
-                    let mut doc_positions: Vec<(u32, Vec<u32>)> = Vec::new();
-                    let mut j = group_start;
-                    while j < i {
-                        let doc_id = position_triples[j].1;
-                        let doc_start = j;
-                        while j < i && position_triples[j].1 == doc_id {
-                            j += 1;
-                        }
-                        let positions: Vec<u32> = position_triples[doc_start..j]
-                            .iter()
-                            .map(|(_, _, p)| *p)
-                            .collect();
-                        doc_positions.push((doc_id, positions));
-                    }
-                    // Encode
-                    let refs: Vec<(u32, &[u32])> = doc_positions
-                        .iter()
-                        .map(|(d, p)| (*d, p.as_slice()))
-                        .collect();
-                    let mut buf = Vec::new();
-                    crate::utils::encode_position_postings(&refs, &mut buf);
-                    map.insert(token, buf);
+        // Build position data per token rank: (rank, encoded positions bytes),
+        // in rank order — consumed by lockstep merge in the dict loop below
+        let position_data: Vec<(u32, Vec<u8>)> = {
+            let mut groups: Vec<(u32, Vec<u8>)> = Vec::new();
+            let mut i = 0;
+            while i < position_triples.len() {
+                let token_rank = position_triples[i].0;
+                let group_start = i;
+                while i < position_triples.len() && position_triples[i].0 == token_rank {
+                    i += 1;
                 }
+                // Group by doc_id within this token
+                let mut doc_positions: Vec<(u32, Vec<u32>)> = Vec::new();
+                let mut j = group_start;
+                while j < i {
+                    let doc_id = position_triples[j].1;
+                    let doc_start = j;
+                    while j < i && position_triples[j].1 == doc_id {
+                        j += 1;
+                    }
+                    let positions: Vec<u32> = position_triples[doc_start..j]
+                        .iter()
+                        .map(|(_, _, p)| *p)
+                        .collect();
+                    doc_positions.push((doc_id, positions));
+                }
+                // Encode
+                let refs: Vec<(u32, &[u32])> = doc_positions
+                    .iter()
+                    .map(|(d, p)| (*d, p.as_slice()))
+                    .collect();
+                let mut buf = Vec::new();
+                crate::utils::encode_position_postings(&refs, &mut buf);
+                groups.push((token_rank, buf));
             }
-            map
+            groups
         };
 
         // Parallel encode postings
-        let encoded: Vec<(&str, Vec<u8>, u32)> = group_starts
+        let encoded: Vec<(u32, Vec<u8>, u32)> = group_starts
             .par_iter()
             .enumerate()
             .map(|(idx, &start)| {
                 let end = group_starts.get(idx + 1).copied().unwrap_or(pairs.len());
-                let token = pairs[start].0.as_str();
+                let token_rank = pairs[start].0;
 
                 let mut doc_ids: Vec<u32> = Vec::with_capacity(end - start);
                 for (_, doc_id) in &pairs[start..end] {
@@ -491,7 +532,7 @@ impl ChunkedIndexWriter {
                 let mut enc = Vec::with_capacity(doc_ids.len() * 2);
                 delta_encode(&doc_ids, &mut enc);
 
-                (token, enc, doc_freq)
+                (token_rank, enc, doc_freq)
             })
             .collect();
 
@@ -500,7 +541,7 @@ impl ChunkedIndexWriter {
         // Dict size: count(4) + entries * (token_len(2) + token + offset(8) + length(4) + doc_freq(4) + pos_offset(8) + pos_length(4))
         let total_dict: usize = 4 + encoded
             .iter()
-            .map(|(t, _, _)| 2 + t.len() + 8 + 4 + 4 + 8 + 4)
+            .map(|(r, _, _)| 2 + symbols_sorted[*r as usize].len() + 8 + 4 + 4 + 8 + 4)
             .sum::<usize>();
         let mut dict_buf = Vec::with_capacity(total_dict);
         let mut postings_buf = Vec::with_capacity(total_postings);
@@ -509,17 +550,23 @@ impl ChunkedIndexWriter {
         dict_buf.extend_from_slice(&(entry_count as u32).to_le_bytes());
         let mut offset: u64 = 0;
         let mut pos_offset: u64 = 0;
+        // Lockstep cursor: both `encoded` and `position_data` are in rank order
+        let mut pos_idx = 0usize;
 
-        for (token, enc, doc_freq) in &encoded {
-            let token_bytes = token.as_bytes();
+        for (token_rank, enc, doc_freq) in &encoded {
+            let token_bytes = symbols_sorted[*token_rank as usize].as_bytes();
             dict_buf.extend_from_slice(&(token_bytes.len() as u16).to_le_bytes());
             dict_buf.extend_from_slice(token_bytes);
             dict_buf.extend_from_slice(&offset.to_le_bytes());
             dict_buf.extend_from_slice(&(enc.len() as u32).to_le_bytes());
             dict_buf.extend_from_slice(&doc_freq.to_le_bytes());
 
-            // Write position offset and length
-            if let Some(pos_data) = position_data.get(*token) {
+            // Write position offset and length (merge-join on rank)
+            while pos_idx < position_data.len() && position_data[pos_idx].0 < *token_rank {
+                pos_idx += 1;
+            }
+            if pos_idx < position_data.len() && position_data[pos_idx].0 == *token_rank {
+                let pos_data = &position_data[pos_idx].1;
                 dict_buf.extend_from_slice(&pos_offset.to_le_bytes());
                 dict_buf.extend_from_slice(&(pos_data.len() as u32).to_le_bytes());
                 positions_buf.extend_from_slice(pos_data);
