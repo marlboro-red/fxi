@@ -62,10 +62,12 @@ const MAX_RESULTS_CAP: usize = 10_000_000;
 struct CachedIndex {
     /// Current reader (swapped atomically via Mutex)
     reader: Mutex<Arc<IndexReader>>,
-    /// Query result cache (cleared on reader swap)
-    query_cache: Mutex<LruCache<String, Vec<SearchMatchData>>>,
+    /// Query result cache (cleared on reader swap). Entries are Arc'd so a
+    /// cache hit clones only the (limit-truncated) response, not the full
+    /// uncapped result set.
+    query_cache: Mutex<LruCache<String, Arc<Vec<SearchMatchData>>>>,
     /// Content search result cache (cleared on reader swap)
-    content_cache: Mutex<LruCache<String, (Vec<ContentMatch>, usize)>>,
+    content_cache: Mutex<LruCache<String, (Arc<Vec<ContentMatch>>, usize)>>,
     /// Last access time
     last_used: Mutex<Instant>,
     /// Reader version for cache invalidation
@@ -182,8 +184,10 @@ fn max_pipelined() -> usize {
 
 /// The index server daemon
 pub struct IndexServer {
-    /// Loaded indexes by canonical root path
-    indexes: RwLock<HashMap<PathBuf, CachedIndex>>,
+    /// Loaded indexes by canonical root path. Values are Arc'd so request
+    /// handlers can clone out an index and release the map lock instead of
+    /// holding it for the duration of a query.
+    indexes: RwLock<HashMap<PathBuf, Arc<CachedIndex>>>,
     /// Server statistics
     stats: ServerStats,
     /// Shutdown flag
@@ -767,12 +771,16 @@ impl IndexServer {
         }
 
         // Access the index with read lock
-        let indexes = self.indexes.read().unwrap();
-        let cached = match indexes.get(&root_path) {
-            Some(c) => c,
-            None => {
-                return Response::Error {
-                    message: "Index not found after loading".to_string(),
+        // Clone the index handle out of the map so the global lock is not
+        // held for the duration of the query
+        let cached = {
+            let indexes = self.indexes.read().unwrap();
+            match indexes.get(&root_path) {
+                Some(c) => Arc::clone(c),
+                None => {
+                    return Response::Error {
+                        message: "Index not found after loading".to_string(),
+                    }
                 }
             }
         };
@@ -789,11 +797,13 @@ impl IndexServer {
             self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
             self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
-            let mut matches = cached_matches.clone();
-            // Only truncate if limit is non-zero (0 means use query's top:N limit)
-            if limit > 0 {
-                matches.truncate(limit);
-            }
+            // Clone only the part of the cached set that is returned
+            // (0 means use query's top:N limit -> full set)
+            let matches = if limit > 0 && limit < cached_matches.len() {
+                cached_matches[..limit].to_vec()
+            } else {
+                cached_matches.as_ref().clone()
+            };
 
             return Response::Search(SearchResponse {
                 matches,
@@ -827,27 +837,30 @@ impl IndexServer {
         };
 
         // Convert to serializable format
-        let match_data: Vec<SearchMatchData> = matches
-            .iter()
-            .map(|m| SearchMatchData {
-                path: m.path.clone(),
-                line_number: m.line_number,
-                score: m.score,
-            })
-            .collect();
+        let match_data: Arc<Vec<SearchMatchData>> = Arc::new(
+            matches
+                .iter()
+                .map(|m| SearchMatchData {
+                    path: m.path.clone(),
+                    line_number: m.line_number,
+                    score: m.score,
+                })
+                .collect(),
+        );
 
-        // Cache the results
+        // Cache the results (refcount bump, not a copy)
         if let Ok(mut cache) = cached.query_cache.lock() {
-            cache.put(query, match_data.clone());
+            cache.put(query, Arc::clone(&match_data));
         }
 
         self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
-        let mut result_matches = match_data;
         // Only truncate if limit is non-zero (0 means use query's top:N limit)
-        if limit > 0 {
-            result_matches.truncate(limit);
-        }
+        let result_matches = if limit > 0 && limit < match_data.len() {
+            match_data[..limit].to_vec()
+        } else {
+            match_data.as_ref().clone()
+        };
 
         Response::Search(SearchResponse {
             matches: result_matches,
@@ -880,13 +893,16 @@ impl IndexServer {
             };
         }
 
-        // Access the index with read lock
-        let indexes = self.indexes.read().unwrap();
-        let cached = match indexes.get(&root_path) {
-            Some(c) => c,
-            None => {
-                return Response::Error {
-                    message: "Index not found after loading".to_string(),
+        // Clone the index handle out of the map so the global lock is not
+        // held for the duration of the query
+        let cached = {
+            let indexes = self.indexes.read().unwrap();
+            match indexes.get(&root_path) {
+                Some(c) => Arc::clone(c),
+                None => {
+                    return Response::Error {
+                        message: "Index not found after loading".to_string(),
+                    }
                 }
             }
         };
@@ -911,7 +927,7 @@ impl IndexServer {
             self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
             return Response::ContentSearch(ContentSearchResponse {
-                matches: cached_matches.clone(),
+                matches: cached_matches.as_ref().clone(),
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 files_with_matches: *cached_file_count,
                 resolved_root: Some(root_path.clone()),
@@ -956,28 +972,30 @@ impl IndexServer {
 
             // Convert to minimal ContentMatch (just path, no content)
             let file_count = matching_files.len();
-            let match_data: Vec<ContentMatch> = matching_files
-                .into_iter()
-                .map(|path| ContentMatch {
-                    path,
-                    line_number: 1,
-                    line_content: String::new(),
-                    match_start: 0,
-                    match_end: 0,
-                    context_before: vec![],
-                    context_after: vec![],
-                })
-                .collect();
+            let match_data: Arc<Vec<ContentMatch>> = Arc::new(
+                matching_files
+                    .into_iter()
+                    .map(|path| ContentMatch {
+                        path,
+                        line_number: 1,
+                        line_content: String::new(),
+                        match_start: 0,
+                        match_end: 0,
+                        context_before: vec![],
+                        context_after: vec![],
+                    })
+                    .collect(),
+            );
 
-            // Cache the results
+            // Cache the results (refcount bump, not a copy)
             if let Ok(mut cache) = cached.content_cache.lock() {
-                cache.put(cache_key, (match_data.clone(), file_count));
+                cache.put(cache_key, (Arc::clone(&match_data), file_count));
             }
 
             self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
             return Response::ContentSearch(ContentSearchResponse {
-                matches: match_data,
+                matches: match_data.as_ref().clone(),
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 files_with_matches: file_count,
                 resolved_root: Some(root_path.clone()),
@@ -998,17 +1016,17 @@ impl IndexServer {
             }
         };
 
-        // Count unique files
-        let mut unique_files = std::collections::HashSet::new();
-        for m in &matches {
-            unique_files.insert(m.path.clone());
-        }
+        // Count unique files (dedup by borrowed path, no clones)
+        let unique_files: std::collections::HashSet<&std::path::Path> =
+            matches.iter().map(|m| m.path.as_path()).collect();
+        let file_count = unique_files.len();
+        drop(unique_files);
 
         // Convert to protocol type and apply limit
         let effective_limit = if limit == 0 { MAX_RESULTS_CAP } else { limit.min(MAX_RESULTS_CAP) };
         let iter = matches.into_iter().take(effective_limit);
-        let match_data: Vec<ContentMatch> = iter
-            .map(|m| ContentMatch {
+        let match_data: Arc<Vec<ContentMatch>> = Arc::new(
+            iter.map(|m| ContentMatch {
                 path: m.path,
                 line_number: m.line_number,
                 line_content: m.line_content,
@@ -1017,19 +1035,18 @@ impl IndexServer {
                 context_before: m.context_before,
                 context_after: m.context_after,
             })
-            .collect();
+            .collect(),
+        );
 
-        let file_count = unique_files.len();
-
-        // Cache the results
+        // Cache the results (refcount bump, not a copy)
         if let Ok(mut cache) = cached.content_cache.lock() {
-            cache.put(cache_key, (match_data.clone(), file_count));
+            cache.put(cache_key, (Arc::clone(&match_data), file_count));
         }
 
         self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
         Response::ContentSearch(ContentSearchResponse {
-            matches: match_data,
+            matches: match_data.as_ref().clone(),
             duration_ms: start.elapsed().as_secs_f64() * 1000.0,
             files_with_matches: file_count,
             resolved_root: Some(root_path),
@@ -1163,16 +1180,17 @@ impl IndexServer {
         };
 
         if !index_loaded {
-            // Load with write lock
+            // Open the index BEFORE taking the write lock: a cold load takes
+            // up to seconds, and holding the global write lock for it stalls
+            // every search on already-loaded codebases. If two threads race
+            // to load the same index, the loser's reader is simply dropped.
+            eprintln!("fxid: loading index for {}", root_path.display());
+            let reader = IndexReader::open(root_path)?;
+            let doc_count = reader.meta.doc_count;
+
             let mut indexes = self.indexes.write().unwrap();
-
-            // Double-check after acquiring write lock
             if !indexes.contains_key(root_path) {
-                eprintln!("fxid: loading index for {}", root_path.display());
-                let reader = IndexReader::open(root_path)?;
-                let doc_count = reader.meta.doc_count;
-
-                indexes.insert(root_path.clone(), CachedIndex::new(reader));
+                indexes.insert(root_path.clone(), Arc::new(CachedIndex::new(reader)));
                 eprintln!(
                     "fxid: loaded {} files from {}",
                     doc_count,
