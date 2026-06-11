@@ -1,5 +1,7 @@
 use crate::index::types::*;
-use crate::utils::{delta_decode, get_index_dir, BloomFilter};
+use crate::utils::{
+    delta_decode, delta_decode_bitmap, delta_decode_intersect, get_index_dir, BloomFilter,
+};
 use ahash::AHashSet;
 use anyhow::{Context, Result};
 use lru::LruCache;
@@ -169,8 +171,23 @@ impl SegmentReader {
             let end = start + entry.length as usize;
 
             if end <= self.trigram_postings.len() {
-                let doc_ids = delta_decode(&self.trigram_postings[start..end]);
-                return doc_ids.into_iter().collect();
+                return delta_decode_bitmap(&self.trigram_postings[start..end]);
+            }
+        }
+        RoaringBitmap::new()
+    }
+
+    /// Get documents matching a trigram, intersected with `filter` during
+    /// decode. Decoding stops early once values exceed the filter's maximum,
+    /// so a common trigram's long posting list is never fully decoded when
+    /// the candidate set is already small.
+    fn get_trigram_docs_intersect(&self, trigram: Trigram, filter: &RoaringBitmap) -> RoaringBitmap {
+        if let Some(entry) = self.trigram_dict.lookup(trigram) {
+            let start = entry.offset as usize;
+            let end = start + entry.length as usize;
+
+            if end <= self.trigram_postings.len() {
+                return delta_decode_intersect(&self.trigram_postings[start..end], filter);
             }
         }
         RoaringBitmap::new()
@@ -183,8 +200,7 @@ impl SegmentReader {
             let end = start + entry.length as usize;
 
             if end <= self.token_postings.len() {
-                let doc_ids = delta_decode(&self.token_postings[start..end]);
-                return doc_ids.into_iter().collect();
+                return delta_decode_bitmap(&self.token_postings[start..end]);
             }
         }
         RoaringBitmap::new()
@@ -530,7 +546,7 @@ impl IndexReader {
                     if result.is_empty() {
                         break;
                     }
-                    result &= segment.get_trigram_docs(t);
+                    result = segment.get_trigram_docs_intersect(t, &result);
                 }
                 return result;
             }
@@ -555,7 +571,7 @@ impl IndexReader {
                     if result.is_empty() {
                         break;
                     }
-                    result &= segment.get_trigram_docs(t);
+                    result = segment.get_trigram_docs_intersect(t, &result);
                 }
                 result
             })
