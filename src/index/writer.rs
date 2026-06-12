@@ -1074,170 +1074,23 @@ impl DeltaSegmentWriter {
 
     /// Write segment files (trigrams, tokens, line maps, bloom filter)
     fn write_segment_files(&self, segment_path: &Path) -> Result<()> {
-        // Compute bloom filter
-        let estimated_trigrams = self.trigram_postings.len();
-        let mut bloom_filter = BloomFilter::new(estimated_trigrams.max(1000), 0.01);
-        for &trigram in self.trigram_postings.keys() {
-            bloom_filter.insert(trigram);
-        }
+        use crate::index::segment_io;
 
-        // Write trigram index
-        self.write_trigram_index(segment_path)?;
+        // Delta segments keep all trigrams: stop-grams are a global
+        // (meta-level) judgement made at full build or compaction
+        segment_io::write_trigram_index(segment_path, &self.trigram_postings, None)?;
+        segment_io::write_token_index(
+            segment_path,
+            &self.token_postings,
+            Some(&self.token_position_postings),
+        )?;
+        segment_io::write_line_maps(segment_path, &self.line_maps)?;
+        segment_io::build_and_write_bloom(
+            segment_path,
+            self.trigram_postings.keys().copied(),
+            1000,
+        )?;
 
-        // Write token index
-        self.write_token_index(segment_path)?;
-
-        // Write line maps
-        self.write_line_maps(segment_path)?;
-
-        // Write bloom filter
-        Self::write_bloom_filter_static(segment_path, &bloom_filter)?;
-
-        Ok(())
-    }
-
-    /// Write trigram index
-    fn write_trigram_index(&self, segment_path: &Path) -> Result<()> {
-        let dict_path = segment_path.join("grams.dict");
-        let postings_path = segment_path.join("grams.postings");
-
-        let mut dict_file = BufWriter::with_capacity(65536, File::create(&dict_path)?);
-        let mut postings_file = BufWriter::with_capacity(65536, File::create(&postings_path)?);
-
-        // Write entry count
-        dict_file.write_all(&(self.trigram_postings.len() as u32).to_le_bytes())?;
-
-        let mut postings_offset: u64 = 0;
-
-        for (&trigram, doc_ids) in &self.trigram_postings {
-            // Sort and deduplicate
-            let mut sorted_ids = doc_ids.clone();
-            sorted_ids.sort_unstable();
-            sorted_ids.dedup();
-
-            // Delta-encode
-            let mut encoded = Vec::new();
-            delta_encode(&sorted_ids, &mut encoded);
-
-            // Write dictionary entry
-            dict_file.write_all(&trigram.to_le_bytes())?;
-            dict_file.write_all(&postings_offset.to_le_bytes())?;
-            dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
-            dict_file.write_all(&(sorted_ids.len() as u32).to_le_bytes())?;
-
-            // Write postings
-            postings_file.write_all(&encoded)?;
-            postings_offset += encoded.len() as u64;
-        }
-
-        dict_file.flush()?;
-        postings_file.flush()?;
-        Ok(())
-    }
-
-    /// Write token index with position data
-    fn write_token_index(&self, segment_path: &Path) -> Result<()> {
-        let dict_path = segment_path.join("tokens.dict");
-        let postings_path = segment_path.join("tokens.postings");
-        let positions_path = segment_path.join("tokens.positions");
-
-        let mut dict_file = BufWriter::with_capacity(65536, File::create(&dict_path)?);
-        let mut postings_file = BufWriter::with_capacity(65536, File::create(&postings_path)?);
-        let mut positions_file = BufWriter::with_capacity(65536, File::create(&positions_path)?);
-
-        // Write entry count
-        dict_file.write_all(&(self.token_postings.len() as u32).to_le_bytes())?;
-
-        let mut postings_offset: u64 = 0;
-        let mut pos_offset: u64 = 0;
-
-        for (token, doc_ids) in &self.token_postings {
-            // Sort and deduplicate
-            let mut sorted_ids = doc_ids.clone();
-            sorted_ids.sort_unstable();
-            sorted_ids.dedup();
-
-            // Delta-encode
-            let mut encoded = Vec::new();
-            delta_encode(&sorted_ids, &mut encoded);
-
-            // Write token (length-prefixed)
-            let token_bytes = token.as_bytes();
-            dict_file.write_all(&(token_bytes.len() as u16).to_le_bytes())?;
-            dict_file.write_all(token_bytes)?;
-
-            // Write offset, length, freq
-            dict_file.write_all(&postings_offset.to_le_bytes())?;
-            dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
-            dict_file.write_all(&(sorted_ids.len() as u32).to_le_bytes())?;
-
-            // Write position offset and length
-            if let Some(doc_pos_map) = self.token_position_postings.get(token) {
-                let refs: Vec<(u32, &[u32])> = doc_pos_map
-                    .iter()
-                    .map(|(&d, p)| (d, p.as_slice()))
-                    .collect();
-                let mut pos_buf = Vec::new();
-                crate::utils::encode_position_postings(&refs, &mut pos_buf);
-                dict_file.write_all(&pos_offset.to_le_bytes())?;
-                dict_file.write_all(&(pos_buf.len() as u32).to_le_bytes())?;
-                positions_file.write_all(&pos_buf)?;
-                pos_offset += pos_buf.len() as u64;
-            } else {
-                dict_file.write_all(&0u64.to_le_bytes())?;
-                dict_file.write_all(&0u32.to_le_bytes())?;
-            }
-
-            // Write postings
-            postings_file.write_all(&encoded)?;
-            postings_offset += encoded.len() as u64;
-        }
-
-        dict_file.flush()?;
-        postings_file.flush()?;
-        positions_file.flush()?;
-        Ok(())
-    }
-
-    /// Write line maps
-    fn write_line_maps(&self, segment_path: &Path) -> Result<()> {
-        let linemap_path = segment_path.join("linemap.bin");
-        let mut file = BufWriter::with_capacity(65536, File::create(&linemap_path)?);
-
-        // Write count
-        file.write_all(&(self.line_maps.len() as u32).to_le_bytes())?;
-
-        // Sort by doc_id
-        let mut sorted: Vec<_> = self.line_maps.iter().collect();
-        sorted.sort_by_key(|(id, _)| *id);
-
-        for (&doc_id, offsets) in sorted {
-            file.write_all(&doc_id.to_le_bytes())?;
-            file.write_all(&(offsets.len() as u32).to_le_bytes())?;
-
-            let mut encoded = Vec::new();
-            delta_encode(offsets, &mut encoded);
-            file.write_all(&(encoded.len() as u32).to_le_bytes())?;
-            file.write_all(&encoded)?;
-        }
-
-        file.flush()?;
-        Ok(())
-    }
-
-    /// Write bloom filter
-    fn write_bloom_filter_static(segment_path: &Path, bloom_filter: &BloomFilter) -> Result<()> {
-        let bloom_path = segment_path.join("bloom.bin");
-        let mut file = BufWriter::with_capacity(65536, File::create(&bloom_path)?);
-
-        file.write_all(&[bloom_filter.num_hashes()])?;
-        let bits = bloom_filter.bits();
-        file.write_all(&(bits.len() as u32).to_le_bytes())?;
-        for &word in bits {
-            file.write_all(&word.to_le_bytes())?;
-        }
-
-        file.flush()?;
         Ok(())
     }
 }

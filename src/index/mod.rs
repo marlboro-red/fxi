@@ -46,6 +46,7 @@
 pub mod build;
 pub mod compact;
 pub mod reader;
+pub mod segment_io;
 pub mod stats;
 pub mod types;
 pub mod writer;

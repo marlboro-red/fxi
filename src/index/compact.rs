@@ -6,17 +6,15 @@
 //! source file I/O.
 
 use crate::index::reader::{read_documents, read_paths};
+use crate::index::segment_io;
 use crate::index::types::*;
 use crate::index::writer::{write_documents_atomic, write_meta_atomic, write_paths_atomic};
-use crate::utils::{
-    BloomFilter, decode_position_postings, delta_decode, delta_encode, encode_position_postings,
-    find_codebase_root, get_index_dir,
-};
+use crate::utils::{decode_position_postings, delta_decode, find_codebase_root, get_index_dir};
 use anyhow::{Context, Result};
 use memmap2::Mmap;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -126,9 +124,10 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
     // Create new segment directory
     fs::create_dir_all(&new_segment_path)?;
 
-    // Write segment files
-    write_trigram_index(&new_segment_path, &trigram_postings, &stop_grams)?;
-    write_token_index_with_positions(
+    // Write segment files. The merged segment drops stop-grams entirely:
+    // they can't narrow and the executor never looks them up.
+    segment_io::write_trigram_index(&new_segment_path, &trigram_postings, Some(&stop_grams))?;
+    segment_io::write_token_index(
         &new_segment_path,
         &token_postings,
         if has_positions {
@@ -137,8 +136,8 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
             None
         },
     )?;
-    write_line_maps(&new_segment_path, &line_maps)?;
-    write_bloom_filter(&new_segment_path, &trigram_postings)?;
+    segment_io::write_line_maps(&new_segment_path, &line_maps)?;
+    segment_io::build_and_write_bloom(&new_segment_path, trigram_postings.keys().copied(), 10000)?;
     eprintln!("  Wrote merged segment to seg_{:04}", new_segment_id);
 
     // Step 5: Write global files atomically
@@ -597,187 +596,6 @@ fn compute_stop_grams(
         .collect();
 
     crate::index::writer::select_stop_grams(freq, doc_count, count)
-}
-
-/// Write trigram index files.
-fn write_trigram_index(
-    segment_path: &Path,
-    postings: &BTreeMap<Trigram, Vec<DocId>>,
-    stop_grams: &HashSet<Trigram>,
-) -> Result<()> {
-    let dict_path = segment_path.join("grams.dict");
-    let postings_path = segment_path.join("grams.postings");
-
-    let mut dict_file = BufWriter::with_capacity(131072, File::create(&dict_path)?);
-    let mut postings_file = BufWriter::with_capacity(131072, File::create(&postings_path)?);
-
-    // Filter out stop-grams
-    let filtered: Vec<_> = postings
-        .iter()
-        .filter(|(t, _)| !stop_grams.contains(t))
-        .collect();
-
-    // Write entry count
-    dict_file.write_all(&(filtered.len() as u32).to_le_bytes())?;
-
-    let mut postings_offset: u64 = 0;
-
-    for (&trigram, doc_ids) in filtered {
-        // Delta-encode
-        let mut encoded = Vec::with_capacity(doc_ids.len() * 2);
-        delta_encode(doc_ids, &mut encoded);
-
-        // Write dictionary entry
-        dict_file.write_all(&trigram.to_le_bytes())?;
-        dict_file.write_all(&postings_offset.to_le_bytes())?;
-        dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
-        dict_file.write_all(&(doc_ids.len() as u32).to_le_bytes())?;
-
-        // Write postings
-        postings_file.write_all(&encoded)?;
-        postings_offset += encoded.len() as u64;
-    }
-
-    dict_file.flush()?;
-    postings_file.flush()?;
-
-    Ok(())
-}
-
-/// Write token index files with optional position data.
-fn write_token_index_with_positions(
-    segment_path: &Path,
-    postings: &BTreeMap<String, Vec<DocId>>,
-    token_positions: Option<&BTreeMap<String, BTreeMap<DocId, Vec<u32>>>>,
-) -> Result<()> {
-    let dict_path = segment_path.join("tokens.dict");
-    let postings_path = segment_path.join("tokens.postings");
-
-    let mut dict_file = BufWriter::with_capacity(131072, File::create(&dict_path)?);
-    let mut postings_file = BufWriter::with_capacity(131072, File::create(&postings_path)?);
-
-    // Write positions file if we have position data
-    let mut positions_file = if token_positions.is_some() {
-        let positions_path = segment_path.join("tokens.positions");
-        Some(BufWriter::with_capacity(
-            131072,
-            File::create(&positions_path)?,
-        ))
-    } else {
-        None
-    };
-
-    // Write entry count
-    dict_file.write_all(&(postings.len() as u32).to_le_bytes())?;
-
-    let mut postings_offset: u64 = 0;
-    let mut pos_offset: u64 = 0;
-
-    for (token, doc_ids) in postings {
-        let token_bytes = token.as_bytes();
-
-        // Delta-encode postings
-        let mut encoded = Vec::with_capacity(doc_ids.len() * 2);
-        delta_encode(doc_ids, &mut encoded);
-
-        // Write token (length-prefixed)
-        dict_file.write_all(&(token_bytes.len() as u16).to_le_bytes())?;
-        dict_file.write_all(token_bytes)?;
-
-        // Write offset, length, freq
-        dict_file.write_all(&postings_offset.to_le_bytes())?;
-        dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
-        dict_file.write_all(&(doc_ids.len() as u32).to_le_bytes())?;
-
-        // Write position data if available
-        if let Some(ref mut pf) = positions_file {
-            let mut pos_encoded = Vec::new();
-            if let Some(positions) = token_positions.and_then(|tp| tp.get(token)) {
-                // Sort by doc_id and encode
-                let mut sorted: Vec<_> = positions
-                    .iter()
-                    .map(|(&doc_id, pos)| (doc_id, pos.as_slice()))
-                    .collect();
-                sorted.sort_by_key(|&(d, _)| d);
-                encode_position_postings(&sorted, &mut pos_encoded);
-            }
-
-            dict_file.write_all(&pos_offset.to_le_bytes())?;
-            dict_file.write_all(&(pos_encoded.len() as u32).to_le_bytes())?;
-
-            if !pos_encoded.is_empty() {
-                pf.write_all(&pos_encoded)?;
-                pos_offset += pos_encoded.len() as u64;
-            }
-        }
-
-        // Write postings
-        postings_file.write_all(&encoded)?;
-        postings_offset += encoded.len() as u64;
-    }
-
-    dict_file.flush()?;
-    postings_file.flush()?;
-    if let Some(ref mut pf) = positions_file {
-        pf.flush()?;
-    }
-
-    Ok(())
-}
-
-/// Write line maps file.
-fn write_line_maps(segment_path: &Path, line_maps: &HashMap<DocId, Vec<u32>>) -> Result<()> {
-    let linemap_path = segment_path.join("linemap.bin");
-    let mut file = BufWriter::with_capacity(65536, File::create(&linemap_path)?);
-
-    // Write count
-    file.write_all(&(line_maps.len() as u32).to_le_bytes())?;
-
-    // Sort by doc_id for consistent ordering
-    let mut sorted: Vec<_> = line_maps.iter().collect();
-    sorted.sort_by_key(|(id, _)| *id);
-
-    for (&doc_id, offsets) in sorted {
-        file.write_all(&doc_id.to_le_bytes())?;
-        file.write_all(&(offsets.len() as u32).to_le_bytes())?;
-
-        let mut encoded = Vec::new();
-        delta_encode(offsets, &mut encoded);
-        file.write_all(&(encoded.len() as u32).to_le_bytes())?;
-        file.write_all(&encoded)?;
-    }
-
-    file.flush()?;
-    Ok(())
-}
-
-/// Write bloom filter for the merged segment.
-fn write_bloom_filter(
-    segment_path: &Path,
-    trigram_postings: &BTreeMap<Trigram, Vec<DocId>>,
-) -> Result<()> {
-    let bloom_path = segment_path.join("bloom.bin");
-
-    // Create bloom filter with all trigrams
-    let estimated_trigrams = trigram_postings.len();
-    let mut bloom_filter = BloomFilter::new(estimated_trigrams.max(10000), 0.01);
-
-    for &trigram in trigram_postings.keys() {
-        bloom_filter.insert(trigram);
-    }
-
-    // Write bloom filter
-    let mut file = BufWriter::with_capacity(65536, File::create(&bloom_path)?);
-
-    file.write_all(&[bloom_filter.num_hashes()])?;
-    let bits = bloom_filter.bits();
-    file.write_all(&(bits.len() as u32).to_le_bytes())?;
-    for &word in bits {
-        file.write_all(&word.to_le_bytes())?;
-    }
-
-    file.flush()?;
-    Ok(())
 }
 
 /// Legacy compact function - now calls merge_segments.
