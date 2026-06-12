@@ -301,17 +301,29 @@ pub fn tokenize_query_with_positions(query: &str) -> Vec<(String, u32)> {
 /// and the full position list. The unique set is derived from the position
 /// list instead of re-tokenizing the content (extract_tokens +
 /// extract_tokens_with_positions each scan the whole content).
-pub fn extract_tokens_and_positions(text: &str) -> (Vec<String>, Vec<(String, u32)>) {
+pub fn extract_tokens_and_positions(text: &str) -> (Vec<String>, Vec<(u32, u32)>) {
     let tok_pos = extract_tokens_with_positions(text);
-    let tokens = {
-        let mut seen = ahash::AHashSet::with_capacity(tok_pos.len() / 2 + 1);
-        tok_pos
-            .iter()
-            .filter(|(t, _)| seen.insert(t.as_str()))
-            .map(|(t, _)| t.clone())
-            .collect()
-    };
-    (tokens, tok_pos)
+    // Positions reference the unique-token list by index instead of carrying
+    // an owned String per occurrence: a 30KB source file has thousands of
+    // token occurrences but only hundreds of unique tokens, and the
+    // per-occurrence Strings dominated indexing peak memory
+    let mut ids: ahash::AHashMap<String, u32> =
+        ahash::AHashMap::with_capacity(tok_pos.len() / 2 + 1);
+    let mut tokens: Vec<String> = Vec::new();
+    let mut positions = Vec::with_capacity(tok_pos.len());
+    for (t, pos) in tok_pos {
+        let id = match ids.get(t.as_str()) {
+            Some(&id) => id,
+            None => {
+                let id = tokens.len() as u32;
+                tokens.push(t.clone());
+                ids.insert(t, id);
+                id
+            }
+        };
+        positions.push((id, pos));
+    }
+    (tokens, positions)
 }
 
 /// Extract identifiers (complete symbols) from code

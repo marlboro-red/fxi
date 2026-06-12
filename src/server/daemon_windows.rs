@@ -1414,7 +1414,7 @@ fn process_file_for_delta(full_path: &std::path::Path, rel_path: &std::path::Pat
     let trigrams: Vec<u32> = extract_trigrams(&content);
 
     // Extract tokens and token positions in a single scan of the content
-    let (tokens, token_positions): (Vec<String>, Vec<(String, u32)>) =
+    let (tokens, token_positions): (Vec<String>, Vec<(u32, u32)>) =
         if let Ok(text) = std::str::from_utf8(&content) {
             extract_tokens_and_positions(text)
         } else {

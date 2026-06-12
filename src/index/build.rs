@@ -53,8 +53,9 @@ pub struct ProcessedFile {
     pub trigrams: Vec<u32>,
     pub tokens: Vec<String>,
     pub line_offsets: Vec<u32>,
-    /// Token positions for positional phrase queries: (token, word_position)
-    pub token_positions: Vec<(String, u32)>,
+    /// Token positions for positional phrase queries:
+    /// (index into `tokens`, word_position)
+    pub token_positions: Vec<(u32, u32)>,
 }
 
 /// Process a single file's content (can run in parallel)
@@ -81,7 +82,7 @@ fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option
     let trigrams: Vec<u32> = extract_trigrams(content);
 
     // Extract tokens and token positions in a single scan of the content
-    let (tokens, token_positions): (Vec<String>, Vec<(String, u32)>) =
+    let (tokens, token_positions): (Vec<String>, Vec<(u32, u32)>) =
         if let Ok(text) = std::str::from_utf8(content) {
             extract_tokens_and_positions(text)
         } else {

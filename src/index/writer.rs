@@ -22,7 +22,8 @@ struct AssignedFile {
     trigrams: Vec<u32>,
     tokens: Vec<String>,
     line_offsets: Vec<u32>,
-    token_positions: Vec<(String, u32)>,
+    /// (index into `tokens`, word_position)
+    token_positions: Vec<(u32, u32)>,
 }
 
 /// Data needed to write a segment to disk (sent to background thread)
@@ -253,18 +254,19 @@ impl ChunkedIndexWriter {
                 trigram_pairs.push((trigram, doc_id));
             }
 
-            // Add token pairs (interned)
+            // Add token pairs (interned), remembering each file-local
+            // token index -> intern id for the position triples below
+            let mut file_token_ids = Vec::with_capacity(file.tokens.len());
             for token in file.tokens {
                 let next_id = token_ids.len() as u32;
                 let id = *token_ids.entry(token).or_insert(next_id);
+                file_token_ids.push(id);
                 token_pairs.push((id, doc_id));
             }
 
-            // Add position triples (interned)
-            for (token, pos) in file.token_positions {
-                let next_id = token_ids.len() as u32;
-                let id = *token_ids.entry(token).or_insert(next_id);
-                position_triples.push((id, doc_id, pos));
+            // Add position triples (positions index into the file's tokens)
+            for (idx, pos) in file.token_positions {
+                position_triples.push((file_token_ids[idx as usize], doc_id, pos));
             }
 
             // Store line map
@@ -988,19 +990,22 @@ impl IndexWriter {
                 .push(doc_id);
         }
 
+        // Add token positions first (they index into `tokens`, which is
+        // moved into the postings map below)
+        for (idx, pos) in processed.token_positions {
+            let token = &processed.tokens[idx as usize];
+            if let Some(doc_map) = self.token_position_postings.get_mut(token) {
+                doc_map.entry(doc_id).or_default().push(pos);
+            } else {
+                let mut doc_map = std::collections::BTreeMap::new();
+                doc_map.insert(doc_id, vec![pos]);
+                self.token_position_postings.insert(token.clone(), doc_map);
+            }
+        }
+
         // Add tokens to postings
         for token in processed.tokens {
             self.token_postings.entry(token).or_default().push(doc_id);
-        }
-
-        // Add token positions
-        for (token, pos) in processed.token_positions {
-            self.token_position_postings
-                .entry(token)
-                .or_default()
-                .entry(doc_id)
-                .or_default()
-                .push(pos);
         }
 
         // Store line map
@@ -1331,19 +1336,22 @@ impl IndexWriter {
                 .push(doc_id);
         }
 
+        // Add token positions first (they index into `tokens`, which is
+        // moved into the postings map below)
+        for (idx, pos) in file.token_positions {
+            let token = &file.tokens[idx as usize];
+            if let Some(doc_map) = self.token_position_postings.get_mut(token) {
+                doc_map.entry(doc_id).or_default().push(pos);
+            } else {
+                let mut doc_map = std::collections::BTreeMap::new();
+                doc_map.insert(doc_id, vec![pos]);
+                self.token_position_postings.insert(token.clone(), doc_map);
+            }
+        }
+
         // Add tokens to postings
         for token in file.tokens {
             self.token_postings.entry(token).or_default().push(doc_id);
-        }
-
-        // Add token positions
-        for (token, pos) in file.token_positions {
-            self.token_position_postings
-                .entry(token)
-                .or_default()
-                .entry(doc_id)
-                .or_default()
-                .push(pos);
         }
 
         // Store line map
@@ -1596,19 +1604,22 @@ impl DeltaSegmentWriter {
                 .push(doc_id);
         }
 
+        // Add token positions first (they index into `tokens`, which is
+        // moved into the postings map below)
+        for (idx, pos) in processed.token_positions {
+            let token = &processed.tokens[idx as usize];
+            if let Some(doc_map) = self.token_position_postings.get_mut(token) {
+                doc_map.entry(doc_id).or_default().push(pos);
+            } else {
+                let mut doc_map = std::collections::BTreeMap::new();
+                doc_map.insert(doc_id, vec![pos]);
+                self.token_position_postings.insert(token.clone(), doc_map);
+            }
+        }
+
         // Add tokens to postings
         for token in processed.tokens {
             self.token_postings.entry(token).or_default().push(doc_id);
-        }
-
-        // Add token positions
-        for (token, pos) in processed.token_positions {
-            self.token_position_postings
-                .entry(token)
-                .or_default()
-                .entry(doc_id)
-                .or_default()
-                .push(pos);
         }
 
         // Store line map
@@ -1952,12 +1963,15 @@ mod tests {
             .windows(3)
             .map(|w| u32::from_le_bytes([w[0], w[1], w[2], 0]))
             .collect();
-        let tokens: Vec<String> = content
-            .split_whitespace()
-            .map(|s| s.to_lowercase())
-            .collect();
-        let token_positions: Vec<(String, u32)> =
-            crate::utils::extract_tokens_with_positions(content);
+        // Positions index into the unique-token list, so both must come
+        // from the same extraction; whitespace tokens the tokenizer misses
+        // are appended after (position indices stay valid)
+        let (mut tokens, token_positions) = crate::utils::extract_tokens_and_positions(content);
+        for t in content.split_whitespace().map(|s| s.to_lowercase()) {
+            if !tokens.contains(&t) {
+                tokens.push(t);
+            }
+        }
         let line_offsets: Vec<u32> = std::iter::once(0)
             .chain(
                 content
