@@ -1,6 +1,6 @@
 use crate::index::types::Trigram;
 use crate::query::parser::{Query, QueryNode};
-use crate::utils::{query_trigrams, tokenize_query_with_positions};
+use crate::utils::{query_trigrams, tokenize_query, tokenize_query_with_positions};
 
 /// Query execution plan
 #[derive(Debug)]
@@ -18,6 +18,16 @@ pub enum PlanStep {
     TokenLookup(String),
     /// Union results from sub-plans
     Union(Vec<QueryPlan>),
+    /// Single-word literal narrowing: token postings unioned with trigram
+    /// postings for substring recall. The trigram side is best-effort — when
+    /// its trigrams are all stop-grams, the intersection of the word's
+    /// sub-token postings (e.g. `foo_bar` -> foo ∩ bar) is used instead of
+    /// degrading the candidate set to the whole corpus.
+    TokenOrTrigram {
+        token: String,
+        sub_tokens: Vec<String>,
+        trigrams: Vec<Trigram>,
+    },
     /// Intersect results from sub-plans
     #[allow(dead_code)]
     Intersect(Vec<QueryPlan>),
@@ -151,19 +161,14 @@ impl QueryPlanner {
                 if is_single_word {
                     let trigrams = query_trigrams(text);
 
-                    // Create sub-plans for both approaches
-                    let token_plan = QueryPlan {
-                        steps: vec![PlanStep::TokenLookup(text.to_lowercase())],
-                        verification: None,
-                    };
-
                     let steps = if !trigrams.is_empty() {
-                        let trigram_plan = QueryPlan {
-                            steps: vec![PlanStep::TrigramIntersect(trigrams)],
-                            verification: None,
-                        };
-                        // Union token and trigram results for substring matching
-                        vec![PlanStep::Union(vec![token_plan, trigram_plan])]
+                        // Token lookup for fast exact match, trigrams for
+                        // substring recall (best-effort under stop-grams)
+                        vec![PlanStep::TokenOrTrigram {
+                            token: text.to_lowercase(),
+                            sub_tokens: tokenize_query(text),
+                            trigrams,
+                        }]
                     } else {
                         vec![PlanStep::TokenLookup(text.to_lowercase())]
                     };
@@ -211,18 +216,14 @@ impl QueryPlanner {
                 if is_single_word {
                     let trigrams = query_trigrams(text);
 
-                    let token_plan = QueryPlan {
-                        steps: vec![PlanStep::TokenLookup(text.to_lowercase())],
-                        verification: None,
-                    };
-
                     let steps = if !trigrams.is_empty() {
-                        let trigram_plan = QueryPlan {
-                            steps: vec![PlanStep::TrigramIntersect(trigrams)],
-                            verification: None,
-                        };
-                        // Union token and trigram results for substring matching
-                        vec![PlanStep::Union(vec![token_plan, trigram_plan])]
+                        // Token lookup for fast exact match, trigrams for
+                        // substring recall (best-effort under stop-grams)
+                        vec![PlanStep::TokenOrTrigram {
+                            token: text.to_lowercase(),
+                            sub_tokens: tokenize_query(text),
+                            trigrams,
+                        }]
                     } else {
                         vec![PlanStep::TokenLookup(text.to_lowercase())]
                     };
@@ -329,19 +330,15 @@ impl QueryPlanner {
                         // other-case docs but still add substring matches the
                         // token index misses (e.g. the phrase inside a larger
                         // identifier), same as single-word Literal narrowing
-                        let token_plan = QueryPlan {
-                            steps: vec![PlanStep::TokenLookup(token.clone())],
-                            verification: None,
-                        };
                         let trigrams = query_trigrams(text);
                         if trigrams.is_empty() {
                             steps.push(PlanStep::TokenLookup(token.clone()));
                         } else {
-                            let trigram_plan = QueryPlan {
-                                steps: vec![PlanStep::TrigramIntersect(trigrams)],
-                                verification: None,
-                            };
-                            steps.push(PlanStep::Union(vec![token_plan, trigram_plan]));
+                            steps.push(PlanStep::TokenOrTrigram {
+                                token: token.clone(),
+                                sub_tokens: tokenize_query(text),
+                                trigrams,
+                            });
                         }
                     }
                 } else {
@@ -560,11 +557,7 @@ mod tests {
         let plan = plan_ci("\"deadlock\"");
         let has_token_lookup = plan.steps.iter().any(|s| match s {
             PlanStep::TokenLookup(t) => t == "deadlock",
-            PlanStep::Union(plans) => plans.iter().any(|p| {
-                p.steps
-                    .iter()
-                    .any(|s| matches!(s, PlanStep::TokenLookup(t) if t == "deadlock"))
-            }),
+            PlanStep::TokenOrTrigram { token, .. } => token == "deadlock",
             _ => false,
         });
         assert!(

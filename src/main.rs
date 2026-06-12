@@ -416,12 +416,12 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
             Ok(response) => response.matches,
             Err(e) => {
                 eprintln!("Daemon search failed, falling back to direct search: {}", e);
-                do_direct_content_search(&combined_pattern, &root, opts.max_count, ctx_before, ctx_after, opts.ignore_case)?
+                do_direct_content_search(&combined_pattern, &root, opts.max_count, ctx_before, ctx_after, opts.ignore_case, opts.files_with_matches)?
             }
         }
     } else {
         // Fall back to direct search without daemon
-        do_direct_content_search(&combined_pattern, &root, opts.max_count, ctx_before, ctx_after, opts.ignore_case)?
+        do_direct_content_search(&combined_pattern, &root, opts.max_count, ctx_before, ctx_after, opts.ignore_case, opts.files_with_matches)?
     };
 
     // Output results
@@ -491,6 +491,7 @@ fn do_direct_content_search(
     context_before: u32,
     context_after: u32,
     case_insensitive: bool,
+    files_only: bool,
 ) -> Result<Vec<server::protocol::ContentMatch>> {
     use crate::index::reader::IndexReader;
     use crate::query::{parse_query, QueryExecutor};
@@ -507,6 +508,25 @@ fn do_direct_content_search(
     }
 
     let executor = QueryExecutor::new(&reader);
+
+    // -l: files-only path stops scanning each file at its first match and
+    // skips per-line match extraction entirely (same as the daemon path)
+    if files_only {
+        let matching_files = executor.execute_files_only(&parsed, limit)?;
+        return Ok(matching_files
+            .into_iter()
+            .map(|path| server::protocol::ContentMatch {
+                path,
+                line_number: 1,
+                line_content: String::new(),
+                match_start: 0,
+                match_end: 0,
+                context_before: vec![],
+                context_after: vec![],
+            })
+            .collect());
+    }
+
     let matches = executor.execute_with_content(&parsed, context_before, context_after)?;
 
     // Convert to protocol type and apply limit (0 = unlimited)

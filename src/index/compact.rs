@@ -115,7 +115,7 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
     );
 
     // Step 3: Compute stop-grams from merged frequencies
-    let stop_grams = compute_stop_grams(&trigram_postings, 512);
+    let stop_grams = compute_stop_grams(&trigram_postings, remapping.valid_docs.len(), 512);
     eprintln!("  Computed {} stop-grams", stop_grams.len());
 
     // Step 4: Write merged segment atomically
@@ -585,16 +585,15 @@ fn merge_token_positions_segment(
 /// Compute stop-grams from merged trigram frequencies.
 fn compute_stop_grams(
     trigram_postings: &BTreeMap<Trigram, Vec<DocId>>,
+    doc_count: usize,
     count: usize,
 ) -> HashSet<Trigram> {
-    let mut freq: Vec<_> = trigram_postings
+    let freq: Vec<_> = trigram_postings
         .iter()
         .map(|(&t, v)| (t, v.len()))
         .collect();
 
-    freq.sort_by(|a, b| b.1.cmp(&a.1));
-
-    freq.into_iter().take(count).map(|(t, _)| t).collect()
+    crate::index::writer::select_stop_grams(freq, doc_count, count)
 }
 
 /// Write trigram index files.
@@ -790,15 +789,25 @@ mod tests {
     #[test]
     fn test_compute_stop_grams() {
         let mut postings = BTreeMap::new();
-        postings.insert(1u32, vec![1, 2, 3, 4, 5]); // freq 5
-        postings.insert(2u32, vec![1, 2]); // freq 2
-        postings.insert(3u32, vec![1, 2, 3]); // freq 3
-        postings.insert(4u32, vec![1]); // freq 1
+        postings.insert(1u32, vec![1, 2, 3, 4, 5]); // in 5/6 docs
+        postings.insert(2u32, vec![1, 2]); // in 2/6 docs
+        postings.insert(3u32, vec![1, 2, 3, 4]); // in 4/6 docs
+        postings.insert(4u32, vec![1]); // in 1/6 docs
 
-        let stop_grams = compute_stop_grams(&postings, 2);
+        // Only trigrams present in more than half of the 6 documents qualify
+        let stop_grams = compute_stop_grams(&postings, 6, 2);
         assert_eq!(stop_grams.len(), 2);
-        assert!(stop_grams.contains(&1u32)); // highest freq
-        assert!(stop_grams.contains(&3u32)); // second highest
+        assert!(stop_grams.contains(&1u32)); // 5/6 docs
+        assert!(stop_grams.contains(&3u32)); // 4/6 docs
+
+        // The cap still applies among qualifying trigrams
+        let capped = compute_stop_grams(&postings, 6, 1);
+        assert_eq!(capped.len(), 1);
+        assert!(capped.contains(&1u32));
+
+        // In a tiny index nothing is hot enough to stop
+        let none = compute_stop_grams(&postings, 100, 2);
+        assert!(none.is_empty());
     }
 
     #[test]

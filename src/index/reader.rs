@@ -206,6 +206,27 @@ impl SegmentReader {
         RoaringBitmap::new()
     }
 
+    /// Union the postings of every dictionary token that CONTAINS `needle` as
+    /// a substring. Any alphanumeric substring of the content lies inside a
+    /// single token, so this recovers substring matches (e.g. "println"
+    /// inside "eprintln") when trigram narrowing is unavailable.
+    fn get_token_docs_containing(&self, needle: &str) -> RoaringBitmap {
+        use memchr::memmem;
+        let finder = memmem::Finder::new(needle.as_bytes());
+
+        let mut result = RoaringBitmap::new();
+        for entry in &self.token_dict.entries {
+            if entry.token.len() >= needle.len() && finder.find(entry.token.as_bytes()).is_some() {
+                let start = entry.offset as usize;
+                let end = start + entry.length as usize;
+                if end <= self.token_postings.len() {
+                    result |= delta_decode_bitmap(&self.token_postings[start..end]);
+                }
+            }
+        }
+        result
+    }
+
     /// Get position postings for a token: Vec<(doc_id, positions)>.
     /// When `filter` is provided, only candidate docs are decoded — other
     /// docs' position data is skipped byte-wise, and decoding stops once doc
@@ -476,6 +497,27 @@ impl IndexReader {
             self.segments
                 .par_iter()
                 .map(|segment| segment.get_token_docs(&token_lower))
+                .reduce(RoaringBitmap::new, |mut a, b| {
+                    a |= b;
+                    a
+                })
+        }
+    }
+
+    /// Get documents whose token dictionary has any token containing `needle`
+    /// as a substring (queries all segments in parallel). Used as a recall
+    /// fallback when trigram narrowing is unavailable (stop-grams).
+    pub fn get_token_docs_containing(&self, needle: &str) -> RoaringBitmap {
+        let needle_lower = needle.to_lowercase();
+        if self.segments.len() <= 1 {
+            self.segments
+                .first()
+                .map(|s| s.get_token_docs_containing(&needle_lower))
+                .unwrap_or_default()
+        } else {
+            self.segments
+                .par_iter()
+                .map(|segment| segment.get_token_docs_containing(&needle_lower))
                 .reduce(RoaringBitmap::new, |mut a, b| {
                     a |= b;
                     a

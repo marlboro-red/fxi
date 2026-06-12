@@ -33,6 +33,21 @@ struct SegmentWriteJob {
     trigram_frequencies: Arc<Mutex<ahash::AHashMap<Trigram, u32>>>,
 }
 
+/// Pick stop-grams from (trigram, doc-frequency) pairs: a trigram qualifies
+/// only when it appears in more than half of all documents (it can no longer
+/// narrow the candidate set), capped at the `cap` hottest ones. The fraction
+/// threshold keeps small indexes from declaring every trigram a stop-gram.
+pub(crate) fn select_stop_grams(
+    freq: Vec<(Trigram, usize)>,
+    doc_count: usize,
+    cap: usize,
+) -> HashSet<Trigram> {
+    let min_docs = doc_count / 2 + 1;
+    let mut hot: Vec<_> = freq.into_iter().filter(|&(_, c)| c >= min_docs).collect();
+    hot.sort_by(|a, b| b.1.cmp(&a.1));
+    hot.into_iter().take(cap).map(|(t, _)| t).collect()
+}
+
 /// Chunked index writer for memory-bounded index building.
 /// Processes files in chunks and writes each chunk as a separate segment.
 /// Segment writes happen asynchronously in a background thread to overlap
@@ -648,17 +663,12 @@ impl ChunkedIndexWriter {
             .trigram_frequencies
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut freq: Vec<_> = freq_map
+        let freq: Vec<_> = freq_map
             .iter()
             .map(|(&t, &count)| (t, count as usize))
             .collect();
 
-        freq.sort_by(|a, b| b.1.cmp(&a.1));
-
-        freq.into_iter()
-            .take(self.config.stop_gram_count)
-            .map(|(t, _)| t)
-            .collect()
+        select_stop_grams(freq, self.all_documents.len(), self.config.stop_gram_count)
     }
 
     /// Finalize the index - wait for pending writes, then write global data (docs, paths, meta)
@@ -1078,18 +1088,13 @@ impl IndexWriter {
 
     /// Compute stop-grams (most frequent trigrams)
     fn compute_stop_grams(&self) -> HashSet<Trigram> {
-        let mut freq: Vec<_> = self
+        let freq: Vec<_> = self
             .trigram_postings
             .iter()
             .map(|(&t, v)| (t, v.len()))
             .collect();
 
-        freq.sort_by(|a, b| b.1.cmp(&a.1));
-
-        freq.into_iter()
-            .take(self.config.stop_gram_count)
-            .map(|(t, _)| t)
-            .collect()
+        select_stop_grams(freq, self.documents.len(), self.config.stop_gram_count)
     }
 
     /// Write trigram index (dictionary + postings)

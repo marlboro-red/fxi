@@ -591,6 +591,55 @@ impl<'a> QueryExecutor<'a> {
                     });
                 }
 
+                PlanStep::TokenOrTrigram {
+                    token,
+                    sub_tokens,
+                    trigrams,
+                } => {
+                    let mut docs = self.reader.get_token_docs(token);
+
+                    // Trigram side is a best-effort substring-recall
+                    // supplement: when all its trigrams are stop-grams it is
+                    // dropped, instead of degrading to the whole corpus the
+                    // way an unnarrowable sub-plan would
+                    let filtered: Vec<_> = trigrams
+                        .iter()
+                        .filter(|&&t| !self.reader.is_stop_gram(t))
+                        .copied()
+                        .collect();
+                    if !filtered.is_empty() {
+                        docs |= self.reader.get_trigram_docs_with_bloom(&filtered);
+                    } else {
+                        // No usable trigrams. Substring recall comes from the
+                        // token dictionary instead: any alphanumeric substring
+                        // lies inside a single token ("println" in
+                        // "eprintln"), so scan the dictionary for containing
+                        // tokens...
+                        docs |= self.reader.get_token_docs_containing(token);
+
+                        // ...and compound identifiers (foo_bar) are indexed
+                        // as their parts, so intersect the sub-token postings
+                        if sub_tokens.len() >= 2 {
+                            let mut sub_docs: Option<RoaringBitmap> = None;
+                            for sub in sub_tokens {
+                                let d = self.reader.get_token_docs(sub);
+                                sub_docs = Some(match sub_docs {
+                                    Some(existing) => existing & d,
+                                    None => d,
+                                });
+                            }
+                            if let Some(sub_docs) = sub_docs {
+                                docs |= sub_docs;
+                            }
+                        }
+                    }
+
+                    candidates = Some(match candidates {
+                        Some(existing) => existing & docs,
+                        None => docs,
+                    });
+                }
+
                 PlanStep::Union(sub_plans) => {
                     let mut union = RoaringBitmap::new();
                     for sub_plan in sub_plans {
