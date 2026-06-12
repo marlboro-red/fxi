@@ -1993,3 +1993,20 @@ XMLParser       →      ["xml", "parser"]               (acronym handling)
 
 *Document generated: 2026-02-04*
 *fxi version: Latest (commit 9a9e3a9)*
+
+
+## Measured non-optimizations (2026-06)
+
+Negative results worth remembering before re-attempting:
+
+- **Compacting many segments into one does not speed up queries.** The
+  reader searches segments in parallel; a 249-segment Chromium index
+  answered every benchmarked query faster than the same index merged to a
+  single segment (e.g. `-l -i deprecated`: 618ms vs 1006ms). Compaction's
+  value is tombstone GC and bounding delta-segment count, not query speed.
+- **Directory-mtime pruning cannot accelerate the incremental scan.** A
+  directory's mtime changes when entries are added/removed/renamed, but NOT
+  when a child file's content changes — so pruning unchanged-mtime
+  directories would silently miss modified files. The per-file stat sweep
+  (parallelized) stays; the watcher path is the real fix for watch-heavy
+  workflows.

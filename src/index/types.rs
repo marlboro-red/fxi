@@ -318,7 +318,11 @@ impl Default for IndexConfig {
                 ".codesearch".to_string(),
             ],
             scoring_weights: ScoringWeights::default(),
-            chunk_size: 5000, // Files per segment chunk
+            // Files per segment chunk: bounds indexing peak RSS (the
+            // dominant term) and yields multiple segments, which the reader
+            // queries in parallel -- measured on Chromium, ~100-250 segments
+            // answer queries FASTER than one merged segment
+            chunk_size: 2000,
         }
     }
 }

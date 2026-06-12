@@ -397,7 +397,7 @@ Press `F1` or `?` to show help in the TUI.
 | Cold startup | <2s | ~50ms-1s (query-dependent) |
 | Full build (1M files) | <5 min | ~31s for 449k files (extrapolates to ~70s) |
 | Delta update (100 files) | <1s | 0.4s (Linux, 93k files); 3.2s (Chromium, 449k files — scan-bound) |
-| RAM usage | <500MB | 2.6-2.9GB peak during indexing (1.6GB with `--chunk-size 2000`) |
+| RAM usage | <500MB | 1.6-2.5GB peak during indexing; streaming segment writes are the known path to the target |
 
 ## Benchmarks
 
@@ -445,9 +445,9 @@ Note on `-i`: case-insensitive queries narrow through the lowercased token index
 | Throughput | ~10,820 files/sec | ~16,240 files/sec |
 | Incremental update (50 changed files) | 0.44s | 3.2s |
 | No-op scan (nothing changed) | 0.6s | 2.9s |
-| Peak RSS during build | 2.6GB | 2.9GB |
+| Peak RSS during build | ~1.8GB | ~2.5GB |
 
-Peak RSS scales with `--chunk-size` (default 5000 files per segment): `--chunk-size 2000` builds the kernel index in 1.6GB at a ~3% time cost, at the price of more segments to consult per query.
+Peak RSS scales with `--chunk-size` (default 2000 files per segment). More segments are not a query-time cost: the reader searches segments in parallel, and a ~250-segment Chromium index measurably answers queries faster than the same index compacted to one segment.
 
 Incremental updates write delta segments for changed files only; the change-detection scan walks the tree with parallel walker threads.
 
