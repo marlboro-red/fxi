@@ -908,6 +908,8 @@ impl IndexServer {
                 protocol_version: PROTOCOL_VERSION,
                 server_version: env!("CARGO_PKG_VERSION").to_string(),
             },
+
+            Request::WatchStatus { root_path } => self.handle_watch_status(root_path),
         }
     }
 
@@ -1218,6 +1220,40 @@ impl IndexServer {
     }
 
     /// Handle reload request
+    /// Report whether a root is being watched and how many debounced
+    /// changes await flushing. Does NOT load the index for unloaded roots:
+    /// an unloaded root is by definition not watched.
+    fn handle_watch_status(&self, root_path: Option<PathBuf>) -> Response {
+        let root_path = match self.resolve_root(root_path) {
+            Ok(p) => p,
+            Err(resp) => return resp,
+        };
+
+        let watching = {
+            let indexes = self.indexes.read().unwrap();
+            indexes.get(&root_path).is_some_and(|c| c.is_watching())
+        };
+
+        let pending_changes = if watching {
+            let pending = self
+                .pending_changes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            pending
+                .get(&root_path)
+                .map(|p| p.batch.created.len() + p.batch.modified.len() + p.batch.deleted.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        Response::WatchStatus {
+            watching,
+            pending_changes,
+            resolved_root: Some(root_path),
+        }
+    }
+
     fn handle_reload(&self, root_path: Option<PathBuf>) -> Response {
         let root_path = match self.resolve_root(root_path) {
             Ok(p) => p,
@@ -1343,6 +1379,26 @@ impl IndexServer {
             };
 
             if should_start_watcher {
+                // Reconcile before watching: the watcher only sees events
+                // from now on, so changes made while no watcher was running
+                // must be picked up by one incremental scan or the index
+                // would stay stale until a manual `fxi index`
+                eprintln!("fxid: reconciling index for {}", root_path.display());
+                match crate::index::build::update_index(root_path) {
+                    Ok(_) => {
+                        // Swap in a fresh reader in case the scan changed it
+                        if let Ok(reader) = IndexReader::open(root_path) {
+                            let indexes = self.indexes.read().unwrap();
+                            if let Some(cached) = indexes.get(root_path) {
+                                cached.set_pending_reader(reader);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("fxid: reconcile failed for {}: {}", root_path.display(), e)
+                    }
+                }
+
                 eprintln!("fxid: starting file watcher for {}", root_path.display());
                 self.spawn_watcher(root_path);
             }

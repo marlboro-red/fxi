@@ -212,6 +212,27 @@ impl IndexClient {
         }
     }
 
+
+    /// Ask whether the daemon is watching (and keeping fresh) a root.
+    /// Returns (watching, pending_changes).
+    pub fn watch_status(&mut self, root_path: Option<&Path>) -> ClientResult<(bool, usize)> {
+        let request = Request::WatchStatus {
+            root_path: root_path.map(|p| p.to_path_buf()),
+        };
+
+        let response = self.send_recv(&request)?;
+
+        match response {
+            Response::WatchStatus {
+                watching,
+                pending_changes,
+                ..
+            } => Ok((watching, pending_changes)),
+            Response::Error { message } => Err(ClientError::ServerError(message)),
+            _ => Err(ClientError::InvalidResponse),
+        }
+    }
+
     /// Request graceful shutdown
     pub fn shutdown(&mut self) -> ClientResult<()> {
         let response = self.send_recv(&Request::Shutdown)?;

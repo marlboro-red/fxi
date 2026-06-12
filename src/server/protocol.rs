@@ -75,6 +75,12 @@ pub enum Request {
         /// Client's protocol version
         protocol_version: u32,
     },
+
+    /// Ask whether the daemon is watching (and keeping fresh) a root
+    WatchStatus {
+        #[serde(default)]
+        root_path: Option<PathBuf>,
+    },
 }
 
 /// Response from server to client
@@ -114,6 +120,17 @@ pub enum Response {
         protocol_version: u32,
         /// Server software version (e.g. "0.1.0")
         server_version: String,
+    },
+
+    /// Watch status for a root
+    WatchStatus {
+        /// Whether a file watcher is active for this root
+        watching: bool,
+        /// Debounced file changes not yet flushed to a delta segment
+        pending_changes: usize,
+        /// The resolved codebase root the server used
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_root: Option<PathBuf>,
     },
 }
 
@@ -313,6 +330,43 @@ pub fn read_message<R: Read, T: for<'de> Deserialize<'de>>(reader: &mut R) -> st
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn test_roundtrip_watch_status() {
+        let req = Request::WatchStatus {
+            root_path: Some(PathBuf::from("/home/user/project")),
+        };
+        let mut buf = Vec::new();
+        write_message(&mut buf, &req).unwrap();
+        let decoded: Request = read_message(&mut Cursor::new(buf)).unwrap();
+        match decoded {
+            Request::WatchStatus { root_path } => {
+                assert_eq!(root_path, Some(PathBuf::from("/home/user/project")))
+            }
+            _ => panic!("Wrong variant"),
+        }
+
+        let resp = Response::WatchStatus {
+            watching: true,
+            pending_changes: 3,
+            resolved_root: Some(PathBuf::from("/home/user/project")),
+        };
+        let mut buf = Vec::new();
+        write_message(&mut buf, &resp).unwrap();
+        let decoded: Response = read_message(&mut Cursor::new(buf)).unwrap();
+        match decoded {
+            Response::WatchStatus {
+                watching,
+                pending_changes,
+                resolved_root,
+            } => {
+                assert!(watching);
+                assert_eq!(pending_changes, 3);
+                assert_eq!(resolved_root, Some(PathBuf::from("/home/user/project")));
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
 
     #[test]
     fn test_roundtrip_request() {

@@ -207,6 +207,8 @@ The daemon keeps indexes loaded in memory. When running, searches are **up to ~4
 
 With `--watch`, the daemon monitors indexed directories for file changes and automatically updates indexes. Changes are debounced to handle rapid edits (e.g., IDE auto-save, git operations). The watcher respects `.gitignore` rules and skips common non-source directories (`node_modules`, `target`, `.git`, etc.).
 
+When a watcher starts for a root, the daemon first reconciles the index with one incremental scan, so changes made while the daemon was down are picked up. While a root is watched, `fxi index` skips its own tree walk — the daemon owns freshness — and reports any pending debounced changes instead. `fxi index --force` still rebuilds locally.
+
 ### Manage Indexes
 
 ```bash
