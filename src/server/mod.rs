@@ -8,6 +8,8 @@
 //! - Client: Connects to socket/pipe, sends queries, receives results
 //! - Fallback: If daemon unavailable, falls back to direct index loading
 
+pub mod daemon_core;
+
 #[cfg(unix)]
 mod client_unix;
 #[cfg(unix)]
