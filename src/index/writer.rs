@@ -45,7 +45,7 @@ pub(crate) fn select_stop_grams(
 ) -> HashSet<Trigram> {
     let min_docs = doc_count / 2 + 1;
     let mut hot: Vec<_> = freq.into_iter().filter(|&(_, c)| c >= min_docs).collect();
-    hot.sort_by(|a, b| b.1.cmp(&a.1));
+    hot.sort_by_key(|&(_, freq)| std::cmp::Reverse(freq));
     hot.into_iter().take(cap).map(|(t, _)| t).collect()
 }
 

@@ -607,11 +607,9 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
     }
 
     // Calculate change percentage
-    let change_percent = if diff.indexed_count > 0 {
-        (total_changes * 100) / diff.indexed_count
-    } else {
-        100
-    };
+    let change_percent = (total_changes * 100)
+        .checked_div(diff.indexed_count)
+        .unwrap_or(100);
 
     println!(
         "Detected {} changes: {} new, {} modified, {} deleted ({:.1}% of index)",

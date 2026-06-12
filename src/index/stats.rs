@@ -32,7 +32,7 @@ pub fn show_stats(root_path: &Path) -> Result<()> {
     println!();
     println!("Files by language:");
     let mut sorted: Vec<_> = lang_counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
 
     for (lang, count) in sorted.iter().take(15) {
         println!("  {:15} {}", lang, count);
