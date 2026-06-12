@@ -232,6 +232,12 @@ pub struct IndexMeta {
     /// Old indexes default to false; new indexes set this to true.
     #[serde(default)]
     pub has_positions: bool,
+    /// Files the indexer rejected after reading content (binary sniff, no
+    /// tokens), with the mtime seen at rejection. The incremental change
+    /// scan skips these while unchanged instead of re-reading and
+    /// re-rejecting them on every update.
+    #[serde(default)]
+    pub rejected_files: Vec<(PathBuf, u64)>,
 }
 
 impl Default for IndexMeta {
@@ -250,6 +256,7 @@ impl Default for IndexMeta {
             valid_doc_count: 0,
             delta_baseline: 0,
             has_positions: false,
+            rejected_files: Vec::new(),
         }
     }
 }

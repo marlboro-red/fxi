@@ -168,6 +168,9 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
         valid_doc_count: remapping.valid_docs.len() as u32,
         delta_baseline: 0, // Reset after merge - all segments consolidated
         has_positions,
+        // Compaction merges segments; the rejected-file scan cache is
+        // unaffected and must survive the meta rewrite
+        rejected_files: meta.rejected_files,
     };
     write_meta_atomic(&index_path, &new_meta)?;
     eprintln!("  Updated meta.json");

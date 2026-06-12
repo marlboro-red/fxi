@@ -290,6 +290,9 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
     let mut chunked_writer = ChunkedIndexWriter::new(&root, config)?;
     let error_count = Arc::new(AtomicUsize::new(0));
     let total_processed = Arc::new(AtomicUsize::new(0));
+    // Files rejected after their content was read (binary sniff, no tokens):
+    // recorded in meta so incremental scans skip them while unchanged
+    let rejected_files = Arc::new(Mutex::new(Vec::<(PathBuf, u64)>::new()));
 
     let num_chunks = if chunk_size == 0 { 1 } else { total_files.div_ceil(chunk_size) };
 
@@ -325,6 +328,7 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
         let pb_clone = progress_bar.clone();
         let error_count_clone = error_count.clone();
         let total_processed_clone = total_processed.clone();
+        let rejected_files_clone = rejected_files.clone();
 
         // Process chunk files in parallel
         let processed_files: Vec<ProcessedFile> = chunk
@@ -421,6 +425,13 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
 
                 if result.is_some() {
                     total_processed_clone.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    // Content was read but rejected (binary sniff, no tokens):
+                    // remember it so change scans skip it while unchanged
+                    rejected_files_clone
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push((rel_path.clone(), mtime));
                 }
 
                 if let Some(ref pb) = pb_clone {
@@ -451,6 +462,13 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
 
         // Memory freed here - processed_files dropped
     }
+
+    let rejected = std::mem::take(
+        &mut *rejected_files
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    );
+    chunked_writer.set_rejected_files(rejected);
 
     let file_count = total_processed.load(Ordering::Relaxed);
     if num_chunks > 1 && !silent {
@@ -516,6 +534,9 @@ struct IndexDiff {
     modified_files: Vec<(PathBuf, PathBuf, u32)>, // (full_path, rel_path, old_doc_id)
     /// Deleted files (relative paths, to mark as tombstones)
     deleted_files: Vec<PathBuf>,
+    /// Previously rejected files still present with unchanged mtime
+    /// (carried forward into the updated rejected list)
+    rejected_unchanged: Vec<(PathBuf, u64)>,
     /// Total files currently in index
     indexed_count: usize,
 }
@@ -552,8 +573,11 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
         }
     }
 
+    // Previously rejected files (binary sniff etc.) with their mtimes
+    let rejected: HashMap<PathBuf, u64> = meta.rejected_files.iter().cloned().collect();
+
     // Compute diff with filesystem
-    let diff = compute_index_diff(&root, &indexed_files)?;
+    let diff = compute_index_diff(&root, &indexed_files, &rejected)?;
 
     let total_changes = diff.new_files.len() + diff.modified_files.len() + diff.deleted_files.len();
 
@@ -593,7 +617,11 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
 }
 
 /// Compute the difference between indexed files and filesystem
-fn compute_index_diff(root: &Path, indexed_files: &HashMap<PathBuf, (u32, u64)>) -> Result<IndexDiff> {
+fn compute_index_diff(
+    root: &Path,
+    indexed_files: &HashMap<PathBuf, (u32, u64)>,
+    rejected: &HashMap<PathBuf, u64>,
+) -> Result<IndexDiff> {
     let config = IndexConfig::default();
     let max_file_size = config.max_file_size;
 
@@ -703,6 +731,7 @@ fn compute_index_diff(root: &Path, indexed_files: &HashMap<PathBuf, (u32, u64)>)
 
     let mut new_files = Vec::new();
     let mut modified_files = Vec::new();
+    let mut rejected_unchanged = Vec::new();
     let mut seen_paths: std::collections::HashSet<&Path> =
         std::collections::HashSet::with_capacity(scanned.len());
 
@@ -714,6 +743,10 @@ fn compute_index_diff(root: &Path, indexed_files: &HashMap<PathBuf, (u32, u64)>)
             if *current_mtime != indexed_mtime {
                 modified_files.push((full_path.clone(), rel_path.clone(), doc_id));
             }
+        } else if rejected.get(rel_path) == Some(current_mtime) {
+            // Previously rejected (binary sniff etc.) and unchanged since:
+            // skip instead of re-reading and re-rejecting it
+            rejected_unchanged.push((rel_path.clone(), *current_mtime));
         } else {
             // New file
             new_files.push((full_path.clone(), rel_path.clone()));
@@ -731,6 +764,7 @@ fn compute_index_diff(root: &Path, indexed_files: &HashMap<PathBuf, (u32, u64)>)
         new_files,
         modified_files,
         deleted_files,
+        rejected_unchanged,
         indexed_count: indexed_files.len(),
     })
 }
@@ -772,6 +806,7 @@ fn perform_incremental_update(root: &Path, meta: &IndexMeta, diff: IndexDiff) ->
 
     let config = IndexConfig::default();
     let mut meta = meta.clone();
+    let old_rejected_files = meta.rejected_files.clone();
 
     // Next segment id after base + existing deltas
     let next_segment_id = meta
@@ -802,17 +837,45 @@ fn perform_incremental_update(root: &Path, meta: &IndexMeta, diff: IndexDiff) ->
         .chain(diff.modified_files.iter().map(|(full, rel, _)| (full, rel)))
         .collect();
 
-    let processed: Vec<ProcessedFile> = to_index
+    let outcomes: Vec<Result<ProcessedFile, (PathBuf, u64)>> = to_index
         .par_iter()
-        .filter_map(|(full, rel)| process_file_for_update(full, rel, config.max_file_size))
+        .map(|(full, rel)| {
+            match process_file_for_update(full, rel, config.max_file_size) {
+                Some(p) => Ok(p),
+                None => {
+                    // Rejected (binary sniff etc.): remember it with its
+                    // current mtime so future scans skip it while unchanged
+                    let mtime = fs::metadata(full)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
+                        .unwrap_or(0);
+                    Err(((*rel).clone(), mtime))
+                }
+            }
+        })
         .collect();
 
-    let added_count = processed.len();
-    for file in processed {
-        writer.add_file(file);
+    let mut added_count = 0;
+    let mut rejected_files = diff.rejected_unchanged.clone();
+    for outcome in outcomes {
+        match outcome {
+            Ok(file) => {
+                added_count += 1;
+                writer.add_file(file);
+            }
+            Err(rejection) => rejected_files.push(rejection),
+        }
     }
+    rejected_files.sort();
+    meta.rejected_files = rejected_files;
 
     if !writer.has_changes() {
+        // Nothing indexable, but the rejected-file list may have grown (e.g.
+        // newly seen binaries): persist it so the next scan skips them
+        if meta.rejected_files != old_rejected_files {
+            crate::index::writer::write_meta_atomic(&get_index_dir(root)?, &meta)?;
+        }
         println!("No indexable changes to apply.");
         return Ok(());
     }

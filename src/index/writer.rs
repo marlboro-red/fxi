@@ -62,6 +62,9 @@ pub struct ChunkedIndexWriter {
     path_to_id: HashMap<PathBuf, PathId>,
     next_doc_id: DocId,
     segment_ids: Vec<SegmentId>,
+    /// Files rejected after reading content (binary sniff etc.), recorded in
+    /// meta so incremental scans skip them while unchanged
+    rejected_files: Vec<(PathBuf, u64)>,
     // Accumulated trigram frequencies for stop-gram computation (shared with
     // background thread). ahash: 3-byte trigram keys don't need SipHash.
     trigram_frequencies: Arc<Mutex<ahash::AHashMap<Trigram, u32>>>,
@@ -116,6 +119,7 @@ impl ChunkedIndexWriter {
             path_to_id: HashMap::new(),
             next_doc_id: 1,
             segment_ids: Vec::new(),
+            rejected_files: Vec::new(),
             trigram_frequencies: Arc::new(Mutex::new(ahash::AHashMap::new())),
             write_sender: Some(tx),
             write_thread: Some(write_thread),
@@ -812,6 +816,7 @@ impl ChunkedIndexWriter {
             valid_doc_count,
             delta_baseline,
             has_positions: true,
+            rejected_files: self.rejected_files.clone(),
         };
 
         let meta_path = self.index_path.join("meta.json");
@@ -819,6 +824,12 @@ impl ChunkedIndexWriter {
         serde_json::to_writer_pretty(file, &meta)?;
 
         Ok(())
+    }
+
+    /// Record files rejected during processing so the incremental change
+    /// scan can skip them while their mtime is unchanged
+    pub fn set_rejected_files(&mut self, rejected: Vec<(PathBuf, u64)>) {
+        self.rejected_files = rejected;
     }
 
     /// Get the index path
@@ -1265,6 +1276,7 @@ impl IndexWriter {
             valid_doc_count,
             delta_baseline: 0, // No delta segments in single-segment index
             has_positions: true,
+            rejected_files: Vec::new(),
         };
 
         let meta_path = self.index_path.join("meta.json");
