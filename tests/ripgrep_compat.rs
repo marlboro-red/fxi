@@ -267,6 +267,47 @@ fn test_flag_case_insensitive() {
 }
 
 #[test]
+fn test_flag_case_insensitive_phrase() {
+    let dir = setup_fixtures();
+
+    // Regression: -i with a quoted phrase used to regex-escape the quote
+    // characters themselves, matching almost nothing. The phrase "hello,
+    // world" must case-insensitively match `Hello, world!` in main.rs.
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-i", "\"hello, world\""], &dir);
+    assert!(fxi_ok, "fxi should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    assert!(
+        fxi_files.contains("main.rs"),
+        "fxi -i phrase should find main.rs, got: {:?}",
+        fxi_files
+    );
+
+    // Without -i the same lowercase phrase must NOT match
+    let (fxi_out_cs, _, _) = run_fxi(&["\"hello, world\""], &dir);
+    let fxi_files_cs = extract_files(&fxi_out_cs);
+    assert!(
+        !fxi_files_cs.contains("main.rs"),
+        "case-sensitive phrase should not match mixed-case content, got: {:?}",
+        fxi_files_cs
+    );
+}
+
+#[test]
+fn test_flag_case_insensitive_regex() {
+    let dir = setup_fixtures();
+
+    // -i must apply to regex queries too (it used to be silently ignored)
+    let (fxi_out, _, fxi_ok) = run_fxi(&["-i", "re:/hello.*world/"], &dir);
+    assert!(fxi_ok, "fxi should succeed");
+    let fxi_files = extract_files(&fxi_out);
+    assert!(
+        fxi_files.contains("main.rs"),
+        "fxi -i regex should find main.rs, got: {:?}",
+        fxi_files
+    );
+}
+
+#[test]
 fn test_flag_files_with_matches() {
     let dir = setup_fixtures();
 

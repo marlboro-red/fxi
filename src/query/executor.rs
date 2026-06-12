@@ -463,9 +463,16 @@ impl<'a> QueryExecutor<'a> {
         match verification {
             VerificationStep::Literal(text) => Self::has_literal_match(content, text),
             VerificationStep::BoostedLiteral { text, .. } => Self::has_literal_match(content, text),
-            VerificationStep::Phrase(text) => {
-                // Exact phrase match (case-sensitive)
-                content.contains(text)
+            VerificationStep::Phrase {
+                text,
+                case_insensitive,
+            } => {
+                if *case_insensitive {
+                    Self::has_literal_match(content, text)
+                } else {
+                    // Exact phrase match (case-sensitive)
+                    content.contains(text)
+                }
             }
             VerificationStep::Regex(pattern) => {
                 if let Some(re) = get_regex_cache().get_or_compile(pattern) {
@@ -1087,7 +1094,7 @@ impl<'a> QueryExecutor<'a> {
     /// Recursively collect terms from verification steps
     fn collect_terms(verification: &VerificationStep, terms: &mut Vec<String>) {
         match verification {
-            VerificationStep::Literal(text) | VerificationStep::Phrase(text) => {
+            VerificationStep::Literal(text) | VerificationStep::Phrase { text, .. } => {
                 // Split into words and collect meaningful terms
                 for word in text.split_whitespace() {
                     if word.len() >= 2 {
@@ -1149,9 +1156,10 @@ impl<'a> QueryExecutor<'a> {
                 // The boost is applied during scoring, not matching
                 Self::find_literal_matches_static(content, text, false, doc_id)
             }
-            VerificationStep::Phrase(text) => {
-                Self::find_literal_matches_static(content, text, true, doc_id)
-            }
+            VerificationStep::Phrase {
+                text,
+                case_insensitive,
+            } => Self::find_literal_matches_static(content, text, !case_insensitive, doc_id),
             VerificationStep::Regex(pattern) => {
                 // Use cached regex compilation for performance
                 if let Some(re) = get_regex_cache().get_or_compile(pattern) {
@@ -1661,7 +1669,10 @@ def format_warning(msg: str) -> str:
     #[test]
     fn test_verify_content_phrase() {
         let content = "fn main() {\n    println!(\"hello world\");\n}\n";
-        let verification = VerificationStep::Phrase("hello world".to_string());
+        let verification = VerificationStep::Phrase {
+            text: "hello world".to_string(),
+            case_insensitive: false,
+        };
 
         let matches = QueryExecutor::verify_content_static(content, &verification, 1);
 

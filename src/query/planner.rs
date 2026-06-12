@@ -54,8 +54,11 @@ pub enum VerificationStep {
         text: String,
         boost: f32,
     },
-    /// Exact phrase match
-    Phrase(String),
+    /// Exact phrase match (case-insensitive when -i is set)
+    Phrase {
+        text: String,
+        case_insensitive: bool,
+    },
     /// Regex match
     Regex(String),
     /// Proximity search: terms must appear within distance lines
@@ -72,7 +75,7 @@ pub enum VerificationStep {
 impl QueryPlan {
     /// Create a query plan from a parsed query
     pub fn from_query(query: &Query) -> Self {
-        let mut planner = QueryPlanner::new();
+        let mut planner = QueryPlanner::new(query.options.case_insensitive);
         planner.plan(query)
     }
 }
@@ -80,11 +83,17 @@ impl QueryPlan {
 /// Query planner
 struct QueryPlanner {
     steps: Vec<PlanStep>,
+    /// -i: trigram narrowing is case-sensitive, so case-insensitive queries
+    /// must narrow through the token/positional indexes (stored lowercased)
+    case_insensitive: bool,
 }
 
 impl QueryPlanner {
-    fn new() -> Self {
-        Self { steps: Vec::new() }
+    fn new(case_insensitive: bool) -> Self {
+        Self {
+            steps: Vec::new(),
+            case_insensitive,
+        }
     }
 
     fn plan(&mut self, query: &Query) -> QueryPlan {
@@ -161,7 +170,13 @@ impl QueryPlanner {
 
                     (steps, Some(VerificationStep::Literal(text.clone())))
                 } else {
-                    let trigrams = query_trigrams(text);
+                    // Under -i, skip case-sensitive trigram narrowing and use
+                    // the lowercased token index instead
+                    let trigrams = if self.case_insensitive {
+                        Vec::new()
+                    } else {
+                        query_trigrams(text)
+                    };
 
                     if trigrams.is_empty() {
                         // Short query or multiple short words, use token index
@@ -220,7 +235,13 @@ impl QueryPlanner {
                         }),
                     )
                 } else {
-                    let trigrams = query_trigrams(text);
+                    // Under -i, skip case-sensitive trigram narrowing and use
+                    // the lowercased token index instead
+                    let trigrams = if self.case_insensitive {
+                        Vec::new()
+                    } else {
+                        query_trigrams(text)
+                    };
 
                     if trigrams.is_empty() {
                         let tokens: Vec<_> = text
@@ -261,13 +282,17 @@ impl QueryPlanner {
             }
 
             QueryNode::Near { terms, distance } => {
-                // For proximity search, narrow using trigrams from all terms
+                // For proximity search, narrow using trigrams from all terms.
+                // Under -i, trigrams (case-sensitive) would miss other-case
+                // docs, so fall through to token lookups (stored lowercased).
                 let mut all_trigrams = Vec::new();
-                for term in terms {
-                    all_trigrams.extend(query_trigrams(term));
+                if !self.case_insensitive {
+                    for term in terms {
+                        all_trigrams.extend(query_trigrams(term));
+                    }
+                    all_trigrams.sort_unstable();
+                    all_trigrams.dedup();
                 }
-                all_trigrams.sort_unstable();
-                all_trigrams.dedup();
 
                 let steps = if all_trigrams.is_empty() {
                     // Use token lookups for short terms
@@ -290,24 +315,68 @@ impl QueryPlanner {
             }
 
             QueryNode::Phrase(text) => {
-                let trigrams = query_trigrams(text);
                 let phrase_tokens = tokenize_query_with_positions(text);
 
                 let mut steps = Vec::new();
 
-                if !trigrams.is_empty() {
-                    steps.push(PlanStep::TrigramIntersect(trigrams));
+                if self.case_insensitive {
+                    // Trigrams are case-sensitive, so narrow through the
+                    // lowercased token/positional indexes instead
+                    if phrase_tokens.len() >= 2 {
+                        steps.push(PlanStep::PositionalPhrase(phrase_tokens));
+                    } else if let Some((token, _)) = phrase_tokens.first() {
+                        // Union with exact-case trigrams: they can't see
+                        // other-case docs but still add substring matches the
+                        // token index misses (e.g. the phrase inside a larger
+                        // identifier), same as single-word Literal narrowing
+                        let token_plan = QueryPlan {
+                            steps: vec![PlanStep::TokenLookup(token.clone())],
+                            verification: None,
+                        };
+                        let trigrams = query_trigrams(text);
+                        if trigrams.is_empty() {
+                            steps.push(PlanStep::TokenLookup(token.clone()));
+                        } else {
+                            let trigram_plan = QueryPlan {
+                                steps: vec![PlanStep::TrigramIntersect(trigrams)],
+                                verification: None,
+                            };
+                            steps.push(PlanStep::Union(vec![token_plan, trigram_plan]));
+                        }
+                    }
+                } else {
+                    let trigrams = query_trigrams(text);
+                    if !trigrams.is_empty() {
+                        steps.push(PlanStep::TrigramIntersect(trigrams));
+                    }
+
+                    // Add positional phrase step if we have at least 2 tokens
+                    if phrase_tokens.len() >= 2 {
+                        steps.push(PlanStep::PositionalPhrase(phrase_tokens));
+                    }
                 }
 
-                // Add positional phrase step if we have at least 2 tokens
-                if phrase_tokens.len() >= 2 {
-                    steps.push(PlanStep::PositionalPhrase(phrase_tokens));
-                }
-
-                (steps, Some(VerificationStep::Phrase(text.clone())))
+                (
+                    steps,
+                    Some(VerificationStep::Phrase {
+                        text: text.clone(),
+                        case_insensitive: self.case_insensitive,
+                    }),
+                )
             }
 
             QueryNode::Regex(pattern) => {
+                if self.case_insensitive {
+                    // Case-sensitive trigram narrowing would miss other-case
+                    // matches, so verify across all docs with (?i) applied
+                    let ci_pattern = if pattern.starts_with("(?i)") {
+                        pattern.clone()
+                    } else {
+                        format!("(?i){}", pattern)
+                    };
+                    return (Vec::new(), Some(VerificationStep::Regex(ci_pattern)));
+                }
+
                 // Try to extract literal prefix for narrowing
                 let literal_prefix = extract_regex_prefix(pattern);
 
@@ -450,5 +519,89 @@ mod tests {
         );
         assert_eq!(extract_regex_prefix("^foo"), Some("foo".to_string()));
         assert_eq!(extract_regex_prefix("ab"), None); // Too short
+    }
+
+    fn plan_ci(input: &str) -> QueryPlan {
+        let mut query = crate::query::parser::parse_query(input);
+        query.options.case_insensitive = true;
+        QueryPlan::from_query(&query)
+    }
+
+    #[test]
+    fn test_ci_phrase_skips_trigram_narrowing() {
+        // Trigrams are case-sensitive; a CI phrase must narrow through the
+        // lowercased positional index instead
+        let plan = plan_ci("\"static void\"");
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|s| matches!(s, PlanStep::TrigramIntersect(_))),
+            "CI phrase must not use case-sensitive trigram narrowing"
+        );
+        assert!(
+            plan.steps
+                .iter()
+                .any(|s| matches!(s, PlanStep::PositionalPhrase(_))),
+            "CI phrase should narrow via positional index"
+        );
+        match plan.verification {
+            Some(VerificationStep::Phrase {
+                case_insensitive, ..
+            }) => assert!(case_insensitive),
+            other => panic!("expected CI phrase verification, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ci_single_token_phrase_uses_token_lookup() {
+        // Narrowing is a union of the lowercased token index and exact-case
+        // trigrams (the latter for substring recall inside identifiers)
+        let plan = plan_ci("\"deadlock\"");
+        let has_token_lookup = plan.steps.iter().any(|s| match s {
+            PlanStep::TokenLookup(t) => t == "deadlock",
+            PlanStep::Union(plans) => plans.iter().any(|p| {
+                p.steps
+                    .iter()
+                    .any(|s| matches!(s, PlanStep::TokenLookup(t) if t == "deadlock"))
+            }),
+            _ => false,
+        });
+        assert!(
+            has_token_lookup,
+            "single-token CI phrase should narrow via token index, got {:?}",
+            plan.steps
+        );
+    }
+
+    #[test]
+    fn test_cs_phrase_keeps_trigram_narrowing() {
+        let query = crate::query::parser::parse_query("\"static void\"");
+        let plan = QueryPlan::from_query(&query);
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| matches!(s, PlanStep::TrigramIntersect(_))));
+        match plan.verification {
+            Some(VerificationStep::Phrase {
+                case_insensitive, ..
+            }) => assert!(!case_insensitive),
+            other => panic!("expected CS phrase verification, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ci_regex_gets_case_flag() {
+        let plan = plan_ci("re:/spin_lock\\(&\\w+/");
+        match plan.verification {
+            Some(VerificationStep::Regex(p)) => {
+                assert!(p.starts_with("(?i)"), "CI regex should carry (?i): {p}")
+            }
+            other => panic!("expected regex verification, got {:?}", other),
+        }
+        assert!(
+            plan.steps.is_empty(),
+            "CI regex must not narrow with case-sensitive trigrams"
+        );
     }
 }

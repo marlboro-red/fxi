@@ -394,7 +394,7 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
     let root = utils::find_codebase_root(&opts.path)?;
 
     // Build combined pattern for multiple -e flags (OR them together)
-    let combined_pattern = build_pattern(&opts.patterns, opts.ignore_case, opts.word_regexp);
+    let combined_pattern = build_pattern(&opts.patterns, opts.word_regexp);
 
     // Resolve context flags (-C overrides -A and -B)
     let (ctx_before, ctx_after) = if let Some(c) = opts.context {
@@ -416,12 +416,12 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
             Ok(response) => response.matches,
             Err(e) => {
                 eprintln!("Daemon search failed, falling back to direct search: {}", e);
-                do_direct_content_search(&combined_pattern, &root, opts.max_count, ctx_before, ctx_after, opts.ignore_case, opts.word_regexp)?
+                do_direct_content_search(&combined_pattern, &root, opts.max_count, ctx_before, ctx_after, opts.ignore_case)?
             }
         }
     } else {
         // Fall back to direct search without daemon
-        do_direct_content_search(&combined_pattern, &root, opts.max_count, ctx_before, ctx_after, opts.ignore_case, opts.word_regexp)?
+        do_direct_content_search(&combined_pattern, &root, opts.max_count, ctx_before, ctx_after, opts.ignore_case)?
     };
 
     // Output results
@@ -445,13 +445,13 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
 }
 
 /// Build combined search pattern from multiple patterns
-fn build_pattern(patterns: &[String], ignore_case: bool, word_regexp: bool) -> String {
+fn build_pattern(patterns: &[String], word_regexp: bool) -> String {
     if patterns.is_empty() {
         return String::new();
     }
 
     // For single pattern without special flags, return as-is
-    if patterns.len() == 1 && !ignore_case && !word_regexp {
+    if patterns.len() == 1 && !word_regexp {
         return patterns[0].clone();
     }
 
@@ -475,13 +475,9 @@ fn build_pattern(patterns: &[String], ignore_case: bool, word_regexp: bool) -> S
         escaped.into_iter().next().unwrap_or_default()
     };
 
-    // Wrap in regex syntax with case flag if needed
-    if ignore_case || word_regexp || patterns.len() > 1 {
-        if ignore_case {
-            format!("re:/(?i){}/", combined)
-        } else {
-            format!("re:/{}/", combined)
-        }
+    // Wrap in regex syntax if needed
+    if word_regexp || patterns.len() > 1 {
+        format!("re:/{}/", combined)
     } else {
         combined
     }
@@ -495,7 +491,6 @@ fn do_direct_content_search(
     context_before: u32,
     context_after: u32,
     case_insensitive: bool,
-    word_regexp: bool,
 ) -> Result<Vec<server::protocol::ContentMatch>> {
     use crate::index::reader::IndexReader;
     use crate::query::{parse_query, QueryExecutor};
@@ -503,15 +498,10 @@ fn do_direct_content_search(
     // Load index
     let reader = IndexReader::open(root)?;
 
-    // Pattern is already built with appropriate regex wrapping
-    // Only add case-insensitive wrapper if not already a regex pattern
-    let query_str = if case_insensitive && !pattern.starts_with("re:/") && !word_regexp {
-        format!("re:/(?i){}/", regex::escape(pattern))
-    } else {
-        pattern.to_string()
-    };
-
-    let parsed = parse_query(&query_str);
+    // Case-insensitivity is applied at the plan level: the planner narrows
+    // through the lowercased token index and verifiers ignore case
+    let mut parsed = parse_query(pattern);
+    parsed.options.case_insensitive = case_insensitive;
     if parsed.is_empty() {
         return Ok(Vec::new());
     }

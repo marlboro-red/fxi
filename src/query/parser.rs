@@ -74,9 +74,9 @@ pub struct QueryOptions {
     pub sort: SortOrder,
     /// Maximum results
     pub limit: usize,
-    /// Case sensitive
-    #[allow(dead_code)]
-    pub case_sensitive: bool,
+    /// Case-insensitive matching (-i): phrases and regexes ignore case.
+    /// Bare token searches are case-insensitive regardless of this flag.
+    pub case_insensitive: bool,
 }
 
 impl Default for QueryOptions {
@@ -84,7 +84,7 @@ impl Default for QueryOptions {
         Self {
             sort: SortOrder::Score,
             limit: 100,
-            case_sensitive: false,
+            case_insensitive: false,
         }
     }
 }
