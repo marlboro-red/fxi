@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo bench
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -42,8 +42,7 @@ impl Struct{i} {{
 "#,
             i = i
         );
-        fs::write(root_path.join(format!("file_{}.rs", i)), content)
-            .expect("Failed to write file");
+        fs::write(root_path.join(format!("file_{}.rs", i)), content).expect("Failed to write file");
     }
 
     // Build the index
@@ -66,13 +65,9 @@ fn bench_query_parsing(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("query_parsing");
     for query in queries {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(query),
-            &query,
-            |b, &q| {
-                b.iter(|| fxi::query::parse_query(black_box(q)))
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(query), &query, |b, &q| {
+            b.iter(|| fxi::query::parse_query(black_box(q)))
+        });
     }
     group.finish();
 }
@@ -115,8 +110,7 @@ fn bench_token_extraction(c: &mut Criterion) {
 
 fn bench_search(c: &mut Criterion) {
     let (_temp_dir, root_path) = create_benchmark_fixtures();
-    let reader = fxi::index::reader::IndexReader::open(&root_path)
-        .expect("Failed to open index");
+    let reader = fxi::index::reader::IndexReader::open(&root_path).expect("Failed to open index");
 
     let mut group = c.benchmark_group("search");
 
@@ -163,15 +157,13 @@ fn bench_index_reading(c: &mut Criterion) {
     let (_temp_dir, root_path) = create_benchmark_fixtures();
 
     c.bench_function("index_open", |b| {
-        b.iter(|| {
-            fxi::index::reader::IndexReader::open(black_box(&root_path))
-        })
+        b.iter(|| fxi::index::reader::IndexReader::open(black_box(&root_path)))
     });
 }
 
 fn bench_protocol(c: &mut Criterion) {
     use fxi::server::protocol::{
-        read_message_with_id, write_message_with_id, ContentMatch, ContentSearchResponse, Response,
+        ContentMatch, ContentSearchResponse, Response, read_message_with_id, write_message_with_id,
     };
 
     // A realistic large content-search response: 5k matches with context lines

@@ -1,10 +1,10 @@
 use crate::tui::app::{App, Mode};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
-    Frame,
 };
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -189,9 +189,7 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
                 };
 
                 let line_num_style = Style::default().fg(Color::DarkGray);
-                let mut spans = vec![
-                    Span::styled(format!("{:4} ", actual_line), line_num_style),
-                ];
+                let mut spans = vec![Span::styled(format!("{:4} ", actual_line), line_num_style)];
 
                 if is_match {
                     let content_style = Style::default()
@@ -222,8 +220,8 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
         Text::raw("No preview available")
     };
 
-    let preview = Paragraph::new(content)
-        .block(Block::default().borders(Borders::ALL).title(title));
+    let preview =
+        Paragraph::new(content).block(Block::default().borders(Borders::ALL).title(title));
 
     f.render_widget(preview, area);
 }
@@ -295,9 +293,12 @@ fn draw_help_panel(f: &mut Frame, area: Rect) {
 
     // Create help content
     let help_text = vec![
-        Line::from(vec![
-            Span::styled("  SEARCH MODE", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "  SEARCH MODE",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(""),
         Line::from(vec![
             Span::styled("  F1 / ?       ", Style::default().fg(Color::Cyan)),
@@ -348,9 +349,12 @@ fn draw_help_panel(f: &mut Frame, area: Rect) {
             Span::raw("Rebuild index"),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  PREVIEW MODE", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "  PREVIEW MODE",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(""),
         Line::from(vec![
             Span::styled("  j/k          ", Style::default().fg(Color::Cyan)),
@@ -381,9 +385,10 @@ fn draw_help_panel(f: &mut Frame, area: Rect) {
             Span::raw("Back to search"),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Press any key to close", Style::default().fg(Color::DarkGray)),
-        ]),
+        Line::from(vec![Span::styled(
+            "  Press any key to close",
+            Style::default().fg(Color::DarkGray),
+        )]),
     ];
 
     let help_paragraph = Paragraph::new(help_text)
@@ -392,7 +397,11 @@ fn draw_help_panel(f: &mut Frame, area: Rect) {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Yellow))
                 .title(" Keybindings ")
-                .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                .title_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
         )
         .style(Style::default().bg(Color::Black));
 
@@ -415,4 +424,3 @@ fn truncate_path(path_str: &str) -> String {
         format!(".../{}", truncated.join("/"))
     }
 }
-

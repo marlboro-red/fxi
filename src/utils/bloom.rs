@@ -224,7 +224,11 @@ mod tests {
         }
 
         // False positive rate should be roughly 1%
-        assert!(false_positives < 50, "Too many false positives: {}", false_positives);
+        assert!(
+            false_positives < 50,
+            "Too many false positives: {}",
+            false_positives
+        );
     }
 
     #[test]

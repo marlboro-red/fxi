@@ -242,9 +242,8 @@ pub fn write_message_with_id<W: Write>(
     msg: &impl Serialize,
     request_id: Option<&str>,
 ) -> std::io::Result<()> {
-    let json = serde_json::to_vec(&TaggedMessage { msg, request_id }).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-    })?;
+    let json = serde_json::to_vec(&TaggedMessage { msg, request_id })
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let len = json.len() as u32;
     writer.write_all(&len.to_le_bytes())?;
@@ -277,9 +276,8 @@ pub fn read_message_with_id<R: Read, T: for<'de> Deserialize<'de>>(
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
 
-    let msg: T = serde_json::from_slice(&buf).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-    })?;
+    let msg: T = serde_json::from_slice(&buf)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let request_id = serde_json::from_slice::<RequestIdOnly>(&buf)
         .map(|e| e.request_id)
@@ -291,9 +289,8 @@ pub fn read_message_with_id<R: Read, T: for<'de> Deserialize<'de>>(
 /// Write a message to a stream with length prefix
 #[cfg(test)]
 pub fn write_message<W: Write>(writer: &mut W, msg: &impl Serialize) -> std::io::Result<()> {
-    let json = serde_json::to_vec(msg).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-    })?;
+    let json = serde_json::to_vec(msg)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let len = json.len() as u32;
     writer.write_all(&len.to_le_bytes())?;
@@ -321,9 +318,8 @@ pub fn read_message<R: Read, T: for<'de> Deserialize<'de>>(reader: &mut R) -> st
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
 
-    serde_json::from_slice(&buf).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-    })
+    serde_json::from_slice(&buf)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 #[cfg(test)]
@@ -383,7 +379,11 @@ mod tests {
         let decoded: Request = read_message(&mut cursor).unwrap();
 
         match decoded {
-            Request::Search { query, root_path, limit } => {
+            Request::Search {
+                query,
+                root_path,
+                limit,
+            } => {
                 assert_eq!(query, "test query");
                 assert_eq!(root_path, Some(PathBuf::from("/home/user/project")));
                 assert_eq!(limit, 100);
@@ -516,7 +516,8 @@ mod tests {
     #[test]
     fn test_search_request_with_root_path_backward_compat() {
         // Old client sends root_path as a string, should deserialize to Some(...)
-        let json = r#"{"type":"Search","query":"main","root_path":"/home/user/project","limit":10}"#;
+        let json =
+            r#"{"type":"Search","query":"main","root_path":"/home/user/project","limit":10}"#;
         let req: Request = serde_json::from_str(json).unwrap();
         match req {
             Request::Search { root_path, .. } => {
@@ -650,7 +651,8 @@ mod tests {
     #[test]
     fn test_content_search_response_resolved_root_default() {
         // Old server response without resolved_root should default to None
-        let json = r#"{"type":"ContentSearch","matches":[],"duration_ms":1.0,"files_with_matches":0}"#;
+        let json =
+            r#"{"type":"ContentSearch","matches":[],"duration_ms":1.0,"files_with_matches":0}"#;
         let resp: Response = serde_json::from_str(json).unwrap();
         match resp {
             Response::ContentSearch(cs) => {
@@ -673,7 +675,8 @@ mod tests {
         }
 
         // Reloaded with resolved_root
-        let json = r#"{"type":"Reloaded","success":true,"message":"ok","resolved_root":"/tmp/test"}"#;
+        let json =
+            r#"{"type":"Reloaded","success":true,"message":"ok","resolved_root":"/tmp/test"}"#;
         let resp: Response = serde_json::from_str(json).unwrap();
         match resp {
             Response::Reloaded { resolved_root, .. } => {

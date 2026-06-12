@@ -199,7 +199,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Index { path, force, chunk_size }) => {
+        Some(Commands::Index {
+            path,
+            force,
+            chunk_size,
+        }) => {
             // When the daemon watches this root it owns index freshness:
             // it reconciled at watch start and applies file events as they
             // happen, so a scan here would only race its delta writes.
@@ -265,7 +269,7 @@ fn main() -> Result<()> {
 }
 
 fn handle_daemon_command(action: DaemonAction) -> Result<()> {
-    use server::{is_daemon_running, IndexClient};
+    use server::{IndexClient, is_daemon_running};
 
     match action {
         DaemonAction::Start { watch } => {
@@ -282,7 +286,10 @@ fn handle_daemon_command(action: DaemonAction) -> Result<()> {
 
             if is_daemon_running() {
                 #[cfg(unix)]
-                println!("Daemon started (socket: {})", server::get_socket_path().display());
+                println!(
+                    "Daemon started (socket: {})",
+                    server::get_socket_path().display()
+                );
                 #[cfg(windows)]
                 println!("Daemon started (pipe: {})", server::get_pipe_name());
             } else {
@@ -322,34 +329,35 @@ fn handle_daemon_command(action: DaemonAction) -> Result<()> {
             }
 
             match IndexClient::connect() {
-                Some(mut client) => {
-                    match client.status() {
-                        Ok(status) => {
-                            println!("fxid daemon status:");
-                            println!("  Uptime: {}s", status.uptime_secs);
-                            println!("  Indexes loaded: {}", status.indexes_loaded);
-                            println!("  Total documents: {}", status.total_docs);
-                            println!("  Queries served: {}", status.queries_served);
-                            println!("  Cache hit rate: {:.1}%", status.cache_hit_rate * 100.0);
-                            println!("  Memory (approx): {:.1} MB", status.memory_bytes as f64 / 1024.0 / 1024.0);
-                            if status.protocol_version > 0 {
-                                println!("  Protocol version: {}", status.protocol_version);
-                            }
-                            if !status.server_version.is_empty() {
-                                println!("  Server version: {}", status.server_version);
-                            }
-                            if !status.loaded_roots.is_empty() {
-                                println!("  Loaded codebases:");
-                                for root in &status.loaded_roots {
-                                    println!("    - {}", root.display());
-                                }
-                            }
+                Some(mut client) => match client.status() {
+                    Ok(status) => {
+                        println!("fxid daemon status:");
+                        println!("  Uptime: {}s", status.uptime_secs);
+                        println!("  Indexes loaded: {}", status.indexes_loaded);
+                        println!("  Total documents: {}", status.total_docs);
+                        println!("  Queries served: {}", status.queries_served);
+                        println!("  Cache hit rate: {:.1}%", status.cache_hit_rate * 100.0);
+                        println!(
+                            "  Memory (approx): {:.1} MB",
+                            status.memory_bytes as f64 / 1024.0 / 1024.0
+                        );
+                        if status.protocol_version > 0 {
+                            println!("  Protocol version: {}", status.protocol_version);
                         }
-                        Err(e) => {
-                            println!("Failed to get status: {}", e);
+                        if !status.server_version.is_empty() {
+                            println!("  Server version: {}", status.server_version);
+                        }
+                        if !status.loaded_roots.is_empty() {
+                            println!("  Loaded codebases:");
+                            for root in &status.loaded_roots {
+                                println!("    - {}", root.display());
+                            }
                         }
                     }
-                }
+                    Err(e) => {
+                        println!("Failed to get status: {}", e);
+                    }
+                },
                 None => {
                     println!("Daemon is running but not responding");
                 }
@@ -358,7 +366,9 @@ fn handle_daemon_command(action: DaemonAction) -> Result<()> {
 
         DaemonAction::Foreground { watch } => {
             if is_daemon_running() {
-                println!("Daemon is already running in background. Stop it first with 'fxi daemon stop'");
+                println!(
+                    "Daemon is already running in background. Stop it first with 'fxi daemon stop'"
+                );
                 return Ok(());
             }
 
@@ -382,20 +392,18 @@ fn handle_daemon_command(action: DaemonAction) -> Result<()> {
             }
 
             match IndexClient::connect() {
-                Some(mut client) => {
-                    match client.reload(Some(&root)) {
-                        Ok((success, message)) => {
-                            if success {
-                                println!("Reloaded: {}", message);
-                            } else {
-                                println!("Reload failed: {}", message);
-                            }
-                        }
-                        Err(e) => {
-                            println!("Failed to reload: {}", e);
+                Some(mut client) => match client.reload(Some(&root)) {
+                    Ok((success, message)) => {
+                        if success {
+                            println!("Reloaded: {}", message);
+                        } else {
+                            println!("Reload failed: {}", message);
                         }
                     }
-                }
+                    Err(e) => {
+                        println!("Failed to reload: {}", e);
+                    }
+                },
                 None => {
                     println!("Failed to connect to daemon");
                 }
@@ -412,7 +420,9 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
 
     // -v (invert match) is not supported with indexed search
     if opts.invert_match {
-        anyhow::bail!("--invert-match (-v) is not supported: indexed search only returns matching lines");
+        anyhow::bail!(
+            "--invert-match (-v) is not supported: indexed search only returns matching lines"
+        );
     }
 
     // Find codebase root
@@ -432,21 +442,42 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
         context_before: ctx_before,
         context_after: ctx_after,
         case_insensitive: opts.ignore_case,
-        files_only: opts.files_with_matches,  // Optimize for -l mode
+        files_only: opts.files_with_matches, // Optimize for -l mode
     };
 
     // Try to use daemon for warm search
     let matches = if let Some(mut client) = server::IndexClient::connect() {
-        match client.content_search(&combined_pattern, Some(&root), opts.max_count, search_options) {
+        match client.content_search(
+            &combined_pattern,
+            Some(&root),
+            opts.max_count,
+            search_options,
+        ) {
             Ok(response) => response.matches,
             Err(e) => {
                 eprintln!("Daemon search failed, falling back to direct search: {}", e);
-                do_direct_content_search(&combined_pattern, &root, opts.max_count, ctx_before, ctx_after, opts.ignore_case, opts.files_with_matches)?
+                do_direct_content_search(
+                    &combined_pattern,
+                    &root,
+                    opts.max_count,
+                    ctx_before,
+                    ctx_after,
+                    opts.ignore_case,
+                    opts.files_with_matches,
+                )?
             }
         }
     } else {
         // Fall back to direct search without daemon
-        do_direct_content_search(&combined_pattern, &root, opts.max_count, ctx_before, ctx_after, opts.ignore_case, opts.files_with_matches)?
+        do_direct_content_search(
+            &combined_pattern,
+            &root,
+            opts.max_count,
+            ctx_before,
+            ctx_after,
+            opts.ignore_case,
+            opts.files_with_matches,
+        )?
     };
 
     // Output results
@@ -456,7 +487,12 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
         ColorChoice::Auto => std::io::stdout().is_terminal(),
     };
     // Use heading style when results span multiple files
-    let use_heading = matches.iter().map(|m| &m.path).collect::<std::collections::HashSet<_>>().len() > 1;
+    let use_heading = matches
+        .iter()
+        .map(|m| &m.path)
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        > 1;
 
     if opts.files_with_matches {
         output::print_files_only(&matches, color)?;
@@ -519,7 +555,7 @@ fn do_direct_content_search(
     files_only: bool,
 ) -> Result<Vec<server::protocol::ContentMatch>> {
     use crate::index::reader::IndexReader;
-    use crate::query::{parse_query, QueryExecutor};
+    use crate::query::{QueryExecutor, parse_query};
 
     // Load index
     let reader = IndexReader::open(root)?;

@@ -213,7 +213,11 @@ impl<'a> QueryExecutor<'a> {
         let boost = verification.map(|v| Self::extract_boost(v)).unwrap_or(1.0);
 
         let estimated_total = all_matches.len() * 2;
-        let mut results = Vec::with_capacity(estimated_total.min(if limit > 0 { limit * 2 } else { estimated_total }));
+        let mut results = Vec::with_capacity(estimated_total.min(if limit > 0 {
+            limit * 2
+        } else {
+            estimated_total
+        }));
 
         for (doc_id, _full_path, path, mtime, file_matches) in &all_matches {
             if file_matches.is_empty() {
@@ -1018,9 +1022,8 @@ impl<'a> QueryExecutor<'a> {
 
         let all_matches: Vec<FileMatchResult> = if use_cache {
             // Small result set: use cached reads (sequential to leverage cache)
-            let mut results = Vec::with_capacity(
-                candidate_count.min(target_matches.unwrap_or(candidate_count)),
-            );
+            let mut results =
+                Vec::with_capacity(candidate_count.min(target_matches.unwrap_or(candidate_count)));
             let mut total_matches = 0;
 
             for (doc_id, full_path, rel_path, mtime) in candidate_infos {
@@ -1283,7 +1286,10 @@ impl<'a> QueryExecutor<'a> {
         let terms_lower: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
 
         // A term containing a line break can never match within a single line
-        if terms_lower.iter().any(|t| t.contains('\n') || t.contains('\r')) {
+        if terms_lower
+            .iter()
+            .any(|t| t.contains('\n') || t.contains('\r'))
+        {
             return Vec::new();
         }
 
@@ -1928,9 +1934,8 @@ def format_warning(msg: str) -> str:
     fn test_verify_content_not_excludes() {
         // Content that DOES contain the negated term → no match
         let content = "fn main() {\n    println!(\"hello\");\n}\n";
-        let verification = VerificationStep::Not(Box::new(VerificationStep::Literal(
-            "println".to_string(),
-        )));
+        let verification =
+            VerificationStep::Not(Box::new(VerificationStep::Literal("println".to_string())));
 
         let matches = QueryExecutor::verify_content_static(content, &verification, 1);
         assert!(
@@ -1943,9 +1948,8 @@ def format_warning(msg: str) -> str:
     fn test_verify_content_not_includes() {
         // Content that does NOT contain the negated term → match
         let content = "fn main() {\n    let x = 42;\n}\n";
-        let verification = VerificationStep::Not(Box::new(VerificationStep::Literal(
-            "println".to_string(),
-        )));
+        let verification =
+            VerificationStep::Not(Box::new(VerificationStep::Literal("println".to_string())));
 
         let matches = QueryExecutor::verify_content_static(content, &verification, 1);
         assert!(
@@ -1965,7 +1969,8 @@ def format_warning(msg: str) -> str:
             VerificationStep::Not(Box::new(VerificationStep::Literal("println".to_string()))),
         ]);
 
-        let matches_both = QueryExecutor::verify_content_static(content_with_both, &verification, 1);
+        let matches_both =
+            QueryExecutor::verify_content_static(content_with_both, &verification, 1);
         assert!(
             matches_both.is_empty(),
             "Should NOT match when negated term is present"
@@ -2135,10 +2140,7 @@ def format_warning(msg: str) -> str:
         // Search with size filter larger than all files → no results
         let query = parse_query(&format!("size:>{} fn", main_size + 10000));
         let results = executor.execute(&query).unwrap();
-        assert!(
-            results.is_empty(),
-            "size:>huge should find no files"
-        );
+        assert!(results.is_empty(), "size:>huge should find no files");
     }
 
     #[test]
@@ -2346,7 +2348,10 @@ def format_warning(msg: str) -> str:
         let verification = VerificationStep::Regex(r"\d+".to_string());
 
         let matches = QueryExecutor::verify_content_static(content, &verification, 1);
-        assert!(matches.is_empty(), "Regex \\d+ should not match text-only content");
+        assert!(
+            matches.is_empty(),
+            "Regex \\d+ should not match text-only content"
+        );
     }
 
     // ========================================================================
@@ -2361,10 +2366,7 @@ def format_warning(msg: str) -> str:
         // Boosted search should still find results (boost affects scoring, not filtering)
         let query = parse_query("^main");
         let results = executor.execute(&query).unwrap();
-        assert!(
-            !results.is_empty(),
-            "Boosted search should find results"
-        );
+        assert!(!results.is_empty(), "Boosted search should find results");
         assert!(
             results
                 .iter()
@@ -2386,7 +2388,10 @@ def format_warning(msg: str) -> str:
         ]);
 
         let matches = QueryExecutor::verify_content_static(content, &verification, 1);
-        assert!(matches.is_empty(), "OR with no matching terms should be empty");
+        assert!(
+            matches.is_empty(),
+            "OR with no matching terms should be empty"
+        );
     }
 
     // ========================================================================
@@ -2482,5 +2487,4 @@ def format_warning(msg: str) -> str:
             "ext:json with fn should find nothing (json file has no fn)"
         );
     }
-
 }

@@ -1,4 +1,4 @@
-use crate::index::types::{bytes_to_trigram, Trigram};
+use crate::index::types::{Trigram, bytes_to_trigram};
 use ahash::AHashSet;
 
 /// Fixed-size bitset for all possible trigrams (2^24 = 16M trigrams)

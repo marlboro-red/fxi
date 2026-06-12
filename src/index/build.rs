@@ -2,8 +2,8 @@ use crate::index::reader::IndexReader;
 use crate::index::types::{DocFlags, IndexConfig, IndexMeta, Language, SegmentId};
 use crate::index::writer::ChunkedIndexWriter;
 use crate::utils::{
-    extract_tokens_and_positions, extract_trigrams, find_codebase_root,
-    get_index_dir, is_binary, is_minified, remove_index,
+    extract_tokens_and_positions, extract_trigrams, find_codebase_root, get_index_dir, is_binary,
+    is_minified, remove_index,
 };
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
@@ -19,7 +19,8 @@ use std::time::UNIX_EPOCH;
 
 /// Check if a file extension is a known binary format (skip reading content)
 pub fn is_known_binary_ext(ext: &str) -> bool {
-    matches!(ext.to_ascii_lowercase().as_str(),
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
         // Compiled/binary
         "dll" | "exe" | "pdb" | "so" | "dylib" | "a" | "lib" | "o" | "obj" |
         // Archives
@@ -66,10 +67,7 @@ fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option
     }
 
     // Detect language from extension
-    let ext = rel_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = rel_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let language = Language::from_extension(ext);
 
     // Check for minified
@@ -148,7 +146,11 @@ pub fn build_index(root_path: &Path, force: bool) -> Result<()> {
 }
 
 /// Build or rebuild the search index with custom chunk size
-pub fn build_index_with_chunk_size(root_path: &Path, force: bool, chunk_size: Option<usize>) -> Result<()> {
+pub fn build_index_with_chunk_size(
+    root_path: &Path,
+    force: bool,
+    chunk_size: Option<usize>,
+) -> Result<()> {
     build_index_with_options(root_path, force, false, chunk_size)
 }
 
@@ -158,7 +160,12 @@ pub fn build_index_with_progress(root_path: &Path, force: bool, silent: bool) ->
 }
 
 /// Build or rebuild the search index with all options
-pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chunk_size_override: Option<usize>) -> Result<()> {
+pub fn build_index_with_options(
+    root_path: &Path,
+    force: bool,
+    silent: bool,
+    chunk_size_override: Option<usize>,
+) -> Result<()> {
     let root = root_path.canonicalize().context("Invalid path")?;
     let index_path = get_index_dir(&root)?;
 
@@ -214,7 +221,10 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
         }
 
         impl ignore::ParallelVisitor for CollectVisitor {
-            fn visit(&mut self, result: Result<ignore::DirEntry, ignore::Error>) -> ignore::WalkState {
+            fn visit(
+                &mut self,
+                result: Result<ignore::DirEntry, ignore::Error>,
+            ) -> ignore::WalkState {
                 if let Ok(entry) = result
                     // file_type() comes from the directory entry — no extra
                     // stat(2) per file like path().is_file()
@@ -264,7 +274,13 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
                 // Skip common non-code directories
                 !matches!(
                     name.as_ref(),
-                    ".git" | "node_modules" | "target" | ".codesearch" | "__pycache__" | ".venv" | "venv"
+                    ".git"
+                        | "node_modules"
+                        | "target"
+                        | ".codesearch"
+                        | "__pycache__"
+                        | ".venv"
+                        | "venv"
                 )
             })
             .build_parallel()
@@ -295,7 +311,11 @@ pub fn build_index_with_options(root_path: &Path, force: bool, silent: bool, chu
     // recorded in meta so incremental scans skip them while unchanged
     let rejected_files = Arc::new(Mutex::new(Vec::<(PathBuf, u64)>::new()));
 
-    let num_chunks = if chunk_size == 0 { 1 } else { total_files.div_ceil(chunk_size) };
+    let num_chunks = if chunk_size == 0 {
+        1
+    } else {
+        total_files.div_ceil(chunk_size)
+    };
 
     if num_chunks > 1 && !silent {
         println!(
@@ -557,9 +577,8 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
 
     // Read existing index metadata
     let meta_path = index_path.join("meta.json");
-    let meta: IndexMeta = serde_json::from_reader(
-        File::open(&meta_path).context("Failed to open meta.json")?
-    )?;
+    let meta: IndexMeta =
+        serde_json::from_reader(File::open(&meta_path).context("Failed to open meta.json")?)?;
 
     // Open existing index to get file list
     let reader = IndexReader::open(&root)?;
@@ -605,7 +624,10 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
 
     // If too many changes, do full rebuild
     if change_percent > INCREMENTAL_THRESHOLD_PERCENT {
-        println!("Change threshold exceeded (>{}%), performing full rebuild...", INCREMENTAL_THRESHOLD_PERCENT);
+        println!(
+            "Change threshold exceeded (>{}%), performing full rebuild...",
+            INCREMENTAL_THRESHOLD_PERCENT
+        );
         build_index(&root, true)?;
         return Ok(false);
     }
@@ -654,7 +676,10 @@ fn compute_index_diff(
         }
 
         impl ignore::ParallelVisitor for ScanVisitor {
-            fn visit(&mut self, result: Result<ignore::DirEntry, ignore::Error>) -> ignore::WalkState {
+            fn visit(
+                &mut self,
+                result: Result<ignore::DirEntry, ignore::Error>,
+            ) -> ignore::WalkState {
                 if let Ok(entry) = result
                     // file_type() comes from the directory entry — no extra
                     // stat(2) per file like path().is_file()
@@ -720,7 +745,13 @@ fn compute_index_diff(
                 let name = entry.file_name().to_string_lossy();
                 !matches!(
                     name.as_ref(),
-                    ".git" | "node_modules" | "target" | ".codesearch" | "__pycache__" | ".venv" | "venv"
+                    ".git"
+                        | "node_modules"
+                        | "target"
+                        | ".codesearch"
+                        | "__pycache__"
+                        | ".venv"
+                        | "venv"
                 )
             })
             .build_parallel()
@@ -896,8 +927,13 @@ fn perform_incremental_update(root: &Path, meta: &IndexMeta, diff: IndexDiff) ->
     } else {
         0.0
     };
-    let new_deltas = meta.delta_segments.len().saturating_sub(meta.delta_baseline);
-    if tombstone_ratio > 0.15 || new_deltas >= crate::server::watcher::DEFAULT_MERGE_SEGMENT_THRESHOLD {
+    let new_deltas = meta
+        .delta_segments
+        .len()
+        .saturating_sub(meta.delta_baseline);
+    if tombstone_ratio > 0.15
+        || new_deltas >= crate::server::watcher::DEFAULT_MERGE_SEGMENT_THRESHOLD
+    {
         println!(
             "Index is fragmented ({} delta segments, {} tombstones), compacting...",
             new_deltas, meta.tombstone_count

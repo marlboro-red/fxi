@@ -132,11 +132,7 @@ impl EventDebouncer {
 
         self.last_event = None;
 
-        if batch.is_empty() {
-            None
-        } else {
-            Some(batch)
-        }
+        if batch.is_empty() { None } else { Some(batch) }
     }
 
     /// Clear all pending events without producing a batch

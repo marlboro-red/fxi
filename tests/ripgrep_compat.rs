@@ -139,7 +139,7 @@ fn fxi_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("debug")
-        .join("fxi")
+        .join(if cfg!(windows) { "fxi.exe" } else { "fxi" })
 }
 
 /// Run fxi with given args
@@ -206,9 +206,7 @@ fn extract_files(output: &str) -> HashSet<String> {
         })
         .filter(|f| {
             // Filter out things that look like line numbers or garbage
-            !f.chars().all(|c| c.is_ascii_digit()) &&
-            !f.is_empty() &&
-            !f.contains('\x1b')  // Filter ANSI codes
+            !f.chars().all(|c| c.is_ascii_digit()) && !f.is_empty() && !f.contains('\x1b') // Filter ANSI codes
         })
         .collect()
 }
@@ -236,7 +234,10 @@ fn extract_counts(output: &str) -> Vec<(String, usize)> {
 
 /// Count total matches in output
 fn count_matches(output: &str) -> usize {
-    output.lines().filter(|l| !l.is_empty() && !l.starts_with("--")).count()
+    output
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with("--"))
+        .count()
 }
 
 // ============================================================================
@@ -246,7 +247,6 @@ fn count_matches(output: &str) -> usize {
 #[test]
 fn test_flag_case_insensitive() {
     let dir = setup_fixtures();
-
 
     // Search for "error" case-insensitively
     let (fxi_out, _, fxi_ok) = run_fxi(&["-i", "error"], &dir);
@@ -345,7 +345,6 @@ fn test_flag_case_insensitive_regex() {
 fn test_flag_files_with_matches() {
     let dir = setup_fixtures();
 
-
     // Search with -l flag
     let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "fn"], &dir);
     let (rg_out, _, rg_ok) = run_rg(&["-l", "fn"], &dir);
@@ -367,7 +366,6 @@ fn test_flag_files_with_matches() {
 #[test]
 fn test_flag_count() {
     let dir = setup_fixtures();
-
 
     // Search with -c flag - use a unique term that only appears in specific files
     // Note: fxi's token index is case-insensitive by default for better recall
@@ -395,7 +393,6 @@ fn test_flag_count() {
 fn test_flag_max_count() {
     let dir = setup_fixtures();
 
-
     // Search with -m flag to limit results
     let (fxi_out, _, fxi_ok) = run_fxi(&["-m", "2", "fn"], &dir);
 
@@ -413,16 +410,15 @@ fn test_flag_max_count() {
 fn test_flag_after_context() {
     let dir = setup_fixtures();
 
-
     // Search with -A flag
     let (fxi_out, _, fxi_ok) = run_fxi(&["-A", "1", "fn main"], &dir);
 
     assert!(fxi_ok, "fxi should succeed");
 
     // Should have context lines (marked with - instead of :)
-    let has_context = fxi_out.lines().any(|l| {
-        l.contains("-") && !l.starts_with("--") && !l.contains("fn main")
-    });
+    let has_context = fxi_out
+        .lines()
+        .any(|l| l.contains("-") && !l.starts_with("--") && !l.contains("fn main"));
 
     assert!(
         has_context || fxi_out.lines().count() > 1,
@@ -434,7 +430,6 @@ fn test_flag_after_context() {
 fn test_flag_before_context() {
     let dir = setup_fixtures();
 
-
     // Search with -B flag
     let (fxi_out, _, fxi_ok) = run_fxi(&["-B", "1", "println"], &dir);
 
@@ -445,7 +440,6 @@ fn test_flag_before_context() {
 #[test]
 fn test_flag_context_both() {
     let dir = setup_fixtures();
-
 
     // Search with -C flag (context both directions)
     let (fxi_out, _, fxi_ok) = run_fxi(&["-C", "1", "TODO"], &dir);
@@ -466,7 +460,6 @@ fn test_flag_context_both() {
 fn test_flag_color_never() {
     let dir = setup_fixtures();
 
-
     // Search with --color=never (run_fxi already adds --color=never, so just test basic search)
     let (fxi_out, _, fxi_ok) = run_fxi(&["fn"], &dir);
 
@@ -483,7 +476,6 @@ fn test_flag_color_never() {
 #[test]
 fn test_flag_color_always() {
     let dir = setup_fixtures();
-
 
     // Run without --color=never override
     let fxi = fxi_binary();
@@ -511,7 +503,6 @@ fn test_flag_color_always() {
 fn test_output_format_basic() {
     let dir = setup_fixtures();
 
-
     let (fxi_out, _, _) = run_fxi(&["fn main"], &dir);
 
     // Output should contain filename and line number
@@ -528,7 +519,6 @@ fn test_output_format_basic() {
 #[test]
 fn test_output_line_numbers() {
     let dir = setup_fixtures();
-
 
     let (fxi_out, _, _) = run_fxi(&["fn main"], &dir);
 
@@ -549,7 +539,6 @@ fn test_output_line_numbers() {
 fn test_search_parity_simple() {
     let dir = setup_fixtures();
 
-
     // Simple search should find same files
     let (fxi_out, _, _) = run_fxi(&["-l", "println"], &dir);
     let (rg_out, _, _) = run_rg(&["-l", "println"], &dir);
@@ -567,7 +556,6 @@ fn test_search_parity_simple() {
 #[test]
 fn test_search_parity_phrase() {
     let dir = setup_fixtures();
-
 
     // Phrase search (quoted)
     let (fxi_out, _, _) = run_fxi(&["-l", "\"Hello, world\""], &dir);
@@ -587,7 +575,6 @@ fn test_search_parity_phrase() {
 fn test_search_no_results() {
     let dir = setup_fixtures();
 
-
     // Search for non-existent pattern
     let (fxi_out, _, _) = run_fxi(&["xyznonexistent123"], &dir);
     let (rg_out, _, _) = run_rg(&["xyznonexistent123"], &dir);
@@ -603,7 +590,6 @@ fn test_search_no_results() {
 #[test]
 fn test_special_characters_in_pattern() {
     let dir = setup_fixtures();
-
 
     // Search for pattern with special chars
     let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "a + b"], &dir);
@@ -621,7 +607,6 @@ fn test_special_characters_in_pattern() {
 fn test_json_file_search() {
     let dir = setup_fixtures();
 
-
     // Search in non-code files - use a term unique to config.json
     // Note: "test-project" would be tokenized as "test" AND "project"
     let (fxi_out, _, _) = run_fxi(&["-l", "1.0.0"], &dir);
@@ -637,7 +622,6 @@ fn test_json_file_search() {
 #[test]
 fn test_combined_flags() {
     let dir = setup_fixtures();
-
 
     // Combine multiple flags like ripgrep users would
     let (fxi_out, _, fxi_ok) = run_fxi(&["-i", "-m", "5", "-C", "1", "todo"], &dir);
@@ -661,7 +645,6 @@ fn test_combined_flags() {
 fn test_filter_file_exact() {
     let dir = setup_fixtures();
 
-
     // file:main.rs should only match main.rs exactly
     let (fxi_out, _, fxi_ok) = run_fxi(&["file:main.rs"], &dir);
 
@@ -681,7 +664,6 @@ fn test_filter_file_exact() {
 fn test_filter_file_glob() {
     let dir = setup_fixtures();
 
-
     // file:*.rs should match all .rs files
     let (fxi_out, _, fxi_ok) = run_fxi(&["file:*.rs"], &dir);
 
@@ -700,7 +682,6 @@ fn test_filter_file_glob() {
 fn test_filter_file_with_search() {
     let dir = setup_fixtures();
 
-
     // "file:main.rs fn" should find fn in main.rs only
     let (fxi_out, _, fxi_ok) = run_fxi(&["file:main.rs fn"], &dir);
 
@@ -715,7 +696,6 @@ fn test_filter_file_with_search() {
 fn test_filter_file_no_substring_match() {
     let dir = setup_fixtures();
 
-
     // file:ain.rs should NOT match main.rs (no substring matching)
     let (fxi_out, _, _) = run_fxi(&["file:ain.rs"], &dir);
 
@@ -729,7 +709,6 @@ fn test_filter_file_no_substring_match() {
 #[test]
 fn test_filter_ext() {
     let dir = setup_fixtures();
-
 
     // ext:json should only match .json files
     let (fxi_out, _, fxi_ok) = run_fxi(&["ext:json"], &dir);
@@ -747,7 +726,6 @@ fn test_filter_ext() {
 fn test_filter_ext_with_search() {
     let dir = setup_fixtures();
 
-
     // "ext:rs fn" should find fn only in .rs files
     let (fxi_out, _, fxi_ok) = run_fxi(&["ext:rs fn"], &dir);
 
@@ -763,7 +741,6 @@ fn test_filter_ext_with_search() {
 fn test_filter_path_glob() {
     let dir = setup_fixtures();
 
-
     // "path:*.rs fn" should match all .rs files in root
     let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "path:*.rs fn"], &dir);
 
@@ -775,7 +752,6 @@ fn test_filter_path_glob() {
 #[test]
 fn test_filter_combined() {
     let dir = setup_fixtures();
-
 
     // Combine multiple filters: ext:rs with search term
     let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "ext:rs fn"], &dir);
@@ -794,19 +770,21 @@ fn test_filter_combined() {
 fn test_filter_top_limit() {
     let dir = setup_fixtures();
 
-
     // Use -m flag for limiting content search results (top: is for TUI mode)
     let (fxi_out, _, fxi_ok) = run_fxi(&["-m", "1", "fn"], &dir);
 
     assert!(fxi_ok, "fxi -m limit should succeed");
     let match_count = count_matches(&fxi_out);
-    assert!(match_count <= 1, "-m 1 should return at most 1 match, got {}", match_count);
+    assert!(
+        match_count <= 1,
+        "-m 1 should return at most 1 match, got {}",
+        match_count
+    );
 }
 
 #[test]
 fn test_filter_sort_path() {
     let dir = setup_fixtures();
-
 
     // "sort:path fn" should return results sorted by path
     let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "sort:path fn"], &dir);
@@ -823,7 +801,6 @@ fn test_filter_sort_path() {
 #[test]
 fn test_filter_file_only_single_result_per_file() {
     let dir = setup_fixtures();
-
 
     // file:main.rs without search term should return single result per file
     let (fxi_out, _, fxi_ok) = run_fxi(&["file:main.rs"], &dir);
@@ -864,7 +841,6 @@ fn test_help_shows_ripgrep_flags() {
 fn test_no_subcommand_does_search() {
     let dir = setup_fixtures();
 
-
     // Running fxi with just a pattern should search (like ripgrep)
     let (fxi_out, _, fxi_ok) = run_fxi(&["fn"], &dir);
 
@@ -879,7 +855,6 @@ fn test_no_subcommand_does_search() {
 #[test]
 fn test_case_sensitivity_difference() {
     let dir = setup_fixtures();
-
 
     // fxi's token index is case-insensitive by default for better code search recall
     // This differs from ripgrep which is case-sensitive by default
@@ -913,7 +888,6 @@ fn test_case_sensitivity_difference() {
 fn test_phrase_search_syntax() {
     let dir = setup_fixtures();
 
-
     // fxi uses quotes for exact phrase matching
     // Without quotes, terms are ANDed together
 
@@ -942,7 +916,6 @@ fn test_phrase_search_syntax() {
 fn test_hyphenated_terms() {
     let dir = setup_fixtures();
 
-
     // Hyphens are word separators in fxi's tokenizer
     // "test-project" becomes "test" AND "project"
     // Use quotes for exact match: "\"test-project\""
@@ -964,7 +937,6 @@ fn test_hyphenated_terms() {
 fn test_multiple_flags_order() {
     let dir = setup_fixtures();
 
-
     // Flags can appear in any order (like ripgrep)
     let (out1, _, ok1) = run_fxi(&["-i", "-l", "fn"], &dir);
     let (out2, _, ok2) = run_fxi(&["-l", "-i", "fn"], &dir);
@@ -983,9 +955,11 @@ fn test_multiple_flags_order() {
 
 /// Create a test directory with binary files for exclusion testing
 fn create_binary_test_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir()
-        .join("fxi_binary_test")
-        .join(format!("{}_{}", name, std::process::id()));
+    let dir = std::env::temp_dir().join("fxi_binary_test").join(format!(
+        "{}_{}",
+        name,
+        std::process::id()
+    ));
 
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("Failed to create test dir");
@@ -1075,7 +1049,6 @@ fn test_binary_content_excluded() {
 fn test_flag_multiple_patterns() {
     let dir = setup_fixtures();
 
-
     // Multiple -e patterns (OR together)
     let (fxi_out, _, fxi_ok) = run_fxi(&["-l", "-e", "fn main", "-e", "fn helper"], &dir);
     let (rg_out, _, rg_ok) = run_rg(&["-l", "-e", "fn main", "-e", "fn helper"], &dir);
@@ -1101,7 +1074,6 @@ fn test_flag_multiple_patterns() {
 fn test_flag_word_regexp() {
     let dir = setup_fixtures();
 
-
     // -w should match whole words only
     let (fxi_out, _, fxi_ok) = run_fxi(&["-w", "-l", "add"], &dir);
     let (rg_out, _, rg_ok) = run_rg(&["-w", "-l", "add"], &dir);
@@ -1113,20 +1085,13 @@ fn test_flag_word_regexp() {
     let rg_files = extract_files(&rg_out);
 
     // lib.rs has "add" as a whole word in function name
-    assert!(
-        fxi_files.contains("lib.rs"),
-        "fxi -w should find lib.rs"
-    );
-    assert!(
-        rg_files.contains("lib.rs"),
-        "rg -w should find lib.rs"
-    );
+    assert!(fxi_files.contains("lib.rs"), "fxi -w should find lib.rs");
+    assert!(rg_files.contains("lib.rs"), "rg -w should find lib.rs");
 }
 
 #[test]
 fn test_flag_invert_match_unsupported() {
     let dir = setup_fixtures();
-
 
     // -v should return an error (not supported with indexed search)
     let (_, stderr, fxi_ok) = run_fxi(&["-v", "fn"], &dir);
@@ -1141,7 +1106,6 @@ fn test_flag_invert_match_unsupported() {
 #[test]
 fn test_context_overrides() {
     let dir = setup_fixtures();
-
 
     // -C should override -A and -B (like ripgrep)
     // Test by comparing output with -C 1 vs what -A 5 -B 5 would produce
@@ -1173,9 +1137,11 @@ fn test_context_overrides() {
 
 /// Create an isolated test directory for chunk size tests
 fn create_chunk_test_dir(suffix: &str) -> PathBuf {
-    let dir = std::env::temp_dir()
-        .join("fxi_chunk_tests")
-        .join(format!("test_{}_{}", std::process::id(), suffix));
+    let dir = std::env::temp_dir().join("fxi_chunk_tests").join(format!(
+        "test_{}_{}",
+        std::process::id(),
+        suffix
+    ));
 
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("Failed to create test dir");
@@ -1191,8 +1157,12 @@ fn create_chunk_test_dir(suffix: &str) -> PathBuf {
     for i in 1..=10 {
         fs::write(
             dir.join(format!("file{}.rs", i)),
-            format!("pub fn func{}() {{\n    println!(\"hello {}\");\n}}\n", i, i),
-        ).unwrap();
+            format!(
+                "pub fn func{}() {{\n    println!(\"hello {}\");\n}}\n",
+                i, i
+            ),
+        )
+        .unwrap();
     }
 
     dir
@@ -1351,10 +1321,7 @@ fn test_regex_digit_pattern() {
 
     assert!(fxi_ok, "Digit regex should succeed");
     let fxi_files = extract_files(&fxi_out);
-    assert!(
-        fxi_files.contains("main.rs"),
-        "main.rs has numbers (42)"
-    );
+    assert!(fxi_files.contains("main.rs"), "main.rs has numbers (42)");
     assert!(
         fxi_files.contains("config.json"),
         "config.json has numbers (1.0.0)"
@@ -1666,10 +1633,7 @@ fn test_combined_file_and_line() {
     // Should only have main.rs results on line 1
     for line in fxi_out.lines() {
         if line.contains(':') && !line.starts_with("--") {
-            assert!(
-                line.contains("main.rs"),
-                "Should only have main.rs results"
-            );
+            assert!(line.contains("main.rs"), "Should only have main.rs results");
         }
     }
 }
@@ -1683,14 +1647,8 @@ fn test_empty_query_with_filters_only() {
 
     assert!(fxi_ok, "Filter-only query should succeed");
     let fxi_files = extract_files(&fxi_out);
-    assert!(
-        fxi_files.contains("main.rs"),
-        "Should find main.rs"
-    );
-    assert!(
-        fxi_files.contains("lib.rs"),
-        "Should find lib.rs"
-    );
+    assert!(fxi_files.contains("main.rs"), "Should find main.rs");
+    assert!(fxi_files.contains("lib.rs"), "Should find lib.rs");
     assert!(
         !fxi_files.contains("config.json"),
         "Should not find config.json"

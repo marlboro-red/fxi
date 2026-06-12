@@ -3,26 +3,24 @@
 //! Keeps indexes loaded in memory and serves search requests over Unix socket.
 //! Supports live file watching for automatic index updates.
 
-use crate::index::build::{build_index_with_progress, is_known_binary_ext, ProcessedFile};
+use crate::index::build::{ProcessedFile, build_index_with_progress, is_known_binary_ext};
 use crate::index::reader::IndexReader;
 use crate::index::types::{DocFlags, IndexMeta, Language};
 use crate::index::writer::DeltaSegmentWriter;
-use crate::query::{parse_query, QueryExecutor};
-use crate::utils::{
-    extract_tokens_and_positions, extract_trigrams, get_index_dir, is_binary,
-    is_minified,
-};
+use crate::query::{QueryExecutor, parse_query};
 use crate::server::debouncer::EventDebouncer;
 use crate::server::protocol::{
-    read_message_with_id, write_message_with_id, ContentMatch, ContentSearchOptions,
-    ContentSearchResponse, Request, Response, SearchMatchData, SearchResponse, StatusResponse,
-    PROTOCOL_VERSION,
+    ContentMatch, ContentSearchOptions, ContentSearchResponse, PROTOCOL_VERSION, Request, Response,
+    SearchMatchData, SearchResponse, StatusResponse, read_message_with_id, write_message_with_id,
 };
 use crate::server::watcher::{
-    build_gitignore_matcher, should_ignore_path, ChangeBatch, ChangeKind, WatcherConfig,
-    WatcherHandle, WatcherMessage,
+    ChangeBatch, ChangeKind, WatcherConfig, WatcherHandle, WatcherMessage, build_gitignore_matcher,
+    should_ignore_path,
 };
 use crate::server::{get_pid_path, get_socket_path};
+use crate::utils::{
+    extract_tokens_and_positions, extract_trigrams, get_index_dir, is_binary, is_minified,
+};
 use anyhow::{Context, Result};
 use lru::LruCache;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -211,8 +209,11 @@ impl IndexServer {
         let config = WatcherConfig::from_env();
         eprintln!(
             "fxid: config: watch={}, debounce={}ms, delta_flush={}s, merge_segments={}, rebuild_threshold={}%",
-            watch_enabled, config.debounce_ms, config.delta_flush_interval_secs,
-            config.merge_segment_threshold, config.rebuild_threshold_percent
+            watch_enabled,
+            config.debounce_ms,
+            config.delta_flush_interval_secs,
+            config.merge_segment_threshold,
+            config.rebuild_threshold_percent
         );
         Arc::new(Self {
             indexes: RwLock::new(HashMap::new()),
@@ -337,7 +338,11 @@ impl IndexServer {
                         self.accumulate_changes(root_path, batch);
                     }
                     WatcherMessage::RequestRebuild { root_path, reason } => {
-                        eprintln!("fxid: rebuild requested for {}: {}", root_path.display(), reason);
+                        eprintln!(
+                            "fxid: rebuild requested for {}: {}",
+                            root_path.display(),
+                            reason
+                        );
                         // Clear pending changes for this index before rebuild
                         if let Ok(mut pending) = self.pending_changes.lock() {
                             pending.remove(&root_path);
@@ -345,7 +350,11 @@ impl IndexServer {
                         self.trigger_rebuild(&root_path);
                     }
                     WatcherMessage::Error { root_path, message } => {
-                        eprintln!("fxid: watcher error for {}: {}", root_path.display(), message);
+                        eprintln!(
+                            "fxid: watcher error for {}: {}",
+                            root_path.display(),
+                            message
+                        );
                     }
                 }
             }
@@ -492,8 +501,13 @@ impl IndexServer {
         };
 
         // Calculate next segment ID
-        let next_segment_id = meta.delta_segments.iter().max().copied()
-            .unwrap_or(meta.base_segment.unwrap_or(0)) + 1;
+        let next_segment_id = meta
+            .delta_segments
+            .iter()
+            .max()
+            .copied()
+            .unwrap_or(meta.base_segment.unwrap_or(0))
+            + 1;
 
         // Create delta writer
         let mut writer = match DeltaSegmentWriter::new(root_path, next_segment_id) {
@@ -517,13 +531,20 @@ impl IndexServer {
             let full_path = root_path.join(rel_path);
 
             if let Some(processed) = process_file_for_delta(&full_path, rel_path) {
-                eprintln!("fxid: [delta] indexing: {} ({} bytes)", rel_path.display(), processed.size);
+                eprintln!(
+                    "fxid: [delta] indexing: {} ({} bytes)",
+                    rel_path.display(),
+                    processed.size
+                );
                 writer.add_file(processed);
                 added_count += 1;
             }
         }
-        eprintln!("fxid: [delta] {} files indexed, {} tombstones marked",
-            added_count, batch.deleted.len() + batch.modified.len());
+        eprintln!(
+            "fxid: [delta] {} files indexed, {} tombstones marked",
+            added_count,
+            batch.deleted.len() + batch.modified.len()
+        );
 
         // Check if there are any changes to write
         if !writer.has_changes() {
@@ -540,9 +561,14 @@ impl IndexServer {
 
         // Check if compaction is needed after this delta segment
         if should_compact(&meta, self.watcher_config.merge_segment_threshold) {
-            let new_deltas = meta.delta_segments.len().saturating_sub(meta.delta_baseline);
-            eprintln!("fxid: triggering segment merge (tombstones={}, new_deltas={}, threshold={})...",
-                meta.tombstone_count, new_deltas, self.watcher_config.merge_segment_threshold);
+            let new_deltas = meta
+                .delta_segments
+                .len()
+                .saturating_sub(meta.delta_baseline);
+            eprintln!(
+                "fxid: triggering segment merge (tombstones={}, new_deltas={}, threshold={})...",
+                meta.tombstone_count, new_deltas, self.watcher_config.merge_segment_threshold
+            );
             if let Err(e) = crate::index::compact::merge_segments(root_path) {
                 eprintln!("fxid: merge failed, falling back to rebuild: {}", e);
                 self.trigger_rebuild(root_path);
@@ -557,8 +583,11 @@ impl IndexServer {
                 let indexes = self.indexes.read().unwrap();
                 if let Some(cached) = indexes.get(root_path) {
                     cached.set_pending_reader(reader);
-                    eprintln!("fxid: index updated for {} (delta segment {})",
-                        root_path.display(), next_segment_id);
+                    eprintln!(
+                        "fxid: index updated for {} (delta segment {})",
+                        root_path.display(),
+                        next_segment_id
+                    );
                 }
             }
             Err(e) => {
@@ -660,8 +689,7 @@ impl IndexServer {
             s.spawn(move || {
                 let mut writer = BufWriter::new(stream);
                 while let Ok((response, request_id)) = rx.recv() {
-                    if write_message_with_id(&mut writer, &response, request_id.as_deref())
-                        .is_err()
+                    if write_message_with_id(&mut writer, &response, request_id.as_deref()).is_err()
                     {
                         break;
                     }
@@ -671,8 +699,7 @@ impl IndexServer {
             // Reader loop: reads requests and spawns handler threads
             let mut reader = BufReader::new(reader_stream);
             loop {
-                let (request, request_id): (Request, _) = match read_message_with_id(&mut reader)
-                {
+                let (request, request_id): (Request, _) = match read_message_with_id(&mut reader) {
                     Ok(r) => r,
                     Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                     Err(e) => {
@@ -746,7 +773,9 @@ impl IndexServer {
 
             Request::Ping => Response::Pong,
 
-            Request::Hello { protocol_version: _ } => Response::Hello {
+            Request::Hello {
+                protocol_version: _,
+            } => Response::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 server_version: env!("CARGO_PKG_VERSION").to_string(),
             },
@@ -782,7 +811,7 @@ impl IndexServer {
                 None => {
                     return Response::Error {
                         message: "Index not found after loading".to_string(),
-                    }
+                    };
                 }
             }
         };
@@ -834,7 +863,7 @@ impl IndexServer {
             Err(e) => {
                 return Response::Error {
                     message: format!("Search failed: {}", e),
-                }
+                };
             }
         };
 
@@ -904,7 +933,7 @@ impl IndexServer {
                 None => {
                     return Response::Error {
                         message: "Index not found after loading".to_string(),
-                    }
+                    };
                 }
             }
         };
@@ -917,8 +946,12 @@ impl IndexServer {
         // Build cache key from pattern + options + limit
         let cache_key = format!(
             "{}\x00{}\x00{}\x00{}\x00{}\x00{}",
-            pattern, options.context_before, options.context_after,
-            options.case_insensitive, options.files_only, limit
+            pattern,
+            options.context_before,
+            options.context_after,
+            options.case_insensitive,
+            options.files_only,
+            limit
         );
 
         // Check content cache first
@@ -956,13 +989,17 @@ impl IndexServer {
 
         // Use optimized files-only path when requested
         if options.files_only {
-            let effective_limit = if limit == 0 { MAX_RESULTS_CAP } else { limit.min(MAX_RESULTS_CAP) };
+            let effective_limit = if limit == 0 {
+                MAX_RESULTS_CAP
+            } else {
+                limit.min(MAX_RESULTS_CAP)
+            };
             let matching_files = match executor.execute_files_only(&parsed, effective_limit) {
                 Ok(files) => files,
                 Err(e) => {
                     return Response::Error {
                         message: format!("Search failed: {}", e),
-                    }
+                    };
                 }
             };
 
@@ -1008,7 +1045,7 @@ impl IndexServer {
             Err(e) => {
                 return Response::Error {
                     message: format!("Search failed: {}", e),
-                }
+                };
             }
         };
 
@@ -1019,7 +1056,11 @@ impl IndexServer {
         drop(unique_files);
 
         // Convert to protocol type and apply limit
-        let effective_limit = if limit == 0 { MAX_RESULTS_CAP } else { limit.min(MAX_RESULTS_CAP) };
+        let effective_limit = if limit == 0 {
+            MAX_RESULTS_CAP
+        } else {
+            limit.min(MAX_RESULTS_CAP)
+        };
         let iter = matches.into_iter().take(effective_limit);
         let match_data: Arc<Vec<ContentMatch>> = Arc::new(
             iter.map(|m| ContentMatch {
@@ -1053,7 +1094,10 @@ impl IndexServer {
     fn handle_status(&self) -> Response {
         let indexes = self.indexes.read().unwrap();
 
-        let total_docs: u32 = indexes.values().map(|idx| idx.get_reader().meta.doc_count).sum();
+        let total_docs: u32 = indexes
+            .values()
+            .map(|idx| idx.get_reader().meta.doc_count)
+            .sum();
 
         let loaded_roots: Vec<PathBuf> = indexes.keys().cloned().collect();
 
@@ -1233,9 +1277,7 @@ impl IndexServer {
         if self.watch_enabled {
             let should_start_watcher = {
                 let indexes = self.indexes.read().unwrap();
-                indexes
-                    .get(root_path)
-                    .is_some_and(|c| !c.is_watching())
+                indexes.get(root_path).is_some_and(|c| !c.is_watching())
             };
 
             if should_start_watcher {
@@ -1279,12 +1321,18 @@ fn should_compact(meta: &IndexMeta, segment_threshold: usize) -> bool {
     }
     // Check segment count - only count NEW deltas added since creation/merge
     // This prevents chunked initial indexes from immediately triggering merge
-    let new_deltas = meta.delta_segments.len().saturating_sub(meta.delta_baseline);
+    let new_deltas = meta
+        .delta_segments
+        .len()
+        .saturating_sub(meta.delta_baseline);
     new_deltas >= segment_threshold
 }
 
 /// Process a single file for delta segment indexing
-fn process_file_for_delta(full_path: &std::path::Path, rel_path: &std::path::Path) -> Option<ProcessedFile> {
+fn process_file_for_delta(
+    full_path: &std::path::Path,
+    rel_path: &std::path::Path,
+) -> Option<ProcessedFile> {
     use std::time::UNIX_EPOCH;
 
     // Fast-path for known binary extensions
@@ -1489,10 +1537,7 @@ pub fn daemonize(watch: bool) -> Result<()> {
                         libc::close(2);
 
                         // Redirect to /dev/null
-                        let null = libc::open(
-                            c"/dev/null".as_ptr(),
-                            libc::O_RDWR,
-                        );
+                        let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
                         if null != -1 {
                             libc::dup2(null, 0);
                             libc::dup2(null, 1);
@@ -1581,7 +1626,12 @@ pub fn stop_daemon() -> Result<bool> {
 mod tests {
     use super::*;
 
-    fn make_meta(delta_segments: Vec<u16>, delta_baseline: usize, tombstone_count: u32, doc_count: u32) -> IndexMeta {
+    fn make_meta(
+        delta_segments: Vec<u16>,
+        delta_baseline: usize,
+        tombstone_count: u32,
+        doc_count: u32,
+    ) -> IndexMeta {
         IndexMeta {
             delta_segments,
             delta_baseline,

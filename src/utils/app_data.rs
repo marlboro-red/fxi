@@ -10,8 +10,7 @@ const APP_NAME: &str = "fxi";
 /// Get the application data directory for storing indexes
 pub fn get_app_data_dir() -> Result<PathBuf> {
     let base = if cfg!(target_os = "macos") {
-        dirs::home_dir()
-            .map(|h| h.join("Library").join("Application Support"))
+        dirs::home_dir().map(|h| h.join("Library").join("Application Support"))
     } else if cfg!(target_os = "windows") {
         dirs::data_local_dir()
     } else {

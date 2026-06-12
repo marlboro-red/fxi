@@ -8,8 +8,8 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -399,10 +399,7 @@ impl WatcherHandle {
     /// Check if the watcher is still running
     pub fn is_running(&self) -> bool {
         !self.shutdown.load(Ordering::SeqCst)
-            && self
-                .thread
-                .as_ref()
-                .is_some_and(|t| !t.is_finished())
+            && self.thread.as_ref().is_some_and(|t| !t.is_finished())
     }
 }
 
@@ -737,12 +734,32 @@ foo = "bar"
     fn test_should_ignore_hardcoded_dirs() {
         let gi = Gitignore::empty();
         assert!(should_ignore_path(&gi, Path::new(".git/config"), false));
-        assert!(should_ignore_path(&gi, Path::new("node_modules/foo/bar.js"), false));
-        assert!(should_ignore_path(&gi, Path::new("target/debug/build"), true));
-        assert!(should_ignore_path(&gi, Path::new(".codesearch/index"), false));
-        assert!(should_ignore_path(&gi, Path::new("__pycache__/module.pyc"), false));
+        assert!(should_ignore_path(
+            &gi,
+            Path::new("node_modules/foo/bar.js"),
+            false
+        ));
+        assert!(should_ignore_path(
+            &gi,
+            Path::new("target/debug/build"),
+            true
+        ));
+        assert!(should_ignore_path(
+            &gi,
+            Path::new(".codesearch/index"),
+            false
+        ));
+        assert!(should_ignore_path(
+            &gi,
+            Path::new("__pycache__/module.pyc"),
+            false
+        ));
         assert!(should_ignore_path(&gi, Path::new(".venv/lib/python"), true));
-        assert!(should_ignore_path(&gi, Path::new("venv/bin/activate"), false));
+        assert!(should_ignore_path(
+            &gi,
+            Path::new("venv/bin/activate"),
+            false
+        ));
     }
 
     #[test]
@@ -750,7 +767,11 @@ foo = "bar"
         let gi = Gitignore::empty();
         assert!(should_ignore_path(&gi, Path::new(".hidden_file"), false));
         assert!(should_ignore_path(&gi, Path::new(".env"), false));
-        assert!(should_ignore_path(&gi, Path::new("src/.hidden/foo.rs"), false));
+        assert!(should_ignore_path(
+            &gi,
+            Path::new("src/.hidden/foo.rs"),
+            false
+        ));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::index::types::*;
 use crate::utils::{
-    delta_decode, delta_decode_bitmap, delta_decode_intersect, get_index_dir, BloomFilter,
+    BloomFilter, delta_decode, delta_decode_bitmap, delta_decode_intersect, get_index_dir,
 };
 use ahash::AHashSet;
 use anyhow::{Context, Result};
@@ -133,7 +133,8 @@ impl SegmentReader {
                 Mmap::map(&File::open(token_postings_path).unwrap_or_else(|_| {
                     let empty_path = segment_path.join(".empty_token_postings");
                     let _ = std::fs::write(&empty_path, b"");
-                    File::open(&empty_path).expect("failed to create empty token postings placeholder")
+                    File::open(&empty_path)
+                        .expect("failed to create empty token postings placeholder")
                 }))?
             }
         };
@@ -181,7 +182,11 @@ impl SegmentReader {
     /// decode. Decoding stops early once values exceed the filter's maximum,
     /// so a common trigram's long posting list is never fully decoded when
     /// the candidate set is already small.
-    fn get_trigram_docs_intersect(&self, trigram: Trigram, filter: &RoaringBitmap) -> RoaringBitmap {
+    fn get_trigram_docs_intersect(
+        &self,
+        trigram: Trigram,
+        filter: &RoaringBitmap,
+    ) -> RoaringBitmap {
         if let Some(entry) = self.trigram_dict.lookup(trigram) {
             let start = entry.offset as usize;
             let end = start + entry.length as usize;
@@ -668,7 +673,9 @@ impl IndexReader {
         let result = self
             .segments
             .par_iter()
-            .map(|segment| self.resolve_phrase_in_segment(segment, phrase_tokens, &tokens_lower, candidates))
+            .map(|segment| {
+                self.resolve_phrase_in_segment(segment, phrase_tokens, &tokens_lower, candidates)
+            })
             .reduce(RoaringBitmap::new, |mut a, b| {
                 a |= b;
                 a
@@ -699,10 +706,8 @@ impl IndexReader {
                 return result;
             }
 
-            let positions: Vec<Vec<(u32, Vec<u32>)>> = all_positions
-                .into_iter()
-                .map(|p| p.unwrap())
-                .collect();
+            let positions: Vec<Vec<(u32, Vec<u32>)>> =
+                all_positions.into_iter().map(|p| p.unwrap()).collect();
 
             // Merge-intersect by doc_id checking position gaps
             // Start with the first token's doc set
@@ -715,9 +720,9 @@ impl IndexReader {
                 'outer: for &start_pos in first_pos {
                     // Check if all subsequent tokens have the expected position
                     let mut all_match = true;
-                    for (tok_idx, (_, expected_offset)) in phrase_tokens.iter().enumerate().skip(1) {
-                        let expected_pos =
-                            start_pos + expected_offset - phrase_tokens[0].1;
+                    for (tok_idx, (_, expected_offset)) in phrase_tokens.iter().enumerate().skip(1)
+                    {
+                        let expected_pos = start_pos + expected_offset - phrase_tokens[0].1;
 
                         // Find this doc_id in the token's positions (binary search)
                         let tok_positions = &positions[tok_idx];
@@ -1130,7 +1135,11 @@ fn cleanup_tmp_files(index_path: &Path) {
                 let name_str = name.to_string_lossy();
                 if name_str.ends_with(".tmp") {
                     if let Err(e) = std::fs::remove_dir_all(entry.path()) {
-                        eprintln!("Warning: failed to cleanup {}: {}", entry.path().display(), e);
+                        eprintln!(
+                            "Warning: failed to cleanup {}: {}",
+                            entry.path().display(),
+                            e
+                        );
                     }
                 }
             }

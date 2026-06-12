@@ -519,12 +519,11 @@ fn is_leap_year(year: i32) -> bool {
 /// Get days before a given month (0-indexed cumulative days)
 fn days_before_month(month: u32, leap: bool) -> u64 {
     const DAYS: [u64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-    let days = DAYS.get(month.saturating_sub(1) as usize).copied().unwrap_or(0);
-    if leap && month > 2 {
-        days + 1
-    } else {
-        days
-    }
+    let days = DAYS
+        .get(month.saturating_sub(1) as usize)
+        .copied()
+        .unwrap_or(0);
+    if leap && month > 2 { days + 1 } else { days }
 }
 
 impl Query {
@@ -618,7 +617,9 @@ mod tests {
     #[test]
     fn test_near_query() {
         let q = parse_query("near:function,return,10");
-        assert!(matches!(q.root, QueryNode::Near { ref terms, distance } if terms.len() == 2 && distance == 10));
+        assert!(
+            matches!(q.root, QueryNode::Near { ref terms, distance } if terms.len() == 2 && distance == 10)
+        );
     }
 
     #[test]
@@ -682,9 +683,9 @@ mod tests {
             }
             QueryNode::And(nodes) => {
                 // Should contain a BoostedLiteral among the nodes
-                let has_boosted = nodes.iter().any(|n| {
-                    matches!(n, QueryNode::BoostedLiteral { text, .. } if text == "important")
-                });
+                let has_boosted = nodes.iter().any(
+                    |n| matches!(n, QueryNode::BoostedLiteral { text, .. } if text == "important"),
+                );
                 assert!(has_boosted, "Expected BoostedLiteral in And nodes");
             }
             _ => panic!("Expected BoostedLiteral or And node"),
@@ -862,7 +863,8 @@ mod tests {
 
     #[test]
     fn test_complex_query_with_multiple_filters() {
-        let q = parse_query("file:*.rs ext:rs lang:rust size:>100 path:src/* sort:recency top:20 test");
+        let q =
+            parse_query("file:*.rs ext:rs lang:rust size:>100 path:src/* sort:recency top:20 test");
         assert_eq!(q.filters.filename, Some("*.rs".to_string()));
         assert_eq!(q.filters.ext, Some("rs".to_string()));
         assert_eq!(q.filters.lang, Some("rust".to_string()));
@@ -1037,10 +1039,14 @@ mod tests {
         match &q.root {
             QueryNode::Regex(pat) => assert_eq!(pat, "TODO.*fix"),
             QueryNode::And(nodes) => {
-                let has_regex = nodes.iter().any(
-                    |n| matches!(n, QueryNode::Regex(pat) if pat == "TODO.*fix"),
+                let has_regex = nodes
+                    .iter()
+                    .any(|n| matches!(n, QueryNode::Regex(pat) if pat == "TODO.*fix"));
+                assert!(
+                    has_regex,
+                    "Should contain Regex node in And, got {:?}",
+                    nodes
                 );
-                assert!(has_regex, "Should contain Regex node in And, got {:?}", nodes);
             }
             _ => panic!("Expected Regex or And node, got {:?}", q.root),
         }
@@ -1079,7 +1085,9 @@ mod tests {
         match &q.root {
             QueryNode::And(nodes) => {
                 assert_eq!(nodes.len(), 2);
-                assert!(matches!(&nodes[0], QueryNode::Near { terms, distance } if terms.len() == 2 && *distance == 3));
+                assert!(
+                    matches!(&nodes[0], QueryNode::Near { terms, distance } if terms.len() == 2 && *distance == 3)
+                );
                 assert!(matches!(&nodes[1], QueryNode::Literal(s) if s == "extra"));
             }
             _ => panic!("Expected And node, got {:?}", q.root),

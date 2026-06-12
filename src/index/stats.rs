@@ -24,7 +24,9 @@ pub fn show_stats(root_path: &Path) -> Result<()> {
     let docs = reader.documents();
     let mut lang_counts = std::collections::HashMap::new();
     for doc in docs {
-        *lang_counts.entry(format!("{:?}", doc.language)).or_insert(0) += 1;
+        *lang_counts
+            .entry(format!("{:?}", doc.language))
+            .or_insert(0) += 1;
     }
 
     println!();
@@ -133,7 +135,11 @@ fn format_timestamp(ts: u64) -> String {
     let mut year: i64 = 1970;
 
     loop {
-        let days_in_year: i64 = if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) { 366 } else { 365 };
+        let days_in_year: i64 = if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) {
+            366
+        } else {
+            365
+        };
         if remaining_days < days_in_year {
             break;
         }
@@ -142,7 +148,20 @@ fn format_timestamp(ts: u64) -> String {
     }
 
     let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-    let month_days: [i64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days: [i64; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month = 0;
     for (i, &md) in month_days.iter().enumerate() {
         if remaining_days < md {
@@ -151,8 +170,13 @@ fn format_timestamp(ts: u64) -> String {
         }
         remaining_days -= md;
     }
-    if month == 0 { month = 12; }
+    if month == 0 {
+        month = 12;
+    }
     let day = remaining_days + 1;
 
-    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", year, month, day, hours, minutes, seconds)
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        year, month, day, hours, minutes, seconds
+    )
 }

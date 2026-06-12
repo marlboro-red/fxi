@@ -1,7 +1,7 @@
 use crate::index::build::build_index_with_progress;
 use crate::index::reader::IndexReader;
 use crate::index::types::SearchMatch;
-use crate::query::{parse_query, QueryExecutor};
+use crate::query::{QueryExecutor, parse_query};
 use crate::server::IndexClient;
 use crate::utils::find_codebase_root;
 use anyhow::Result;
@@ -152,14 +152,16 @@ impl App {
             let root_for_thread = root_path.clone();
 
             thread::spawn(move || {
-                let result = IndexReader::open(&root_for_thread)
-                    .map_err(|e| e.to_string());
+                let result = IndexReader::open(&root_for_thread).map_err(|e| e.to_string());
                 let _ = tx.send(result);
             });
 
             (IndexLoadState::Loading(rx), "Loading index...".to_string())
         } else {
-            (IndexLoadState::NotFound, "No index found. Press F5 to build index.".to_string())
+            (
+                IndexLoadState::NotFound,
+                "No index found. Press F5 to build index.".to_string(),
+            )
         };
 
         Ok(Self {
@@ -202,7 +204,10 @@ impl App {
                             format!(
                                 "{} files indexed (root: {})",
                                 doc_count,
-                                self.root_path.file_name().unwrap_or_default().to_string_lossy()
+                                self.root_path
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
                             )
                         } else {
                             format!("{} files indexed", doc_count)
@@ -228,7 +233,8 @@ impl App {
                     }
                     Err(TryRecvError::Disconnected) => {
                         // Thread crashed?
-                        self.status_message = "Index load thread terminated unexpectedly".to_string();
+                        self.status_message =
+                            "Index load thread terminated unexpectedly".to_string();
                         self.load_state = IndexLoadState::Failed;
                     }
                 }
@@ -264,7 +270,11 @@ impl App {
         let current_state = std::mem::replace(&mut self.search_state, SearchState::Idle);
 
         match current_state {
-            SearchState::Searching { query, receiver, start_time } => {
+            SearchState::Searching {
+                query,
+                receiver,
+                start_time,
+            } => {
                 match receiver.try_recv() {
                     Ok(result) => {
                         // Search completed!
@@ -301,7 +311,11 @@ impl App {
                     }
                     Err(TryRecvError::Empty) => {
                         // Still searching, put the state back
-                        self.search_state = SearchState::Searching { query, receiver, start_time };
+                        self.search_state = SearchState::Searching {
+                            query,
+                            receiver,
+                            start_time,
+                        };
                     }
                     Err(TryRecvError::Disconnected) => {
                         // Thread crashed?
@@ -538,10 +552,8 @@ impl App {
 
             // Temporarily restore terminal before launching editor
             let _ = crossterm::terminal::disable_raw_mode();
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::terminal::LeaveAlternateScreen
-            );
+            let _ =
+                crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
 
             let _ = Command::new(&editor)
                 .arg(&line_arg)
@@ -550,10 +562,8 @@ impl App {
 
             // Restore TUI terminal state
             let _ = crossterm::terminal::enable_raw_mode();
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::terminal::EnterAlternateScreen
-            );
+            let _ =
+                crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen);
         }
     }
 
@@ -687,7 +697,9 @@ impl App {
             if let Some(result) = self.results.get(idx) {
                 let full_path = self.root_path.join(&result.path);
                 // Use entry API to avoid redundant lookups
-                if let std::collections::hash_map::Entry::Vacant(entry) = self.prefetch_cache.entry(full_path.clone()) {
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    self.prefetch_cache.entry(full_path.clone())
+                {
                     // Read and cache synchronously for now (files are usually small)
                     // Could be made async for very large files
                     if let Ok(content) = std::fs::read_to_string(&full_path) {

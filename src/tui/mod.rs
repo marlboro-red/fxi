@@ -37,9 +37,9 @@ use crossterm::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -146,13 +146,23 @@ where
                         match (key.modifiers, key.code) {
                             // Vim: Ctrl+j/Ctrl+n - select next result (only when not editing)
                             (KeyModifiers::CONTROL, KeyCode::Char('j'))
-                            | (KeyModifiers::CONTROL, KeyCode::Char('n')) if !app.editing => app.select_next(),
+                            | (KeyModifiers::CONTROL, KeyCode::Char('n'))
+                                if !app.editing =>
+                            {
+                                app.select_next()
+                            }
                             // Vim: Ctrl+k - select previous result (only when not editing)
-                            (KeyModifiers::CONTROL, KeyCode::Char('k')) if !app.editing => app.select_prev(),
+                            (KeyModifiers::CONTROL, KeyCode::Char('k')) if !app.editing => {
+                                app.select_prev()
+                            }
                             // Vim: Ctrl+d - page down (only when not editing)
-                            (KeyModifiers::CONTROL, KeyCode::Char('d')) if !app.editing => app.select_page_down(),
+                            (KeyModifiers::CONTROL, KeyCode::Char('d')) if !app.editing => {
+                                app.select_page_down()
+                            }
                             // Vim: Ctrl+u - page up (only when not editing)
-                            (KeyModifiers::CONTROL, KeyCode::Char('u')) if !app.editing => app.select_page_up(),
+                            (KeyModifiers::CONTROL, KeyCode::Char('u')) if !app.editing => {
+                                app.select_page_up()
+                            }
                             // Vim: Ctrl+w - delete word backward (always available for editing)
                             (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
                                 app.delete_word();
@@ -164,9 +174,13 @@ where
                                 app.editing = true;
                             }
                             // Vim: Ctrl+a - go to first result (only when not editing)
-                            (KeyModifiers::CONTROL, KeyCode::Char('a')) if !app.editing => app.select_first(),
+                            (KeyModifiers::CONTROL, KeyCode::Char('a')) if !app.editing => {
+                                app.select_first()
+                            }
                             // Vim: Ctrl+e - go to last result (only when not editing)
-                            (KeyModifiers::CONTROL, KeyCode::Char('e')) if !app.editing => app.select_last(),
+                            (KeyModifiers::CONTROL, KeyCode::Char('e')) if !app.editing => {
+                                app.select_last()
+                            }
                             // Toggle preview mode
                             (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
                                 app.toggle_preview();

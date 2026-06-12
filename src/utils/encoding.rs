@@ -149,7 +149,10 @@ pub fn delta_decode_bitmap(buf: &[u8]) -> roaring::RoaringBitmap {
 /// tested against the current candidate set during decode, and decoding
 /// stops as soon as the remaining values cannot be in `filter` (all decoded
 /// values from then on exceed its maximum).
-pub fn delta_decode_intersect(buf: &[u8], filter: &roaring::RoaringBitmap) -> roaring::RoaringBitmap {
+pub fn delta_decode_intersect(
+    buf: &[u8],
+    filter: &roaring::RoaringBitmap,
+) -> roaring::RoaringBitmap {
     let mut bitmap = roaring::RoaringBitmap::new();
     let max = match filter.max() {
         Some(m) => m,
@@ -414,7 +417,18 @@ mod tests {
     #[test]
     fn test_varint_multibyte_boundaries() {
         // Exercise both the 1-byte fast path and the multi-byte slow path
-        for value in [0u32, 1, 127, 128, 129, 16383, 16384, 2097151, 2097152, u32::MAX] {
+        for value in [
+            0u32,
+            1,
+            127,
+            128,
+            129,
+            16383,
+            16384,
+            2097151,
+            2097152,
+            u32::MAX,
+        ] {
             let mut buf = Vec::new();
             encode_varint(value, &mut buf);
             let (decoded, consumed) = decode_varint(&buf).unwrap();
@@ -465,11 +479,7 @@ mod tests {
 
     #[test]
     fn test_position_postings_roundtrip() {
-        let data: Vec<(u32, &[u32])> = vec![
-            (1, &[0, 3, 7]),
-            (5, &[2, 10]),
-            (100, &[0]),
-        ];
+        let data: Vec<(u32, &[u32])> = vec![(1, &[0, 3, 7]), (5, &[2, 10]), (100, &[0])];
 
         let mut buf = Vec::new();
         encode_position_postings(&data, &mut buf);
@@ -502,11 +512,7 @@ mod tests {
 
     #[test]
     fn test_position_postings_consecutive_docs() {
-        let data: Vec<(u32, &[u32])> = vec![
-            (1, &[0]),
-            (2, &[5]),
-            (3, &[10, 20]),
-        ];
+        let data: Vec<(u32, &[u32])> = vec![(1, &[0]), (2, &[5]), (3, &[10, 20])];
         let mut buf = Vec::new();
         encode_position_postings(&data, &mut buf);
         let decoded = decode_position_postings(&buf);

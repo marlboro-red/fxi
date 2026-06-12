@@ -190,7 +190,8 @@ pub fn extract_tokens_with_positions(content: &str) -> Vec<(String, u32)> {
             if is_upper && prev_was_lower {
                 if let Some(start) = token_start {
                     let slice = &bytes[start..i];
-                    if slice.len() >= 2 && slice.len() <= MAX_TOKEN_LENGTH
+                    if slice.len() >= 2
+                        && slice.len() <= MAX_TOKEN_LENGTH
                         && slice.iter().all(|&b| b < 128)
                     {
                         let s = unsafe { std::str::from_utf8_unchecked(slice) };
@@ -206,7 +207,8 @@ pub fn extract_tokens_with_positions(content: &str) -> Vec<(String, u32)> {
         } else {
             if let Some(start) = token_start {
                 let slice = &bytes[start..i];
-                if slice.len() >= 2 && slice.len() <= MAX_TOKEN_LENGTH
+                if slice.len() >= 2
+                    && slice.len() <= MAX_TOKEN_LENGTH
                     && slice.iter().all(|&b| b < 128)
                 {
                     let s = unsafe { std::str::from_utf8_unchecked(slice) };
@@ -222,9 +224,7 @@ pub fn extract_tokens_with_positions(content: &str) -> Vec<(String, u32)> {
     // Handle last token
     if let Some(start) = token_start {
         let slice = &bytes[start..];
-        if slice.len() >= 2 && slice.len() <= MAX_TOKEN_LENGTH
-            && slice.iter().all(|&b| b < 128)
-        {
+        if slice.len() >= 2 && slice.len() <= MAX_TOKEN_LENGTH && slice.iter().all(|&b| b < 128) {
             let s = unsafe { std::str::from_utf8_unchecked(slice) };
             result.push((s.to_ascii_lowercase(), word_pos));
         }

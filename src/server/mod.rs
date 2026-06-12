@@ -147,7 +147,11 @@ pub fn is_daemon_running() -> bool {
             // Try to open the process to check if it exists
             #[link(name = "kernel32")]
             unsafe extern "system" {
-                fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> *mut std::ffi::c_void;
+                fn OpenProcess(
+                    dwDesiredAccess: u32,
+                    bInheritHandle: i32,
+                    dwProcessId: u32,
+                ) -> *mut std::ffi::c_void;
                 fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
             }
 

@@ -9,8 +9,8 @@ use crate::index::reader::{read_documents, read_paths};
 use crate::index::types::*;
 use crate::index::writer::{write_documents_atomic, write_meta_atomic, write_paths_atomic};
 use crate::utils::{
-    decode_position_postings, delta_decode, delta_encode, encode_position_postings,
-    find_codebase_root, get_index_dir, BloomFilter,
+    BloomFilter, decode_position_postings, delta_decode, delta_encode, encode_position_postings,
+    find_codebase_root, get_index_dir,
 };
 use anyhow::{Context, Result};
 use memmap2::Mmap;
@@ -284,11 +284,7 @@ fn merge_all_segments(
         // Merge position data
         let positions_path = segment_path.join("tokens.positions");
         if positions_path.exists() {
-            merge_token_positions_segment(
-                &segment_path,
-                &mut merged_positions,
-                remapping,
-            )?;
+            merge_token_positions_segment(&segment_path, &mut merged_positions, remapping)?;
         } else {
             all_have_positions = false;
         }
@@ -574,10 +570,7 @@ fn merge_token_positions_segment(
         let token_entry = merged.entry(token).or_default();
         for (old_doc_id, positions) in doc_positions {
             if let Some(new_doc_id) = remapping.remap(old_doc_id) {
-                token_entry
-                    .entry(new_doc_id)
-                    .or_default()
-                    .extend(positions);
+                token_entry.entry(new_doc_id).or_default().extend(positions);
             }
         }
     }

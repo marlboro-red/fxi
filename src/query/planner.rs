@@ -571,10 +571,11 @@ mod tests {
     fn test_cs_phrase_keeps_trigram_narrowing() {
         let query = crate::query::parser::parse_query("\"static void\"");
         let plan = QueryPlan::from_query(&query);
-        assert!(plan
-            .steps
-            .iter()
-            .any(|s| matches!(s, PlanStep::TrigramIntersect(_))));
+        assert!(
+            plan.steps
+                .iter()
+                .any(|s| matches!(s, PlanStep::TrigramIntersect(_)))
+        );
         match plan.verification {
             Some(VerificationStep::Phrase {
                 case_insensitive, ..

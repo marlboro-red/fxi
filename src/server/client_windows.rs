@@ -1,11 +1,11 @@
 //! Windows client for connecting to the index server daemon
 
 use crate::index::types::SearchMatch;
-use crate::server::protocol::{
-    read_message_with_id, write_message_with_id, ContentSearchOptions, ContentSearchResponse,
-    Request, Response, StatusResponse, PROTOCOL_VERSION,
-};
 use crate::server::get_pipe_name;
+use crate::server::protocol::{
+    ContentSearchOptions, ContentSearchResponse, PROTOCOL_VERSION, Request, Response,
+    StatusResponse, read_message_with_id, write_message_with_id,
+};
 use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -107,11 +107,7 @@ impl IndexClient {
         let pipe_name = get_pipe_name();
 
         // Try to connect to named pipe
-        let handle = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&pipe_name)
-        {
+        let handle = match OpenOptions::new().read(true).write(true).open(&pipe_name) {
             Ok(h) => h,
             Err(_) => return None,
         };
@@ -231,12 +227,13 @@ impl IndexClient {
         let response = self.send_recv(&request)?;
 
         match response {
-            Response::Reloaded { success, message, .. } => Ok((success, message)),
+            Response::Reloaded {
+                success, message, ..
+            } => Ok((success, message)),
             Response::Error { message } => Err(ClientError::ServerError(message)),
             _ => Err(ClientError::InvalidResponse),
         }
     }
-
 
     /// Ask whether the daemon is watching (and keeping fresh) a root.
     /// Returns (watching, pending_changes).

@@ -293,7 +293,9 @@ impl ChunkedIndexWriter {
             .collect();
 
         // Remap intern ids to ranks so integer sort order == string sort order
-        token_pairs.par_iter_mut().for_each(|p| p.0 = rank[p.0 as usize]);
+        token_pairs
+            .par_iter_mut()
+            .for_each(|p| p.0 = rank[p.0 as usize]);
         position_triples
             .par_iter_mut()
             .for_each(|t| t.0 = rank[t.0 as usize]);
