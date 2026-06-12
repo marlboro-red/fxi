@@ -4,7 +4,7 @@ A terminal-first, ultra-fast code search engine built in Rust.
 
 ## Features
 
-- **Up to 230x faster than ripgrep** on selective queries against large codebases (verified on Linux kernel and Chromium)
+- **Up to ~400x faster than ripgrep** on selective queries against large codebases (verified on Linux kernel and Chromium)
 - **Ripgrep-like CLI**: Familiar flags (`-i`, `-A`, `-B`, `-C`, `-l`, `-c`)
 - **Persistent daemon**: Keeps indexes warm for instant searches
 - **Hybrid indexing**: Trigram + token index for fast narrowing
@@ -170,14 +170,14 @@ src/server/daemon.rs
 
 #### Performance
 
-When the daemon is running (`fxi daemon start`), searches complete in **20-55ms** even on massive codebases like Chromium (439k files). Without the daemon, searches take ~1.5s for cold index loading.
+When the daemon is running (`fxi daemon start`), selective searches complete in **tens of milliseconds** even on massive codebases like Chromium (449k files), and repeated queries are served from the daemon's result cache in single-digit milliseconds. Without the daemon, add ~50ms-1s for cold index loading.
 
 ```bash
 # Start daemon for instant searches
 fxi daemon start
 
-# Now searches are up to 230x faster than ripgrep
-fxi "class Browser"  # ~139ms vs ripgrep's ~8.8 seconds
+# Now searches are up to ~400x faster than ripgrep
+fxi '"class Browser"'  # ~111ms vs ripgrep's ~9.9 seconds on Chromium
 ```
 
 ### Interactive TUI
@@ -200,7 +200,7 @@ fxi daemon foreground      # Run in foreground (for debugging)
 fxi daemon foreground --watch  # Foreground with file watching
 ```
 
-The daemon keeps indexes loaded in memory. When running, searches are **up to 230x faster** on large codebases. Searches automatically use the daemon if available, falling back to direct index loading if not.
+The daemon keeps indexes loaded in memory. When running, searches are **up to ~400x faster** on large codebases. Searches automatically use the daemon if available, falling back to direct index loading if not.
 
 #### File Watching
 
@@ -384,62 +384,60 @@ Press `F1` or `?` to show help in the TUI.
 
 | Operation | Target | Achieved |
 |-----------|--------|----------|
-| Warm query | <50ms | **39-139ms** (selective, Chromium) |
-| Cold startup | <2s | ~1.5s |
-| Full build (1M files) | <5 min | - |
-| Delta update (100 files) | <1s | - |
-| RAM usage | <500MB | - |
+| Warm query (selective) | <50ms | **8-110ms** novel query, **4-26ms** repeated (Chromium) |
+| Cold startup | <2s | ~50ms-1s (query-dependent) |
+| Full build (1M files) | <5 min | ~31s for 449k files (extrapolates to ~70s) |
+| Delta update (100 files) | <1s | 0.4s (Linux, 93k files); 3.2s (Chromium, 449k files — scan-bound) |
+| RAM usage | <500MB | 4.1-5.5GB peak during indexing |
 
 ## Benchmarks
 
-All benchmarks run on Apple M2 Max.
+Measured 2026-06-12 on Apple M2 Max (12 cores, 64GB) against ripgrep 15.1.0.
 
-### Searching
+**Methodology:** fxi daemon running with the index loaded. The **fxi** column is novel-query latency: the daemon's query-result cache is cleared (`fxi daemon reload`) before each timed run, mean of 3 runs. The **fxi repeated** column is the same query again, served from the daemon result cache. **rg** is the mean of 3 runs with warm OS file cache. Matching-file counts from both tools are shown for validation; small deltas (<0.3%) come from fxi skipping symlinked files and differences in binary/encoding detection.
 
-fxi times are single runs with warm daemon (no query cache). rg times are averages of 3 runs. File counts shown for validation.
+### Searching — Linux Kernel (93,407 files, 1.5GB source)
 
-#### Linux Kernel
+| Query | fxi | fxi repeated | rg | Speedup (novel) | fxi files | rg files |
+|-------|-----|--------------|-----|------------------|-----------|----------|
+| `"static void"` | 1072ms | 197ms | 2829ms | **2.6x** | 24,217 | 24,273 |
+| `"unsigned long"` | 865ms | 163ms | 2995ms | **3.5x** | 20,642 | 20,695 |
+| `"struct file_operations"` | 54ms | 7ms | 3055ms | **57x** | 1,259 | 1,260 |
+| `"unlikely(!page)"` | 8ms | 4ms | 3321ms | **417x** | 52 | 52 |
+| `-i deadlock` | 54ms | 8ms | 2924ms | **54x** | 986 | 1,005 |
+| `re:/spin_lock_irqsave\(&\w+/` | 186ms | 20ms | 3167ms | **17x** | 3,207 | 3,217 |
+| `-l "kmalloc"` | 73ms | 8ms | 3121ms | **43x** | 3,651 | 3,671 |
+| `-C 3 "module_init("` | 180ms | 14ms | 2973ms | **17x** | 3,134 | 3,155 |
+| `file:*.dts` | 28ms | 7ms | 86ms | **3.0x** | 3,580 | 3,580 |
 
-| Pattern | fxi (ms) | rg (ms) | fxi files | rg files | Speedup vs rg |
-|---------|----------|---------|-----------|----------|---------------|
-| `NULL` | 1087 | 3300 | 29,000 | 27,780 | **3.0x** |
-| `struct` | 3316 | 3363 | 56,708 | 56,521 | **1.0x** |
-| `return` | 3243 | 3140 | 46,437 | 45,923 | **.9x** |
-| `"static void"` | 669 | 2966 | 24,036 | 24,089 | **4.4x** |
-| `"unsigned long"` | 550 | 2847 | 20,535 | 20,573 | **5.2x** |
-| `"struct device"` | 2400 | 2860 | 13,119 | 13,129 | **1.2x** |
-| `-i error` | 2737 | 3011 | 22,896 | 22,956 | **1.1x** |
-| `-i warning` | 2746 | 3215 | 4,110 | 4,114 | **1.2x** |
+### Searching — Chromium (449,092 files, 6.7GB source)
 
-#### Chromium
+| Query | fxi | fxi repeated | rg | Speedup (novel) | fxi files | rg files |
+|-------|-----|--------------|-----|------------------|-----------|----------|
+| `"class Browser"` | 111ms | 9ms | 9934ms | **90x** | 2,964 | 2,970 |
+| `"void OnError"` | 23ms | 5ms | 9082ms | **388x** | 466 | 466 |
+| `"namespace content"` | 376ms | 24ms | 9043ms | **24x** | 9,329 | 9,331 |
+| `"std::unique_ptr"` | 2280ms | 216ms | 9203ms | **4.0x** | 43,918 | 43,918 |
+| `-i deprecated` | 472ms | 59ms | 9290ms | **20x** | 7,119 | 7,149 |
+| `re:/scoped_refptr<\w+>/` | 510ms | 43ms | 9435ms | **19x** | 7,895 | 7,895 |
+| `-l "WeakPtr"` | 395ms | 26ms | 10330ms | **26x** | 18,407 | 18,436 |
+| `-C 3 "RunUntilIdle()"` | 337ms | 96ms | 9309ms | **28x** | 3,677 | 3,677 |
+| `file:*.mojom` | 77ms | 7ms | 803ms | **10x** | 1,880 | 1,880 |
 
-| Pattern | fxi (ms) | rg (ms) | fxi files | rg files | Speedup vs rg |
-|---------|----------|---------|-----------|----------|---------------|
-| `"class Browser"` | 139 | 8865 | 2,795 | 2,795 | **63.8x** |
-| `"void OnError"` | 39 | 9037 | 457 | 457 | **231.7x** |
-| `"namespace content"` | 9177 | 8740 | 9,017 | 9,017 | **.9x** |
-| `"std::string"` | 1096 | 8997 | 48,085 | 48,086 | **8.2x** |
-| `"std::unique_ptr"` | 966 | 9500 | 42,791 | 42,791 | **9.8x** |
+Note on `-i`: case-insensitive queries narrow through the lowercased token index, so they can miss mixed-case occurrences that only appear as substrings spanning token boundaries (the file counts above show the gap vs ripgrep: ~2% on these queries).
 
-### Indexing Performance
+### Indexing
 
-#### Linux Kernel
+| Metric | Linux Kernel | Chromium |
+|--------|--------------|----------|
+| Files indexed | 93,407 | 449,092 |
+| Full build | 11.3s | 31.0s |
+| Throughput | ~8,260 files/sec | ~14,490 files/sec |
+| Incremental update (50 changed files) | 0.44s | 3.2s |
+| No-op scan (nothing changed) | 0.6s | 3.1s |
+| Peak RSS during build | 5.5GB | 4.1GB |
 
-| Metric | Value |
-|--------|-------|
-| Files indexed | 91,989 |
-| Total time | 5.8 seconds |
-| CPU utilization | 727% |
-| Throughput | ~15,860 files/sec |
-
-#### Chromium
-
-| Metric | Value |
-|--------|-------|
-| Files indexed | 433,272 |
-| Total time | 21.9 seconds |
-| CPU utilization | 592% |
-| Throughput | ~19,780 files/sec |
+Incremental updates write delta segments for changed files only; the change-detection scan walks the tree with parallel walker threads.
 
 ## License
 
