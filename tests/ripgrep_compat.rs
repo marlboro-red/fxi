@@ -105,6 +105,11 @@ pub fn debug_print(msg: &str) {
     )
     .unwrap();
 
+    // Symlink to a real file: like ripgrep, fxi must index only the target,
+    // never the symlink path (avoids duplicate results)
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.join("utils.rs"), dir.join("utils_link.rs")).unwrap();
+
     // Build the index
     let fxi = fxi_binary();
     let output = Command::new(&fxi)
@@ -262,6 +267,35 @@ fn test_flag_case_insensitive() {
     assert!(
         rg_files.contains("utils.rs"),
         "rg -i should find utils.rs, got: {:?}",
+        rg_files
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_symlinks_not_indexed() {
+    let dir = setup_fixtures();
+
+    // utils_link.rs is a symlink to utils.rs; both fxi and rg report only
+    // the real file, not the link
+    let (fxi_out, _, _) = run_fxi(&["format_error"], &dir);
+    let fxi_files = extract_files(&fxi_out);
+    let (rg_out, _, _) = run_rg(&["format_error"], &dir);
+    let rg_files = extract_files(&rg_out);
+
+    assert!(
+        fxi_files.contains("utils.rs"),
+        "fxi should match the symlink target, got: {:?}",
+        fxi_files
+    );
+    assert!(
+        !fxi_files.contains("utils_link.rs"),
+        "fxi must not index symlinked files (ripgrep-compatible), got: {:?}",
+        fxi_files
+    );
+    assert!(
+        !rg_files.contains("utils_link.rs"),
+        "rg skips symlinks by default, got: {:?}",
         rg_files
     );
 }

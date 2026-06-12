@@ -15,6 +15,7 @@ A terminal-first, ultra-fast code search engine built in Rust.
 - **Incremental updates**: Delta segments for efficient index maintenance
 - **Cross-platform**: Unix sockets (Linux/macOS) and Windows named pipes
 - **Respects .gitignore**: Automatic filtering of ignored files
+- **Skips symlinks**: Like ripgrep, only real files are indexed (no duplicate results from links)
 - **Centralized indexes**: Stored in app data, not in project directories
 - **Auto-detection**: Finds codebase root from any subdirectory
 
