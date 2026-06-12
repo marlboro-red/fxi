@@ -309,18 +309,20 @@ impl<'a> QueryExecutor<'a> {
                 continue;
             }
 
-            // Re-read file for context extraction (hits file cache for sequential,
-            // re-reads for parallel — but context extraction is a post-processing step)
-            let content = self
-                .reader
-                .read_file_cached(&full_path)
-                .or_else(|| read_file_mmap(&full_path));
+            // Re-read the file ONLY when context lines were requested; the
+            // match lines themselves were captured during verification, so
+            // without -A/-B/-C this read would be pure waste (~0.9s over a
+            // broad-phrase result set on Chromium)
+            let content = if context_before > 0 || context_after > 0 {
+                self.reader
+                    .read_file_cached(&full_path)
+                    .or_else(|| read_file_mmap(&full_path))
+            } else {
+                None
+            };
 
             // Split into lines once per file, not once per match
-            let lines: Option<Vec<&str>> = match &content {
-                Some(c) if context_before > 0 || context_after > 0 => Some(c.lines().collect()),
-                _ => None,
-            };
+            let lines: Option<Vec<&str>> = content.as_ref().map(|c| c.lines().collect());
 
             for (line_num, line_content, start, end) in file_matches {
                 let (ctx_before, ctx_after) = match &lines {
@@ -474,8 +476,10 @@ impl<'a> QueryExecutor<'a> {
                 if *case_insensitive {
                     Self::has_literal_match(content, text)
                 } else {
-                    // Exact phrase match (case-sensitive)
-                    content.contains(text)
+                    // Exact phrase match (case-sensitive). memmem is SIMD;
+                    // str::contains is not, and this runs over every byte of
+                    // every candidate file in -l mode
+                    memchr::memmem::find(content.as_bytes(), text.as_bytes()).is_some()
                 }
             }
             VerificationStep::Regex(pattern) => {
