@@ -463,6 +463,20 @@ impl QueryPlanner {
 
 /// Extract literal prefix from regex for narrowing
 fn extract_regex_prefix(pattern: &str) -> Option<String> {
+    // An unescaped alternation anywhere means no literal prefix is required
+    // by every match ("gamma|other" must not narrow to docs containing
+    // "gamma"), so narrowing must be skipped entirely
+    let mut escaped = false;
+    for ch in pattern.chars() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '|' {
+            return None;
+        }
+    }
+
     let mut prefix = String::new();
     let mut chars = pattern.chars().peekable();
 
@@ -490,8 +504,14 @@ fn extract_regex_prefix(pattern: &str) -> Option<String> {
                     break;
                 }
             }
-            // Regex metacharacters - stop here
-            '.' | '*' | '+' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '|' | '$' => break,
+            // Quantifiers that make the PREVIOUS char optional: it is not
+            // part of the required prefix ("foo*" only requires "fo")
+            '*' | '?' | '{' => {
+                prefix.pop();
+                break;
+            }
+            // Other regex metacharacters - stop here
+            '.' | '+' | '[' | ']' | '(' | ')' | '}' | '$' => break,
             // Regular character
             c => prefix.push(c),
         }
@@ -516,6 +536,21 @@ mod tests {
         );
         assert_eq!(extract_regex_prefix("^foo"), Some("foo".to_string()));
         assert_eq!(extract_regex_prefix("ab"), None); // Too short
+
+        // Alternation: no prefix is required by every match
+        assert_eq!(extract_regex_prefix("gamma|other"), None);
+        assert_eq!(extract_regex_prefix("foo(a)|b"), None);
+        assert_eq!(
+            extract_regex_prefix("foo\\|bar"),
+            Some("foo|bar".to_string())
+        ); // escaped pipe is literal
+
+        // Quantifiers make the preceding char optional
+        assert_eq!(extract_regex_prefix("food*"), Some("foo".to_string()));
+        assert_eq!(extract_regex_prefix("food?s"), Some("foo".to_string()));
+        assert_eq!(extract_regex_prefix("food{2}"), Some("foo".to_string()));
+        // "+" requires at least one occurrence, so the char stays
+        assert_eq!(extract_regex_prefix("food+"), Some("food".to_string()));
     }
 
     fn plan_ci(input: &str) -> QueryPlan {
