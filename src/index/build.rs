@@ -31,9 +31,13 @@ pub fn is_known_binary_ext(ext: &str) -> bool {
         // Documents (binary formats)
         "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" |
         // Media
-        "mp3" | "mp4" | "avi" | "mov" | "wav" | "ogg" | "flac" | "mkv" | "webm" |
+        "mp3" | "mp4" | "avi" | "mov" | "wav" | "ogg" | "oga" | "flac" | "mkv" | "webm" |
         // Certificates/keys
         "snk" | "pfx" | "p12" | "cer" | "crt" | "p7s" | "p7b" |
+        // Compiled web/mobile artifacts
+        "wasm" | "svgz" | "pak" | "crx" | "apk" | "dex" | "class" |
+        // Color profiles
+        "icc" | "icm" |
         // Other binary/cache
         "cache" | "db" | "sqlite" | "mdb" | "ldf" | "mdf"
     )
@@ -593,69 +597,133 @@ fn compute_index_diff(root: &Path, indexed_files: &HashMap<PathBuf, (u32, u64)>)
     let config = IndexConfig::default();
     let max_file_size = config.max_file_size;
 
-    // Walk filesystem
-    let walker = WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .filter_entry(|entry| {
-            let name = entry.file_name().to_string_lossy();
-            !matches!(
-                name.as_ref(),
-                ".git" | "node_modules" | "target" | ".codesearch" | "__pycache__" | ".venv" | "venv"
-            )
-        })
-        .build();
+    // Walk the filesystem in parallel: the per-file metadata() stat dominates
+    // the scan on large trees, so it runs on the walker threads
+    let scanned: Vec<(PathBuf, PathBuf, u64)> = {
+        let entries: Arc<Mutex<Vec<(PathBuf, PathBuf, u64)>>> =
+            Arc::new(Mutex::new(Vec::with_capacity(indexed_files.len())));
+
+        struct ScanVisitor {
+            root: PathBuf,
+            max_file_size: u64,
+            shared: Arc<Mutex<Vec<(PathBuf, PathBuf, u64)>>>,
+            // Batch into a thread-local vec; take the shared lock once per
+            // walker thread instead of once per file
+            local: Vec<(PathBuf, PathBuf, u64)>,
+        }
+
+        impl ScanVisitor {
+            fn flush(&mut self) {
+                if !self.local.is_empty() {
+                    let mut entries = self
+                        .shared
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    entries.append(&mut self.local);
+                }
+            }
+        }
+
+        impl ignore::ParallelVisitor for ScanVisitor {
+            fn visit(&mut self, result: Result<ignore::DirEntry, ignore::Error>) -> ignore::WalkState {
+                if let Ok(entry) = result
+                    // file_type() comes from the directory entry — no extra
+                    // stat(2) per file like path().is_file()
+                    && entry.file_type().is_some_and(|t| t.is_file())
+                    && let Ok(rel_path) = entry.path().strip_prefix(&self.root)
+                    // Known-binary extensions are never indexed; skipping them
+                    // here keeps them from showing up as eternally-"new" files
+                    // that every incremental update re-reads and rejects
+                    && !rel_path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(is_known_binary_ext)
+                    && let Ok(metadata) = entry.metadata()
+                    && metadata.len() <= self.max_file_size
+                    && metadata.len() > 0
+                {
+                    let mtime = metadata
+                        .modified()
+                        .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
+                        .unwrap_or(0);
+                    let rel_path = rel_path.to_path_buf();
+                    self.local.push((entry.into_path(), rel_path, mtime));
+                }
+                ignore::WalkState::Continue
+            }
+        }
+
+        impl Drop for ScanVisitor {
+            fn drop(&mut self) {
+                self.flush();
+            }
+        }
+
+        struct ScanBuilder {
+            root: PathBuf,
+            max_file_size: u64,
+            shared: Arc<Mutex<Vec<(PathBuf, PathBuf, u64)>>>,
+        }
+
+        impl<'s> ignore::ParallelVisitorBuilder<'s> for ScanBuilder {
+            fn build(&mut self) -> Box<dyn ignore::ParallelVisitor + 's> {
+                Box::new(ScanVisitor {
+                    root: self.root.clone(),
+                    max_file_size: self.max_file_size,
+                    shared: Arc::clone(&self.shared),
+                    local: Vec::with_capacity(1024),
+                })
+            }
+        }
+
+        let mut builder = ScanBuilder {
+            root: root.to_path_buf(),
+            max_file_size,
+            shared: Arc::clone(&entries),
+        };
+
+        WalkBuilder::new(root)
+            .hidden(true)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .filter_entry(|entry| {
+                let name = entry.file_name().to_string_lossy();
+                !matches!(
+                    name.as_ref(),
+                    ".git" | "node_modules" | "target" | ".codesearch" | "__pycache__" | ".venv" | "venv"
+                )
+            })
+            .build_parallel()
+            .visit(&mut builder);
+
+        drop(builder);
+        Arc::try_unwrap(entries).unwrap().into_inner().unwrap()
+    };
 
     let mut new_files = Vec::new();
     let mut modified_files = Vec::new();
-    let mut seen_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut seen_paths: std::collections::HashSet<&Path> =
+        std::collections::HashSet::with_capacity(scanned.len());
 
-    for entry in walker.filter_map(|e| e.ok()) {
-        // file_type() comes from the directory entry — no extra stat(2)
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
+    for (full_path, rel_path, current_mtime) in &scanned {
+        seen_paths.insert(rel_path.as_path());
 
-        let full_path = entry.path().to_path_buf();
-        let rel_path = match full_path.strip_prefix(root) {
-            Ok(p) => p.to_path_buf(),
-            Err(_) => continue,
-        };
-
-        // Check file size (metadata() reuses walker data where possible)
-        let metadata = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        if metadata.len() > max_file_size || metadata.len() == 0 {
-            continue;
-        }
-
-        let current_mtime = metadata
-            .modified()
-            .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
-            .unwrap_or(0);
-
-        seen_paths.insert(rel_path.clone());
-
-        if let Some(&(doc_id, indexed_mtime)) = indexed_files.get(&rel_path) {
+        if let Some(&(doc_id, indexed_mtime)) = indexed_files.get(rel_path) {
             // File exists in index - check if modified
-            if current_mtime != indexed_mtime {
-                modified_files.push((full_path, rel_path, doc_id));
+            if *current_mtime != indexed_mtime {
+                modified_files.push((full_path.clone(), rel_path.clone(), doc_id));
             }
         } else {
             // New file
-            new_files.push((full_path, rel_path));
+            new_files.push((full_path.clone(), rel_path.clone()));
         }
     }
 
     // Find deleted files
     let deleted_files: Vec<PathBuf> = indexed_files
         .keys()
-        .filter(|path| !seen_paths.contains(*path))
+        .filter(|path| !seen_paths.contains(path.as_path()))
         .cloned()
         .collect();
 
