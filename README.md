@@ -260,6 +260,12 @@ Index location: ~/.local/share/fxi/indexes/myapp-...
 Document count: 1234
 ```
 
+## Search Semantics
+
+The full contract for what fxi matches, what it can miss, and how fresh
+results are — including every documented divergence from ripgrep — is in
+[docs/SEMANTICS.md](docs/SEMANTICS.md).
+
 ## Query Syntax
 
 ### Literals and Phrases
