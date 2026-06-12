@@ -64,8 +64,12 @@ impl Colors {
 
 /// Buffered stdout: one syscall per buffer instead of one per line.
 fn buffered_stdout(color: bool) -> BufferedStandardStream {
+    // The caller has already resolved --color (always/never/auto with tty
+    // detection) into a bool, so force here: termcolor's Auto would consult
+    // TERM and silently drop colors in environments where it is unset
+    // (breaking --color=always under pipes and on CI)
     let choice = if color {
-        ColorChoice::Auto
+        ColorChoice::Always
     } else {
         ColorChoice::Never
     };
