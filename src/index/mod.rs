@@ -55,5 +55,3 @@ pub mod writer;
 pub use reader::IndexReader;
 #[allow(unused_imports)]
 pub use types::*;
-#[allow(unused_imports)]
-pub use writer::IndexWriter;

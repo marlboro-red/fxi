@@ -174,6 +174,10 @@ impl DocFlags {
         self.0 |= Self::BINARY;
     }
 
+    /// Unused since the legacy IndexWriter was removed, but is_stale is
+    /// still checked at read time because persisted indexes may carry the
+    /// flag
+    #[allow(dead_code)]
     pub fn set_stale(&mut self) {
         self.0 |= Self::STALE;
     }
