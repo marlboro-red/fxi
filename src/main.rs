@@ -229,7 +229,10 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Auto-detect codebase root
+            // Auto-detect codebase root. The write lock serializes against
+            // a daemon flush or another fxi index on the same root.
+            let root = utils::find_codebase_root(&path)?;
+            let _lock = utils::IndexLock::acquire(&root)?;
             index::build::build_index_auto(&path, force, chunk_size)?;
         }
         Some(Commands::Search { path }) => {
@@ -239,6 +242,8 @@ fn main() -> Result<()> {
             index::stats::show_stats(&path)?;
         }
         Some(Commands::Compact { path }) => {
+            let root = utils::find_codebase_root(&path)?;
+            let _lock = utils::IndexLock::acquire(&root)?;
             index::compact::compact_segments(&path)?;
         }
         Some(Commands::List) => {
@@ -505,6 +510,37 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
     Ok(())
 }
 
+/// Searching without a daemon means results reflect the index as of its
+/// last update; surface that when the index looks old instead of silently
+/// missing recent changes. Tunable via FXI_STALE_WARN_SECS (0 disables).
+fn warn_if_stale(reader: &index::reader::IndexReader, root: &Path) {
+    use std::io::IsTerminal;
+
+    if !std::io::stderr().is_terminal() {
+        return;
+    }
+    let threshold = std::env::var("FXI_STALE_WARN_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(3600);
+    if threshold == 0 {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let age = now.saturating_sub(reader.meta.updated_at);
+    if age > threshold {
+        eprintln!(
+            "note: index for {} was last updated {}h {}m ago; run `fxi index` or `fxi daemon start --watch` to keep it fresh",
+            root.display(),
+            age / 3600,
+            (age % 3600) / 60,
+        );
+    }
+}
+
 /// Build combined search pattern from multiple patterns
 fn build_pattern(patterns: &[String], word_regexp: bool) -> String {
     if patterns.is_empty() {
@@ -559,6 +595,7 @@ fn do_direct_content_search(
 
     // Load index
     let reader = IndexReader::open(root)?;
+    warn_if_stale(&reader, root);
 
     // Case-insensitivity is applied at the plan level: the planner narrows
     // through the lowercased token index and verifiers ignore case

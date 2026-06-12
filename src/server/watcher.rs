@@ -97,9 +97,11 @@ pub fn should_ignore_path(gitignore: &Gitignore, rel_path: &Path, is_dir: bool) 
 /// Default debounce window in milliseconds
 pub const DEFAULT_DEBOUNCE_MS: u64 = 500;
 
-/// Default interval for flushing accumulated changes to delta segments (in seconds)
-/// Set to 5 minutes to avoid creating too many delta segments during active editing
-pub const DEFAULT_DELTA_FLUSH_INTERVAL_SECS: u64 = 300;
+/// Default interval for flushing accumulated changes to delta segments (in
+/// seconds). This bounds how long a newly created file stays invisible to
+/// search while watched; the debouncer already coalesces save bursts, and
+/// auto-compaction (15 delta segments) absorbs the extra segment churn.
+pub const DEFAULT_DELTA_FLUSH_INTERVAL_SECS: u64 = 60;
 
 /// Default threshold for triggering segment merge (number of delta segments)
 /// Higher values mean less frequent merging but more memory/segments during queries

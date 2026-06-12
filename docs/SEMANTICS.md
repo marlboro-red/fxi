@@ -110,10 +110,15 @@ How the index stays fresh:
   comparison, delta segment for changes).
 - A daemon started with `--watch` reconciles each root with one incremental
   scan when its watcher starts, then applies file events (debounced; flushed
-  to a delta segment periodically — `FXI_DELTA_FLUSH_SECS`, default 300s).
+  to a delta segment periodically — `FXI_DELTA_FLUSH_SECS`, default 60s).
   A newly created file is searchable only after the next flush.
 - While a root is watched, `fxi index` skips its own scan and reports the
   daemon's pending-change count; `fxi index --force` rebuilds locally.
+- All index writers (CLI builds, daemon flushes, compaction) hold a
+  per-index advisory lock, so two writers can never interleave segment or
+  metadata writes.
+- Searching without a daemon prints a stderr note when the index is more
+  than an hour old (`FXI_STALE_WARN_SECS`, 0 disables).
 
 ## Result caching
 

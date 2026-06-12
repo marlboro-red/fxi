@@ -379,6 +379,19 @@ impl IndexServer {
 
     /// Apply an incremental update using delta segments
     fn apply_incremental_update(&self, root_path: &PathBuf, batch: ChangeBatch) {
+        // Serialize against CLI indexers and other writers on this root
+        let _lock = match crate::utils::IndexLock::acquire(root_path) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!(
+                    "fxid: failed to lock index for {}: {}",
+                    root_path.display(),
+                    e
+                );
+                return;
+            }
+        };
+
         // Load current meta to check delta segment count
         let index_path = match get_index_dir(root_path) {
             Ok(p) => p,
@@ -499,6 +512,19 @@ impl IndexServer {
 
     /// Trigger a full index rebuild
     fn trigger_rebuild(&self, root_path: &PathBuf) {
+        // Serialize against CLI indexers and other writers on this root
+        let _lock = match crate::utils::IndexLock::acquire(root_path) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!(
+                    "fxid: failed to lock index for {}: {}",
+                    root_path.display(),
+                    e
+                );
+                return;
+            }
+        };
+
         // Stop the watcher during rebuild
         {
             let indexes = self.indexes.read().unwrap();
@@ -1109,6 +1135,7 @@ impl IndexServer {
                 // must be picked up by one incremental scan or the index
                 // would stay stale until a manual `fxi index`
                 eprintln!("fxid: reconciling index for {}", root_path.display());
+                let _lock = crate::utils::IndexLock::acquire(root_path);
                 match crate::index::build::update_index(root_path) {
                     Ok(_) => {
                         // Swap in a fresh reader in case the scan changed it

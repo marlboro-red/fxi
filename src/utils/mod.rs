@@ -27,11 +27,13 @@
 pub mod app_data;
 pub mod bloom;
 pub mod encoding;
+pub mod index_lock;
 pub mod tokenizer;
 pub mod trigram;
 
 pub use app_data::*;
 pub use bloom::*;
 pub use encoding::*;
+pub use index_lock::IndexLock;
 pub use tokenizer::*;
 pub use trigram::*;
