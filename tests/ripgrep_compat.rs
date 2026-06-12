@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -143,7 +143,7 @@ fn fxi_binary() -> PathBuf {
 }
 
 /// Run fxi with given args
-fn run_fxi(args: &[&str], dir: &PathBuf) -> (String, String, bool) {
+fn run_fxi(args: &[&str], dir: &Path) -> (String, String, bool) {
     let fxi = fxi_binary();
     let mut cmd_args: Vec<&str> = args.to_vec();
     cmd_args.extend(["-p", dir.to_str().unwrap(), "--color=never"]);
@@ -161,7 +161,7 @@ fn run_fxi(args: &[&str], dir: &PathBuf) -> (String, String, bool) {
 }
 
 /// Run ripgrep with given args
-fn run_rg(args: &[&str], dir: &PathBuf) -> (String, String, bool) {
+fn run_rg(args: &[&str], dir: &Path) -> (String, String, bool) {
     let output = Command::new("rg")
         .args(args)
         .arg("--color=never")
@@ -760,7 +760,7 @@ fn test_filter_combined() {
     let fxi_files = extract_files(&fxi_out);
 
     // Should find .rs files containing fn
-    assert!(fxi_files.len() > 0, "Should find matches");
+    assert!(!fxi_files.is_empty(), "Should find matches");
     for file in &fxi_files {
         assert!(file.ends_with(".rs"), "All matches should be .rs files");
     }
@@ -1005,7 +1005,7 @@ fn test_binary_files_excluded_by_extension() {
     let files = extract_files(&stdout);
     assert_eq!(files.len(), 1, "Should find exactly one file");
     assert!(
-        files.contains(&"code.rs".to_string()),
+        files.contains("code.rs"),
         "Should find code.rs, got: {:?}",
         files
     );
@@ -1039,7 +1039,7 @@ fn test_binary_content_excluded() {
     let files = extract_files(&stdout);
     assert_eq!(files.len(), 1, "Should find exactly one file");
     assert!(
-        files.contains(&"text.txt".to_string()),
+        files.contains("text.txt"),
         "Should find text.txt, got: {:?}",
         files
     );
@@ -1501,7 +1501,7 @@ fn test_filter_line_range() {
             if parts.len() >= 2 {
                 if let Ok(line_num) = parts[1].parse::<u32>() {
                     assert!(
-                        line_num >= 1 && line_num <= 3,
+                        (1..=3).contains(&line_num),
                         "line:1-3 should only return lines 1-3, got line {}",
                         line_num
                     );

@@ -246,18 +246,25 @@ fn build_doc_id_remapping(index_path: &Path) -> Result<DocIdRemapping> {
     })
 }
 
+/// Token -> doc -> positions postings, as merged during compaction
+type PositionPostings = BTreeMap<String, BTreeMap<DocId, Vec<u32>>>;
+
+/// All merged segment data: trigram postings, token postings, line maps,
+/// position postings, and whether every segment had position data
+type MergedSegments = (
+    BTreeMap<Trigram, Vec<DocId>>,
+    BTreeMap<String, Vec<DocId>>,
+    HashMap<DocId, Vec<u32>>,
+    PositionPostings,
+    bool,
+);
+
 /// Merge postings from all segments, remapping doc_ids.
 fn merge_all_segments(
     index_path: &Path,
     segment_ids: &[SegmentId],
     remapping: &DocIdRemapping,
-) -> Result<(
-    BTreeMap<Trigram, Vec<DocId>>,
-    BTreeMap<String, Vec<DocId>>,
-    HashMap<DocId, Vec<u32>>,
-    BTreeMap<String, BTreeMap<DocId, Vec<u32>>>,
-    bool,
-)> {
+) -> Result<MergedSegments> {
     let mut merged_trigrams: BTreeMap<Trigram, Vec<DocId>> = BTreeMap::new();
     let mut merged_tokens: BTreeMap<String, Vec<DocId>> = BTreeMap::new();
     let mut merged_line_maps: HashMap<DocId, Vec<u32>> = HashMap::new();

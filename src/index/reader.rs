@@ -695,8 +695,10 @@ impl IndexReader {
         let mut result = RoaringBitmap::new();
 
         {
-            // Load positions for each phrase token in this segment
-            let mut all_positions: Vec<Option<Vec<(u32, Vec<u32>)>>> = Vec::new();
+            // Load positions for each phrase token in this segment:
+            // per token, an optional list of (doc_id, positions)
+            type TokenPositions = Vec<(u32, Vec<u32>)>;
+            let mut all_positions: Vec<Option<TokenPositions>> = Vec::new();
             for token_lower in tokens_lower {
                 all_positions.push(segment.get_token_positions(token_lower, candidates));
             }

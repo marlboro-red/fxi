@@ -842,22 +842,28 @@ mod tests {
 
     #[test]
     fn test_filters_has_any_with_filename() {
-        let mut filters = QueryFilters::default();
-        filters.filename = Some("test.rs".to_string());
+        let filters = QueryFilters {
+            filename: Some("test.rs".to_string()),
+            ..Default::default()
+        };
         assert!(filters.has_any());
     }
 
     #[test]
     fn test_filters_has_any_with_ext() {
-        let mut filters = QueryFilters::default();
-        filters.ext = Some("rs".to_string());
+        let filters = QueryFilters {
+            ext: Some("rs".to_string()),
+            ..Default::default()
+        };
         assert!(filters.has_any());
     }
 
     #[test]
     fn test_filters_has_any_with_size() {
-        let mut filters = QueryFilters::default();
-        filters.size_min = Some(100);
+        let filters = QueryFilters {
+            size_min: Some(100),
+            ..Default::default()
+        };
         assert!(filters.has_any());
     }
 

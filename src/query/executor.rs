@@ -208,9 +208,9 @@ impl<'a> QueryExecutor<'a> {
         // Build results with scoring
         let verification = plan.verification.as_ref();
         let search_terms_lower = verification
-            .map(|v| Self::extract_search_terms(v))
+            .map(Self::extract_search_terms)
             .unwrap_or_default();
-        let boost = verification.map(|v| Self::extract_boost(v)).unwrap_or(1.0);
+        let boost = verification.map(Self::extract_boost).unwrap_or(1.0);
 
         let estimated_total = all_matches.len() * 2;
         let mut results = Vec::with_capacity(estimated_total.min(if limit > 0 {
@@ -957,15 +957,14 @@ impl<'a> QueryExecutor<'a> {
 
             if let Some(doc) = self.reader.get_document(doc_id)
                 && let Some(path) = self.reader.get_path(doc)
+                && Self::filename_matches_terms(path, search_terms_lower)
             {
-                if Self::filename_matches_terms(path, search_terms_lower) {
-                    matches.push(SearchMatch {
-                        doc_id,
-                        path: path.clone(),
-                        line_number: 1,
-                        score: 2.0, // Boost filename matches
-                    });
-                }
+                matches.push(SearchMatch {
+                    doc_id,
+                    path: path.clone(),
+                    line_number: 1,
+                    score: 2.0, // Boost filename matches
+                });
             }
         }
 

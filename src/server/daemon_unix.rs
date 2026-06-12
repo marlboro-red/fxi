@@ -56,6 +56,10 @@ const DEFAULT_MAX_PIPELINED: usize = 32;
 /// Set very high since the protocol already has a 100MB message limit
 const MAX_RESULTS_CAP: usize = 10_000_000;
 
+/// Content-search result cache: query key -> (Arc'd matches, file count).
+/// Arc'd so a cache hit clones a refcount, not the result set.
+type ContentCache = LruCache<String, (Arc<Vec<ContentMatch>>, usize)>;
+
 /// Cached index with its query cache and optional file watcher
 struct CachedIndex {
     /// Current reader (swapped atomically via Mutex)
@@ -65,7 +69,7 @@ struct CachedIndex {
     /// uncapped result set.
     query_cache: Mutex<LruCache<String, Arc<Vec<SearchMatchData>>>>,
     /// Content search result cache (cleared on reader swap)
-    content_cache: Mutex<LruCache<String, (Arc<Vec<ContentMatch>>, usize)>>,
+    content_cache: Mutex<ContentCache>,
     /// Last access time
     last_used: Mutex<Instant>,
     /// Reader version for cache invalidation
