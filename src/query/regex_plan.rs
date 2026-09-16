@@ -172,6 +172,18 @@ fn constraints(hir: &Hir) -> Vec<PlanStep> {
                 }
             }
             steps.extend(alternatives(pending));
+            // Bounded chunks can hide the only selective gram at a split
+            // (e.g. insensitive "serverassert" splits before "rve").
+            // Recover overlapping three-part windows without enumerating
+            // the full exponential language. Budget failures remain MatchAll.
+            for window in parts.windows(3) {
+                let strings = window.iter().try_fold(vec![Vec::new()], |prefix, part| {
+                    product(&prefix, &finite(part)?)
+                });
+                if let Some(strings) = strings {
+                    steps.extend(alternatives(strings));
+                }
+            }
             steps
         }
         _ => Vec::new(),
