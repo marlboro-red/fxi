@@ -568,29 +568,22 @@ impl IndexServer {
             }
         };
 
-        // Convert to serializable format
-        let match_data: Arc<Vec<SearchMatchData>> = Arc::new(
-            matches
-                .iter()
-                .map(|m| SearchMatchData {
-                    path: m.path.clone(),
-                    line_number: m.line_number,
-                    score: m.score,
-                })
-                .collect(),
-        );
-
+        // The response owns its records; no result cache shares this vector.
+        let mut match_data: Vec<SearchMatchData> = matches
+            .into_iter()
+            .map(|m| SearchMatchData {
+                path: m.path,
+                line_number: m.line_number,
+                score: m.score,
+            })
+            .collect();
+        if limit > 0 {
+            match_data.truncate(limit);
+        }
         self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
-        // Only truncate if limit is non-zero (0 means use query's top:N limit)
-        let result_matches = if limit > 0 && limit < match_data.len() {
-            match_data[..limit].to_vec()
-        } else {
-            match_data.as_ref().clone()
-        };
-
         Response::Search(SearchResponse {
-            matches: result_matches,
+            matches: match_data,
             duration_ms: start.elapsed().as_secs_f64() * 1000.0,
             cached: false,
             resolved_root: Some(root_path),
@@ -675,25 +668,23 @@ impl IndexServer {
 
             // Convert to minimal ContentMatch (just path, no content)
             let file_count = matching_files.len();
-            let match_data: Arc<Vec<ContentMatch>> = Arc::new(
-                matching_files
-                    .into_iter()
-                    .map(|path| ContentMatch {
-                        path,
-                        line_number: 1,
-                        line_content: String::new(),
-                        match_start: 0,
-                        match_end: 0,
-                        context_before: vec![],
-                        context_after: vec![],
-                    })
-                    .collect(),
-            );
+            let match_data: Vec<ContentMatch> = matching_files
+                .into_iter()
+                .map(|path| ContentMatch {
+                    path,
+                    line_number: 1,
+                    line_content: String::new(),
+                    match_start: 0,
+                    match_end: 0,
+                    context_before: vec![],
+                    context_after: vec![],
+                })
+                .collect();
 
             self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
             return Response::ContentSearch(ContentSearchResponse {
-                matches: match_data.as_ref().clone(),
+                matches: match_data,
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 files_with_matches: file_count,
                 resolved_root: Some(root_path.clone()),
@@ -727,8 +718,8 @@ impl IndexServer {
             limit.min(MAX_RESULTS_CAP)
         };
         let iter = matches.into_iter().take(effective_limit);
-        let match_data: Arc<Vec<ContentMatch>> = Arc::new(
-            iter.map(|m| ContentMatch {
+        let match_data: Vec<ContentMatch> = iter
+            .map(|m| ContentMatch {
                 path: m.path,
                 line_number: m.line_number,
                 line_content: m.line_content,
@@ -737,13 +728,12 @@ impl IndexServer {
                 context_before: m.context_before,
                 context_after: m.context_after,
             })
-            .collect(),
-        );
+            .collect();
 
         self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
         Response::ContentSearch(ContentSearchResponse {
-            matches: match_data.as_ref().clone(),
+            matches: match_data,
             duration_ms: start.elapsed().as_secs_f64() * 1000.0,
             files_with_matches: file_count,
             resolved_root: Some(root_path),
