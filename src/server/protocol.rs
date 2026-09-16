@@ -25,6 +25,10 @@ pub struct ContentSearchOptions {
     /// Only return first match per file (for -l mode optimization)
     #[serde(default)]
     pub files_only: bool,
+    /// Client accepts path-only responses for files-only searches. Opt-in
+    /// preserves old clients; old servers ignore this additional request field.
+    #[serde(default)]
+    pub compact_files: bool,
 }
 
 /// Request from client to server
@@ -172,6 +176,9 @@ pub struct ContentMatch {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentSearchResponse {
     pub matches: Vec<ContentMatch>,
+    /// Present only when explicitly negotiated with compact_files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_paths: Option<Vec<PathBuf>>,
     pub duration_ms: f64,
     pub files_with_matches: usize,
     /// The resolved codebase root the server used
@@ -326,6 +333,40 @@ pub fn read_message<R: Read, T: for<'de> Deserialize<'de>>(reader: &mut R) -> st
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn compact_file_response_is_optional_and_roundtrips() {
+        let old_options: ContentSearchOptions = serde_json::from_value(serde_json::json!({
+            "context_before": 0, "context_after": 0, "case_insensitive": false, "files_only": true
+        }))
+        .unwrap();
+        assert!(!old_options.compact_files);
+        let old_response: ContentSearchResponse = serde_json::from_value(serde_json::json!({
+            "matches": [], "duration_ms": 0.0, "files_with_matches": 0
+        }))
+        .unwrap();
+        assert!(old_response.file_paths.is_none());
+        let paths = vec![
+            PathBuf::from("with space/K.rs"),
+            PathBuf::from("quote\".rs"),
+        ];
+        let response = Response::ContentSearch(ContentSearchResponse {
+            matches: Vec::new(),
+            file_paths: Some(paths.clone()),
+            duration_ms: 0.0,
+            files_with_matches: 2,
+            resolved_root: None,
+        });
+        let mut wire = Vec::new();
+        write_message_with_id(&mut wire, &response, Some("test-id")).unwrap();
+        let (decoded, id): (Response, _) = read_message_with_id(&mut Cursor::new(wire)).unwrap();
+        assert_eq!(id.as_deref(), Some("test-id"));
+        let Response::ContentSearch(decoded) = decoded else {
+            panic!("wrong response")
+        };
+        assert_eq!(decoded.file_paths, Some(paths));
+        assert!(decoded.matches.is_empty());
+    }
 
     #[test]
     fn test_roundtrip_watch_status() {

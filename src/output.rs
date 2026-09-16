@@ -246,19 +246,27 @@ fn print_match_line(
 
 /// Print only filenames (for -l flag)
 pub fn print_files_only(matches: &[ContentMatch], color: bool) -> io::Result<()> {
+    print_path_iter(matches.iter().map(|m| m.path.as_path()), color)
+}
+
+pub fn print_file_paths(paths: &[std::path::PathBuf], color: bool) -> io::Result<()> {
+    print_path_iter(paths.iter().map(|p| p.as_path()), color)
+}
+
+fn print_path_iter<'a>(
+    paths: impl IntoIterator<Item = &'a std::path::Path>,
+    color: bool,
+) -> io::Result<()> {
     let mut stdout = buffered_stdout(color);
     let colors = Colors::new();
-
     let mut seen_files = std::collections::HashSet::new();
-
-    for m in matches {
-        if seen_files.insert(m.path.as_path()) {
+    for path in paths {
+        if seen_files.insert(path) {
             stdout.set_color(&colors.path)?;
-            writeln!(stdout, "{}", m.path.display())?;
+            writeln!(stdout, "{}", path.display())?;
             stdout.reset()?;
         }
     }
-
     stdout.flush()
 }
 

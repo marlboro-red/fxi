@@ -449,6 +449,13 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
         context_after: ctx_after,
         case_insensitive: opts.ignore_case,
         files_only: opts.files_with_matches, // Optimize for -l mode
+        compact_files: opts.files_with_matches,
+    };
+
+    let color = match opts.color {
+        ColorChoice::Always => true,
+        ColorChoice::Never => false,
+        ColorChoice::Auto => std::io::stdout().is_terminal(),
     };
 
     // Try to use daemon for warm search
@@ -459,7 +466,15 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
             opts.max_count,
             search_options,
         ) {
-            Ok(response) => response.matches,
+            Ok(response) => {
+                if opts.files_with_matches
+                    && let Some(paths) = response.file_paths
+                {
+                    output::print_file_paths(&paths, color)?;
+                    return Ok(());
+                }
+                response.matches
+            }
             Err(e) => {
                 eprintln!("Daemon search failed, falling back to direct search: {}", e);
                 do_direct_content_search(
@@ -487,24 +502,19 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
     };
 
     // Output results
-    let color = match opts.color {
-        ColorChoice::Always => true,
-        ColorChoice::Never => false,
-        ColorChoice::Auto => std::io::stdout().is_terminal(),
-    };
-    // Use heading style when results span multiple files
-    let use_heading = matches
-        .iter()
-        .map(|m| &m.path)
-        .collect::<std::collections::HashSet<_>>()
-        .len()
-        > 1;
-
     if opts.files_with_matches {
         output::print_files_only(&matches, color)?;
     } else if opts.count {
         output::print_match_counts(&matches, color)?;
     } else {
+        // Use heading style when results span multiple files
+        let use_heading = matches
+            .iter()
+            .map(|m| &m.path)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            > 1;
+
         output::print_content_matches(&matches, color, use_heading)?;
     }
 

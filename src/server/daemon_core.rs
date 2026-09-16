@@ -641,6 +641,7 @@ impl IndexServer {
         parsed.options.case_insensitive = options.case_insensitive;
         if parsed.is_empty() {
             return Response::ContentSearch(ContentSearchResponse {
+                file_paths: None,
                 matches: vec![],
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 files_with_matches: 0,
@@ -666,6 +667,18 @@ impl IndexServer {
                 }
             };
 
+            if options.compact_files {
+                let file_count = matching_files.len();
+                self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
+                return Response::ContentSearch(ContentSearchResponse {
+                    matches: Vec::new(),
+                    file_paths: Some(matching_files),
+                    duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    files_with_matches: file_count,
+                    resolved_root: Some(root_path.clone()),
+                });
+            }
+
             // Convert to minimal ContentMatch (just path, no content)
             let file_count = matching_files.len();
             let match_data: Vec<ContentMatch> = matching_files
@@ -684,6 +697,7 @@ impl IndexServer {
             self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
             return Response::ContentSearch(ContentSearchResponse {
+                file_paths: None,
                 matches: match_data,
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 files_with_matches: file_count,
@@ -733,6 +747,7 @@ impl IndexServer {
         self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
         Response::ContentSearch(ContentSearchResponse {
+            file_paths: None,
             matches: match_data,
             duration_ms: start.elapsed().as_secs_f64() * 1000.0,
             files_with_matches: file_count,
@@ -1058,6 +1073,53 @@ fn run_watcher_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_files_preserve_legacy_results_limits_and_freshness() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for name in ["with space.txt", "K.txt"] {
+            std::fs::write(root.join(name), "needle\n").unwrap();
+        }
+        build_index_with_progress(&root, true, true).unwrap();
+        let server = IndexServer::new(false);
+        let search = |compact, limit| {
+            let response = server.handle_content_search(
+                "needle".into(),
+                Some(root.clone()),
+                limit,
+                ContentSearchOptions {
+                    files_only: true,
+                    compact_files: compact,
+                    ..Default::default()
+                },
+            );
+            let Response::ContentSearch(response) = response else {
+                panic!("search failed")
+            };
+            assert_eq!(response.resolved_root.as_ref(), Some(&root));
+            if compact {
+                assert!(response.matches.is_empty());
+                let paths = response.file_paths.unwrap();
+                assert_eq!(response.files_with_matches, paths.len());
+                paths
+            } else {
+                assert!(response.file_paths.is_none());
+                response
+                    .matches
+                    .into_iter()
+                    .map(|m| m.path)
+                    .collect::<Vec<_>>()
+            }
+        };
+        for limit in [0, 1] {
+            assert_eq!(search(true, limit), search(false, limit));
+        }
+        std::fs::write(root.join("K.txt"), "absent\n").unwrap();
+        assert_eq!(search(true, 0), vec![PathBuf::from("with space.txt")]);
+        drop(server);
+        crate::utils::remove_index(&root).unwrap();
+    }
 
     #[test]
     fn native_watcher_reports_deleted_paths() {
