@@ -113,7 +113,11 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
     );
 
     // Step 3: Compute stop-grams from merged frequencies
-    let stop_grams = compute_stop_grams(&trigram_postings, remapping.valid_docs.len(), 512);
+    let mut stop_grams = compute_stop_grams(&trigram_postings, remapping.valid_docs.len(), 512);
+    // Earlier compactions may have omitted these postings. Even when their
+    // frequency falls, they cannot safely narrow until a full rebuild restores
+    // coverage. Keep that knowledge across every subsequent merge.
+    stop_grams.extend(meta.stop_grams.iter().copied());
     eprintln!("  Computed {} stop-grams", stop_grams.len());
 
     // Step 4: Write merged segment atomically

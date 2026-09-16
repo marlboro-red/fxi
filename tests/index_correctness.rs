@@ -42,3 +42,38 @@ fn opening_reader_preserves_in_progress_writer_files() {
         b"postings"
     );
 }
+
+#[test]
+fn repeated_compaction_preserves_omitted_gram_coverage() {
+    use fxi::index::{build::update_index, compact::merge_segments};
+    use fxi::query::{QueryExecutor, parse_query};
+    let fixture = Fixture::new();
+    for name in ["b.txt", "c.txt"] {
+        fs::write(fixture.0.path().join(name), "vector::start\n").unwrap();
+    }
+    fs::write(fixture.0.path().join("filler.txt"), "unrelated content\n").unwrap();
+    build_index_with_options(fixture.0.path(), true, true, Some(2)).unwrap();
+    for iteration in 0..4 {
+        merge_segments(fixture.0.path()).unwrap();
+        let reader = IndexReader::open(fixture.0.path()).unwrap();
+        let files = QueryExecutor::new(&reader)
+            .execute_files_only(&parse_query("\"r::st\""), 0)
+            .unwrap();
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("a.txt"),
+                PathBuf::from("b.txt"),
+                PathBuf::from("c.txt")
+            ],
+            "compaction {iteration}"
+        );
+        drop(reader);
+        fs::write(
+            fixture.0.path().join(format!("new{iteration}.txt")),
+            "other text\n",
+        )
+        .unwrap();
+        update_index(fixture.0.path()).unwrap();
+    }
+}
