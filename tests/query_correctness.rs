@@ -144,3 +144,74 @@ fn substring_candidates_are_a_superset_of_unicode_matches() {
     drop(reader);
     fxi::utils::remove_index(dir.path()).unwrap();
 }
+
+#[test]
+fn ranked_filename_hits_respect_filters_boolean_terms_and_unlimited() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, text) in [
+        ("needle.md", "other"),
+        ("needle.rs", "forbidden"),
+        ("needle_other.txt", "extra"),
+    ] {
+        fs::write(dir.path().join(name), text).unwrap();
+    }
+    build_index_with_progress(dir.path(), true, true).unwrap();
+    let reader = IndexReader::open(dir.path()).unwrap();
+    let executor = QueryExecutor::new(&reader);
+    for (input, expected) in [
+        ("ext:rs needle", vec!["needle.rs"]),
+        ("needle -forbidden", vec!["needle.md", "needle_other.txt"]),
+        ("needle missing", vec![]),
+        ("needle line:2-5", vec![]),
+        (
+            "needle top:0",
+            vec!["needle.md", "needle.rs", "needle_other.txt"],
+        ),
+    ] {
+        let actual: BTreeSet<_> = executor
+            .execute(&parse_query(input))
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect();
+        let expected: BTreeSet<_> = expected.into_iter().map(std::path::PathBuf::from).collect();
+        assert_eq!(actual, expected, "{input}");
+    }
+    drop(reader);
+    fxi::utils::remove_index(dir.path()).unwrap();
+}
+
+#[test]
+fn ranked_limit_is_a_prefix_of_the_complete_ranking() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..30 {
+        fs::write(
+            dir.path().join(format!("f{i}.txt")),
+            "needle\n".repeat(i + 1),
+        )
+        .unwrap();
+    }
+    build_index_with_progress(dir.path(), true, true).unwrap();
+    let reader = IndexReader::open(dir.path()).unwrap();
+    let executor = QueryExecutor::new(&reader);
+    for sort in ["score", "path", "recency"] {
+        let all = executor
+            .execute(&parse_query(&format!("needle top:0 sort:{sort}")))
+            .unwrap();
+        let limited = executor
+            .execute(&parse_query(&format!("needle top:3 sort:{sort}")))
+            .unwrap();
+        assert_eq!(
+            limited
+                .iter()
+                .map(|m| (&m.path, m.line_number))
+                .collect::<Vec<_>>(),
+            all.iter()
+                .take(3)
+                .map(|m| (&m.path, m.line_number))
+                .collect::<Vec<_>>()
+        );
+    }
+    drop(reader);
+    fxi::utils::remove_index(dir.path()).unwrap();
+}

@@ -172,13 +172,9 @@ impl<'a> QueryExecutor<'a> {
         let candidates = self.execute_plan(&plan)?;
 
         let limit = query.options.limit;
-        // Collect 1.5x limit for better ranking (early termination)
-        let target = if limit > 0 {
-            Some(limit + (limit / 2))
-        } else {
-            None
-        };
-        let all_matches = self.find_verified_matches(&candidates, &plan, target)?;
+        // Rank the complete verified set. Stopping on document/worker order
+        // has no score bound and can discard the actual best result.
+        let all_matches = self.find_verified_matches(&candidates, &plan, None)?;
 
         // Build results with scoring
         let verification = plan.verification.as_ref();
@@ -228,7 +224,7 @@ impl<'a> QueryExecutor<'a> {
 
         // Also find files whose names match the search terms
         if !search_terms_lower.is_empty() {
-            let filename_matches = self.find_filename_matches(&search_terms_lower, limit)?;
+            let filename_matches = self.find_filename_matches(&search_terms_lower, &plan)?;
 
             // Merge filename matches, avoiding duplicates (dedup by borrowed
             // path — no PathBuf clones)
@@ -954,34 +950,75 @@ impl<'a> QueryExecutor<'a> {
             .unwrap_or(false)
     }
 
-    /// Find files whose names contain any of the search terms
+    /// Filename hits still obey the complete Boolean query and document filters.
     fn find_filename_matches(
         &self,
         search_terms_lower: &[String],
-        limit: usize,
+        plan: &QueryPlan,
     ) -> Result<Vec<SearchMatch>> {
-        let mut matches = Vec::new();
-        let valid_docs = self.reader.valid_doc_ids();
-
-        for doc_id in valid_docs.iter() {
-            if matches.len() >= limit {
-                break;
+        // A filename has no content line satisfying a requested line range.
+        if Self::extract_line_filter(&plan.steps) != (None, None) {
+            return Ok(Vec::new());
+        }
+        let Some(verification) = &plan.verification else {
+            return Ok(Vec::new());
+        };
+        let mut candidates = self.reader.valid_doc_ids().clone();
+        for step in &plan.steps {
+            if let PlanStep::Filter(filter) = step {
+                candidates = self.apply_filter(filter, Some(&candidates))?;
             }
-
-            if let Some(doc) = self.reader.get_document(doc_id)
-                && let Some(path) = self.reader.get_path(doc)
-                && Self::filename_matches_terms(path, search_terms_lower)
-            {
+        }
+        let mut matches = Vec::new();
+        for doc_id in candidates {
+            let Some(doc) = self.reader.get_document(doc_id) else {
+                continue;
+            };
+            let Some(path) = self.reader.get_path(doc) else {
+                continue;
+            };
+            if !Self::filename_matches_terms(path, search_terms_lower) {
+                continue;
+            }
+            let Some(full_path) = self.reader.get_full_path(doc) else {
+                continue;
+            };
+            let Some(content) = self.reader.read_file_cached(&full_path) else {
+                continue;
+            };
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if Self::has_match_with_filename(&content, name, verification) {
                 matches.push(SearchMatch {
                     doc_id,
                     path: path.clone(),
                     line_number: 1,
-                    score: 2.0, // Boost filename matches
+                    score: 2.0,
                 });
             }
         }
-
         Ok(matches)
+    }
+
+    fn has_match_with_filename(
+        content: &str,
+        filename: &str,
+        verification: &VerificationStep,
+    ) -> bool {
+        match verification {
+            VerificationStep::And(steps) => steps
+                .iter()
+                .all(|s| Self::has_match_with_filename(content, filename, s)),
+            VerificationStep::Or(steps) => steps
+                .iter()
+                .any(|s| Self::has_match_with_filename(content, filename, s)),
+            VerificationStep::Not(inner) => {
+                !Self::has_match_with_filename(content, filename, inner)
+            }
+            _ => Self::has_match(content, verification) || Self::has_match(filename, verification),
+        }
     }
 
     /// Shared pipeline: collect candidates → read files → verify content → apply line filter.
