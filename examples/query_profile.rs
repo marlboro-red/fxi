@@ -34,14 +34,21 @@ fn main() -> anyhow::Result<()> {
     let reader = IndexReader::open(std::path::Path::new(&root))?;
     let executor = QueryExecutor::new(&reader);
     let mut rows = Vec::new();
-    for pattern in [
-        "raxFind",
-        "return",
-        "static void",
-        "raxFind|dictRehash",
-        ".*raxFind",
-        "(?i)serverassert",
-    ] {
+    let mut patterns: Vec<String> = std::env::args().skip(2).collect();
+    if patterns.is_empty() {
+        patterns = [
+            "raxFind",
+            "return",
+            "static void",
+            "raxFind|dictRehash",
+            ".*raxFind",
+            "(?i)serverassert",
+        ]
+        .iter()
+        .map(|s| (*s).into())
+        .collect();
+    }
+    for pattern in patterns {
         let query = parse_query(&format!("re:/{pattern}/"));
         let plan = QueryPlan::from_query(&query);
         let docs = candidates(&reader, &plan);

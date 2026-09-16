@@ -36,7 +36,20 @@ fn evidence(data: &[u8]) -> AHashMap<u32, Evidence> {
     map
 }
 
+// Spend extra bits only when at least half the marginal cross-product is
+// absent. This is an experimental space allocation rule, fixed before the
+// second-corpus measurement, not a claim of optimality.
+fn use_joint(e: Evidence) -> bool {
+    let combinations = e.phase.count_ones() * e.next.count_ones();
+    combinations >= 4 && 2 * e.joint.count_ones() <= combinations
+}
+
 fn allowed_phase(e: Evidence, next: Option<u8>, mode: usize) -> u8 {
+    let mode = if mode == 3 {
+        if use_joint(e) { 2 } else { 1 }
+    } else {
+        mode
+    };
     match (mode, next) {
         (0, _) => 255,
         (_, None) => e.phase,
@@ -129,6 +142,11 @@ fn main() -> anyhow::Result<()> {
     }
     let build_ms = start.elapsed().as_secs_f64() * 1000.;
     let postings: usize = index.values().map(Vec::len).sum();
+    let adaptive = index
+        .values()
+        .flatten()
+        .filter(|(_, e)| use_joint(*e))
+        .count();
     let saturated = index
         .values()
         .flatten()
@@ -174,7 +192,7 @@ fn main() -> anyhow::Result<()> {
             .map(|(i, _)| i)
             .collect();
         let mut modes = Vec::new();
-        for mode in 0..3 {
+        for mode in 0..4 {
             let mut samples = Vec::new();
             let mut found = BTreeSet::new();
             for _ in 0..7 {
@@ -197,9 +215,9 @@ fn main() -> anyhow::Result<()> {
         serde_json::to_string_pretty(
             &json!({"files":files.len(),"source_bytes":files.iter().map(Vec::len).sum::<usize>(),
         "build_joint_ms":build_ms,"postings":postings,"joint_saturated_postings":saturated,
-        "estimated_uncompressed_posting_bytes":{"trigram":postings*4,"independent":postings*6,"joint":postings*12},
+        "estimated_uncompressed_posting_bytes":{"trigram":postings*4,"independent":postings*6,"joint":postings*12,"adaptive_joint":postings*6 + adaptive*8 + postings.div_ceil(8)},
         "note":"In-memory prototype. Payload estimates exclude dictionaries, allocation and compression. Build includes all signatures. No end-to-end speed claim.",
-        "modes":["trigram","independent_8_bit_phase_and_follow","joint_8_by_8_phase_follow"],"rows":rows})
+        "modes":["trigram","independent_8_bit_phase_and_follow","joint_8_by_8_phase_follow","adaptive_joint"],"rows":rows})
         )?
     );
     Ok(())
@@ -238,6 +256,9 @@ mod tests {
                 let simple = query(&index, &needle, 0);
                 let independent = query(&index, &needle, 1);
                 let joint = query(&index, &needle, 2);
+                let adaptive = query(&index, &needle, 3);
+                assert!(joint.is_subset(&adaptive));
+                assert!(adaptive.is_subset(&independent));
                 assert!(exact.is_subset(&joint));
                 assert!(joint.is_subset(&independent));
                 assert!(independent.is_subset(&simple));
