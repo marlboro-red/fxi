@@ -22,7 +22,12 @@ impl FullTrigramBitset {
     }
 
     fn collect(self) -> Vec<Trigram> {
-        let mut result = Vec::with_capacity(100_000);
+        let count = self
+            .bits
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum();
+        let mut result = Vec::with_capacity(count);
         for (idx, word) in self.bits.into_iter().enumerate() {
             if word != 0 {
                 let base = (idx as u32) << 6;
@@ -68,7 +73,12 @@ impl SparseTrigramBitset {
 
     /// Collect all set trigrams into a vector
     fn collect(self) -> Vec<Trigram> {
-        let mut result = Vec::with_capacity(self.blocks.len() * 32);
+        let count = self
+            .blocks
+            .values()
+            .map(|word| word.count_ones() as usize)
+            .sum();
+        let mut result = Vec::with_capacity(count);
         for (block_idx, word) in self.blocks {
             let base = block_idx << 6;
             let mut w = word;
@@ -214,6 +224,32 @@ pub fn is_minified(content: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extraction_strategies_agree_at_size_boundaries() {
+        for len in [4095, 4096, 99999, 100000, 999999, 1000000] {
+            for alphabet in [2, 256] {
+                let mut state = 17u64;
+                let content: Vec<u8> = (0..len)
+                    .map(|_| {
+                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        ((state >> 32) % alphabet) as u8
+                    })
+                    .collect();
+                let expected: AHashSet<_> = content
+                    .windows(3)
+                    .map(|w| bytes_to_trigram(w[0], w[1], w[2]))
+                    .collect();
+                let actual = extract_trigrams(&content);
+                assert_eq!(
+                    actual.len(),
+                    expected.len(),
+                    "len={len}, alphabet={alphabet}"
+                );
+                assert_eq!(actual.into_iter().collect::<AHashSet<_>>(), expected);
+            }
+        }
+    }
 
     #[test]
     fn test_extract_trigrams() {

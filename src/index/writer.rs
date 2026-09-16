@@ -249,11 +249,16 @@ impl ChunkedIndexWriter {
         // sorts below compare integers instead of Strings; the ids are then
         // remapped to lexicographic ranks so group order (and thus the
         // on-disk dict order) is identical to sorting by token string.
-        let mut trigram_pairs: Vec<(u32, u32)> = Vec::with_capacity(file_count * 500);
-        let mut token_pairs: Vec<(u32, DocId)> = Vec::with_capacity(file_count * 50);
+        // Every input list is already resident: size the flattened arrays
+        // exactly instead of repeatedly doubling large allocations.
+        let trigram_count = job.files.iter().map(|f| f.trigrams.len()).sum();
+        let token_count = job.files.iter().map(|f| f.tokens.len()).sum();
+        let position_count = job.files.iter().map(|f| f.token_positions.len()).sum();
+        let mut trigram_pairs: Vec<(u32, u32)> = Vec::with_capacity(trigram_count);
+        let mut token_pairs: Vec<(u32, DocId)> = Vec::with_capacity(token_count);
         let mut line_maps: Vec<(DocId, Vec<u32>)> = Vec::with_capacity(file_count);
         // Position triples: (token_id, doc_id, word_position)
-        let mut position_triples: Vec<(u32, DocId, u32)> = Vec::with_capacity(file_count * 50);
+        let mut position_triples: Vec<(u32, DocId, u32)> = Vec::with_capacity(position_count);
 
         let mut token_ids: ahash::AHashMap<String, u32> =
             ahash::AHashMap::with_capacity(file_count * 32);
