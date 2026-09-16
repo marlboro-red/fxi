@@ -5,12 +5,11 @@ use crate::query::planner::{FilterStep, PlanStep, QueryPlan, VerificationStep};
 use crate::query::scorer::{ScoreContext, Scorer, ScoringWeights};
 use anyhow::Result;
 use globset::Glob;
-use memmap2::Mmap;
 use rayon::prelude::*;
 use regex::Regex;
 use roaring::RoaringBitmap;
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -67,34 +66,10 @@ fn should_use_parallel(candidate_count: usize) -> bool {
     candidate_count > parallel_threshold
 }
 
-/// Minimum file size to use memory mapping (smaller files are faster with regular read)
-const MMAP_THRESHOLD: u64 = 4096;
-
-/// Read file content using memory mapping for large files, regular read for small files.
-/// Memory-mapped content is borrowed directly (zero-copy); the OS handles caching.
-/// Returns None if the file cannot be read or contains invalid UTF-8.
-#[inline]
-fn read_file_mmap(path: &Path) -> Option<FileContent> {
-    let file = File::open(path).ok()?;
-    let metadata = file.metadata().ok()?;
-    let size = metadata.len();
-
-    if size == 0 {
-        return Some(FileContent::Owned(String::new()));
-    }
-
-    if size < MMAP_THRESHOLD {
-        // Small file: regular read is faster (avoids mmap syscall overhead)
-        let content = fs::read_to_string(path).ok()?;
-        Some(FileContent::Owned(content))
-    } else {
-        // Large file: use memory mapping
-        let mmap = unsafe { Mmap::map(&file).ok()? };
-
-        // Validate UTF-8 once; deref borrows the mapped pages directly
-        std::str::from_utf8(&mmap).ok()?;
-        Some(FileContent::Mapped(mmap))
-    }
+/// Editable files must be owned snapshots: a concurrent truncate or rewrite
+/// must not invalidate a mapped page or a previously validated UTF-8 borrow.
+fn read_file_content(path: &Path) -> Option<FileContent> {
+    fs::read_to_string(path).ok().map(FileContent::Owned)
 }
 
 /// Thread-safe regex cache for avoiding repeated compilation.
@@ -316,7 +291,7 @@ impl<'a> QueryExecutor<'a> {
             let content = if context_before > 0 || context_after > 0 {
                 self.reader
                     .read_file_cached(&full_path)
-                    .or_else(|| read_file_mmap(&full_path))
+                    .or_else(|| read_file_content(&full_path))
             } else {
                 None
             };
@@ -454,7 +429,7 @@ impl<'a> QueryExecutor<'a> {
                     }
 
                     // Read file content using mmap for large files
-                    let content = read_file_mmap(&full_path)?;
+                    let content = read_file_content(&full_path)?;
 
                     // Check if file has ANY match
                     if has_match(&content) {
@@ -803,7 +778,7 @@ impl<'a> QueryExecutor<'a> {
                     self.reader
                         .get_document(doc_id)
                         .and_then(|doc| self.reader.get_full_path(doc))
-                        .and_then(|full_path| read_file_mmap(&full_path))
+                        .and_then(|full_path| read_file_content(&full_path))
                         .map(|content| Self::has_match(&content, verification))
                         .unwrap_or(false)
                 })
@@ -1108,7 +1083,7 @@ impl<'a> QueryExecutor<'a> {
                         }
                     }
 
-                    let content = read_file_mmap(&full_path)?;
+                    let content = read_file_content(&full_path)?;
 
                     let mut file_matches =
                         Self::verify_content_static(&content, verification, doc_id);
@@ -1512,6 +1487,18 @@ mod tests {
     use tempfile::TempDir;
 
     /// Create a test index with multiple files for comprehensive testing
+    #[test]
+    fn source_snapshot_survives_in_place_rewrite_and_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.txt");
+        let original = "K foo\n".repeat(2000);
+        fs::write(&path, &original).unwrap();
+        let snapshot = read_file_content(&path).unwrap();
+        fs::write(&path, [0xff]).unwrap();
+        assert_eq!(&*snapshot, original);
+        assert!(read_file_content(&path).is_none());
+    }
+
     #[test]
     fn unicode_literal_and_proximity_spans_use_original_bytes() {
         for (content, needle, expected) in [

@@ -312,30 +312,17 @@ const DEFAULT_FILE_CACHE_SIZE: usize = 256;
 /// Maximum file size to cache (files larger than this are not cached)
 const MAX_CACHEABLE_FILE_SIZE: usize = 512 * 1024; // 512KB
 
-/// File content backed by an owned String, a shared cache entry, or a memory
-/// map. UTF-8 is validated once at construction; `Deref<Target = str>` lets
-/// callers borrow the bytes without copying them.
+/// An owned source snapshot or a shared, immutable copy of one.
 pub enum FileContent {
     Owned(String),
     Cached(Arc<str>),
-    Mapped(Mmap),
 }
-
 impl std::ops::Deref for FileContent {
     type Target = str;
-
-    #[inline]
     fn deref(&self) -> &str {
         match self {
             FileContent::Owned(s) => s,
             FileContent::Cached(s) => s,
-            // SAFETY: validated as UTF-8 when the map was created (see
-            // read_file_mmap in the query executor), and the map is never
-            // written through. If another process rewrites the file while it
-            // is mapped the content may change underneath us — the same race
-            // existed when the map was copied into a String, just with a
-            // shorter window.
-            FileContent::Mapped(m) => unsafe { std::str::from_utf8_unchecked(m) },
         }
     }
 }

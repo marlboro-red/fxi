@@ -8,7 +8,6 @@ use crate::utils::{
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
-use memmap2::Mmap;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -103,26 +102,6 @@ fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option
     })
 }
 
-/// File bytes backed by either a memory map (borrowed zero-copy) or an
-/// owned buffer. Extraction only needs `&[u8]`.
-enum FileBytes {
-    Mapped(Mmap),
-    Owned(Vec<u8>),
-}
-
-impl std::ops::Deref for FileBytes {
-    type Target = [u8];
-
-    #[inline]
-    fn deref(&self) -> &[u8] {
-        match self {
-            FileBytes::Mapped(m) => m,
-            FileBytes::Owned(v) => v,
-        }
-    }
-}
-
-/// Build line offset map from content using fast memchr search
 fn build_line_map(content: &[u8]) -> Vec<u32> {
     use memchr::memchr_iter;
 
@@ -400,32 +379,17 @@ pub fn build_index_with_options(
                     return None;
                 }
 
-                // Use mmap for larger files (borrowed zero-copy — extraction
-                // only needs &[u8]), fall back to read for small files
-                let content: FileBytes = if file_size > 4096 {
-                    match unsafe { Mmap::map(&file) } {
-                        Ok(mmap) => FileBytes::Mapped(mmap),
-                        Err(_) => match fs::read(full_path) {
-                            Ok(c) => FileBytes::Owned(c),
-                            Err(_) => {
-                                error_count_clone.fetch_add(1, Ordering::Relaxed);
-                                if let Some(ref pb) = pb_clone {
-                                    pb.inc(1);
-                                }
-                                return None;
-                            }
-                        },
-                    }
-                } else {
-                    match fs::read(full_path) {
-                        Ok(c) => FileBytes::Owned(c),
-                        Err(_) => {
-                            error_count_clone.fetch_add(1, Ordering::Relaxed);
-                            if let Some(ref pb) = pb_clone {
-                                pb.inc(1);
-                            }
-                            return None;
+                // Source files are mutable; own their bytes before validating
+                // UTF-8 or extracting tokens so external writes cannot change
+                // the memory behind those borrows.
+                let content = match fs::read(full_path) {
+                    Ok(content) => content,
+                    Err(_) => {
+                        error_count_clone.fetch_add(1, Ordering::Relaxed);
+                        if let Some(ref pb) = pb_clone {
+                            pb.inc(1);
                         }
+                        return None;
                     }
                 };
 
