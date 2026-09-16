@@ -8,7 +8,7 @@ readme = "README.md"
 repository = "https://github.com/user/fxi"
 keywords = ["search", "code-search", "index", "grep", "trigram"]
 categories = ["command-line-utilities", "development-tools", "text-processing"]
-rust-version = "1.85"
+rust-version = "1.88"
 
 [lib]
 name = "fxi"
