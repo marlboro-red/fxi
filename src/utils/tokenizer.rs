@@ -304,6 +304,63 @@ pub fn tokenize_query_with_positions(query: &str) -> Vec<(String, u32)> {
 pub fn extract_tokens_and_positions(text: &str) -> (Vec<String>, Vec<(u32, u32)>) {
     let mut ids: ahash::AHashMap<String, u32> = ahash::AHashMap::with_capacity(128);
     let mut positions = Vec::with_capacity(text.len() / 8);
+    scan_normalized_tokens(text, |token, position| {
+        let id = if let Some(&id) = ids.get(token) {
+            id
+        } else {
+            let id = ids.len() as u32;
+            ids.insert(token.to_owned(), id);
+            id
+        };
+        positions.push((id, position));
+    });
+    let mut tokens = vec![String::new(); ids.len()];
+    for (token, id) in ids {
+        tokens[id as usize] = token;
+    }
+    (tokens, positions)
+}
+
+#[derive(Default)]
+struct PackedInterner {
+    tokens: crate::utils::PackedTokens,
+    heads: ahash::AHashMap<u64, u32>,
+    next: Vec<u32>,
+}
+
+impl PackedInterner {
+    // Hashes select a chain, never token identity: compare bytes on collisions.
+    fn intern(&mut self, token: &str, hash: u64) -> u32 {
+        let head = self.heads.get(&hash).copied().unwrap_or(u32::MAX);
+        let mut id = head;
+        while id != u32::MAX {
+            if &self.tokens[id as usize] == token {
+                return id;
+            }
+            id = self.next[id as usize];
+        }
+        let id = self.tokens.len() as u32;
+        self.tokens.push(token);
+        self.next.push(head);
+        self.heads.insert(hash, id);
+        id
+    }
+}
+
+pub(crate) fn extract_packed_tokens_and_positions(
+    text: &str,
+) -> (crate::utils::PackedTokens, Vec<(u32, u32)>) {
+    let mut interner = PackedInterner::default();
+    let mut positions = Vec::with_capacity(text.len() / 8);
+    scan_normalized_tokens(text, |token, position| {
+        let hash = interner.heads.hasher().hash_one(token);
+        let id = interner.intern(token, hash);
+        positions.push((id, position));
+    });
+    (interner.tokens, positions)
+}
+
+fn scan_normalized_tokens(text: &str, mut visit: impl FnMut(&str, u32)) {
     let mut normalized = [0u8; MAX_TOKEN_LENGTH];
     let mut emit = |token: &[u8], position: u32| {
         if !(2..=MAX_TOKEN_LENGTH).contains(&token.len()) {
@@ -312,15 +369,10 @@ pub fn extract_tokens_and_positions(text: &str) -> (Vec<String>, Vec<(u32, u32)>
         let lower = &mut normalized[..token.len()];
         lower.copy_from_slice(token);
         lower.make_ascii_lowercase();
-        let lower = std::str::from_utf8(lower).expect("ASCII token scanner");
-        let id = if let Some(&id) = ids.get(lower) {
-            id
-        } else {
-            let id = ids.len() as u32;
-            ids.insert(lower.to_owned(), id);
-            id
-        };
-        positions.push((id, position));
+        visit(
+            std::str::from_utf8(lower).expect("ASCII token scanner"),
+            position,
+        );
     };
     let bytes = text.as_bytes();
     let mut start = None;
@@ -347,11 +399,6 @@ pub fn extract_tokens_and_positions(text: &str) -> (Vec<String>, Vec<(u32, u32)>
             previous_lower = false;
         }
     }
-    let mut tokens = vec![String::new(); ids.len()];
-    for (token, id) in ids {
-        tokens[id as usize] = token;
-    }
-    (tokens, positions)
 }
 
 /// Extract identifiers (complete symbols) from code
@@ -388,6 +435,24 @@ pub fn extract_identifiers(content: &str) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_interner_resolves_hash_collisions() {
+        let mut interner = PackedInterner::default();
+        for (word, expected) in [
+            ("alpha", 0),
+            ("beta", 1),
+            ("alpha", 0),
+            ("gamma", 2),
+            ("beta", 1),
+        ] {
+            assert_eq!(interner.intern(word, 0), expected);
+        }
+        assert_eq!(
+            interner.tokens.iter().collect::<Vec<_>>(),
+            ["alpha", "beta", "gamma"]
+        );
+    }
 
     #[test]
     fn test_extract_tokens() {
@@ -513,6 +578,12 @@ mod interning_tests {
         for input in cases {
             let expected = extract_tokens_with_positions(&input);
             let (tokens, positions) = extract_tokens_and_positions(&input);
+            let (packed, packed_positions) = extract_packed_tokens_and_positions(&input);
+            assert_eq!(
+                packed.iter().collect::<Vec<_>>(),
+                tokens.iter().map(String::as_str).collect::<Vec<_>>()
+            );
+            assert_eq!(packed_positions, positions);
             let actual: Vec<_> = positions
                 .into_iter()
                 .map(|(id, pos)| (tokens[id as usize].clone(), pos))

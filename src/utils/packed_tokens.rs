@@ -9,6 +9,14 @@ pub struct PackedTokens {
 }
 
 impl PackedTokens {
+    pub(crate) fn push(&mut self, token: &str) {
+        if self.offsets.is_empty() {
+            self.offsets.push(0);
+        }
+        self.data.push_str(token);
+        self.offsets.push(self.data.len());
+    }
+
     pub fn len(&self) -> usize {
         self.offsets.len().saturating_sub(1)
     }

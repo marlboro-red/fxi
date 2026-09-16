@@ -78,24 +78,17 @@ pub struct ProcessedFile<T = Vec<String>> {
     pub token_positions: Vec<(u32, u32)>,
 }
 
-impl ProcessedFile {
-    fn pack_tokens(self) -> ProcessedFile<crate::utils::PackedTokens> {
-        ProcessedFile {
-            rel_path: self.rel_path,
-            mtime: self.mtime,
-            size: self.size,
-            language: self.language,
-            flags: self.flags,
-            trigrams: self.trigrams,
-            tokens: self.tokens.into(),
-            line_offsets: self.line_offsets,
-            token_positions: self.token_positions,
-        }
-    }
-}
-
 /// Process a single file's content (can run in parallel)
 fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option<ProcessedFile> {
+    process_file_content_with(rel_path, content, mtime, extract_tokens_and_positions)
+}
+
+fn process_file_content_with<T>(
+    rel_path: PathBuf,
+    content: &[u8],
+    mtime: u64,
+    tokenize: impl FnOnce(&str) -> (T, Vec<(u32, u32)>),
+) -> Option<ProcessedFile<T>> {
     // Check if binary
     if is_binary(content) {
         return None;
@@ -117,7 +110,7 @@ fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option
     let trigrams: Vec<u32> = extract_trigrams(content);
 
     // Extract tokens and token positions in a single scan of the content
-    let (tokens, token_positions) = extract_tokens_and_positions(text);
+    let (tokens, token_positions) = tokenize(text);
 
     // Build line map
     let line_offsets = build_line_map(content);
@@ -467,8 +460,12 @@ pub fn build_index_with_options(
                     .unwrap_or(0);
 
                 // Process file content (trigrams, tokens, line map)
-                let result = process_file_content(rel_path.clone(), &content, mtime)
-                    .map(ProcessedFile::pack_tokens);
+                let result = process_file_content_with(
+                    rel_path.clone(),
+                    &content,
+                    mtime,
+                    crate::utils::extract_packed_tokens_and_positions,
+                );
 
                 if result.is_some() {
                     total_processed_clone.fetch_add(1, Ordering::Relaxed);
