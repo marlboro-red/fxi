@@ -418,6 +418,7 @@ impl<'a> QueryExecutor<'a> {
             .collect();
 
         let candidate_count = candidate_infos.len();
+        let cache_scan = self.reader.should_cache_scan(&candidates);
         let effective_limit = if file_limit == 0 {
             usize::MAX
         } else {
@@ -450,7 +451,7 @@ impl<'a> QueryExecutor<'a> {
                     break;
                 }
 
-                let content = match self.reader.read_file_cached(&full_path) {
+                let content = match self.reader.read_file_for_scan(&full_path, cache_scan) {
                     Some(c) => c,
                     None => continue,
                 };
@@ -473,7 +474,7 @@ impl<'a> QueryExecutor<'a> {
                     }
 
                     // Read an owned snapshot of editable file content
-                    let content = self.reader.read_file_cached(&full_path)?;
+                    let content = self.reader.read_file_for_scan(&full_path, cache_scan)?;
 
                     // Check if file has ANY match
                     if has_match(&content) {
@@ -1120,9 +1121,10 @@ impl<'a> QueryExecutor<'a> {
             .collect();
 
         let candidate_count = candidate_infos.len();
-        let use_cache = !should_use_parallel(candidate_count);
+        let cache_scan = self.reader.should_cache_scan(candidates);
+        let use_sequential = !should_use_parallel(candidate_count);
 
-        let all_matches: Vec<FileMatchResult> = if use_cache {
+        let all_matches: Vec<FileMatchResult> = if use_sequential {
             // Small result set: use cached reads (sequential to leverage cache)
             let mut results =
                 Vec::with_capacity(candidate_count.min(target_matches.unwrap_or(candidate_count)));
@@ -1136,7 +1138,7 @@ impl<'a> QueryExecutor<'a> {
                     break;
                 }
 
-                let content = match self.reader.read_file_cached(&full_path) {
+                let content = match self.reader.read_file_for_scan(&full_path, cache_scan) {
                     Some(c) => c,
                     None => continue,
                 };
@@ -1173,7 +1175,7 @@ impl<'a> QueryExecutor<'a> {
                         return None;
                     }
 
-                    let content = self.reader.read_file_cached(&full_path)?;
+                    let content = self.reader.read_file_for_scan(&full_path, cache_scan)?;
 
                     let mut file_matches =
                         Self::verify_content_static(&content, verification, doc_id);

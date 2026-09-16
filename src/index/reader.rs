@@ -919,6 +919,33 @@ impl IndexReader {
         &self.root_path
     }
 
+    /// A scan larger than the entire cache cannot remain resident. Bypass
+    /// admission for it instead of evicting useful entries and repeatedly
+    /// paying snapshot metadata checks for content that will not survive.
+    pub(crate) fn should_cache_scan(&self, candidates: &RoaringBitmap) -> bool {
+        if candidates.len() > (FILE_CACHE_SHARDS * FILE_CACHE_SHARD_ENTRIES) as u64 {
+            return false;
+        }
+        let mut bytes = 0u64;
+        for id in candidates.iter() {
+            if let Some(doc) = self.get_document(id) {
+                bytes = bytes.saturating_add(doc.size);
+                if bytes > (FILE_CACHE_SHARDS * FILE_CACHE_SHARD_BYTES) as u64 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    pub(crate) fn read_file_for_scan(&self, path: &Path, cache_scan: bool) -> Option<FileContent> {
+        if cache_scan {
+            self.read_file_cached(path)
+        } else {
+            Self::read_file_uncached(path).map(FileContent::Owned)
+        }
+    }
+
     /// Read file content with LRU caching.
     /// This speeds up repeated queries that access the same files.
     /// The cache stores Arc<str>, so a hit is a refcount bump rather than a
@@ -1355,6 +1382,39 @@ mod tests {
 
         let docs = reader.get_token_docs("xyznonexistent123");
         assert!(docs.is_empty(), "Should not find nonexistent token");
+    }
+
+    #[test]
+    fn uncached_scans_preserve_snapshot_and_utf8_semantics() {
+        let (_temp_dir, root) = create_test_index();
+        let reader = IndexReader::open(&root).unwrap();
+        let path = root.join("test.rs");
+        let first = reader.read_file_for_scan(&path, false).unwrap();
+        assert!(matches!(first, FileContent::Owned(_)));
+        assert!(
+            reader
+                .file_cache
+                .iter()
+                .all(|shard| shard.lock().unwrap().entries.is_empty())
+        );
+        let cached = reader.read_file_for_scan(&path, true).unwrap();
+        assert_eq!(&*first, &*cached);
+        fs::write(&path, "updated needle").unwrap();
+        for use_cache in [false, true] {
+            assert_eq!(
+                &*reader.read_file_for_scan(&path, use_cache).unwrap(),
+                "updated needle"
+            );
+        }
+        assert_eq!(&*first, &*cached); // old owned/shared snapshots remain valid
+        fs::write(&path, [0xff]).unwrap();
+        for use_cache in [false, true] {
+            assert!(reader.read_file_for_scan(&path, use_cache).is_none());
+        }
+        fs::remove_file(&path).unwrap();
+        for use_cache in [false, true] {
+            assert!(reader.read_file_for_scan(&path, use_cache).is_none());
+        }
     }
 
     #[test]
