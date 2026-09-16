@@ -406,6 +406,20 @@ impl<'a> QueryExecutor<'a> {
             file_limit
         };
 
+        let (line_start, line_end) = Self::extract_line_filter(&plan.steps);
+        let has_match = |content: &str| {
+            if line_start.is_none() && line_end.is_none() {
+                Self::has_match(content, verification)
+            } else {
+                Self::verify_content_static(content, verification, 0)
+                    .iter()
+                    .any(|(line, _, _, _)| {
+                        line_start.is_none_or(|start| *line >= start)
+                            && line_end.is_none_or(|end| *line <= end)
+                    })
+            }
+        };
+
         // For files-only, we use parallel processing with early termination
         // Each file only needs to find ONE match to be included
         let match_count = AtomicUsize::new(0);
@@ -424,7 +438,7 @@ impl<'a> QueryExecutor<'a> {
                 };
 
                 // Check if file has ANY match (fast path)
-                if Self::has_match(&content, verification) {
+                if has_match(&content) {
                     results.push(rel_path);
                 }
             }
@@ -443,7 +457,7 @@ impl<'a> QueryExecutor<'a> {
                     let content = read_file_mmap(&full_path)?;
 
                     // Check if file has ANY match
-                    if Self::has_match(&content, verification) {
+                    if has_match(&content) {
                         match_count.fetch_add(1, Ordering::Relaxed);
                         Some(rel_path)
                     } else {
@@ -479,12 +493,14 @@ impl<'a> QueryExecutor<'a> {
                     // Exact phrase match (case-sensitive). memmem is SIMD;
                     // str::contains is not, and this runs over every byte of
                     // every candidate file in -l mode
-                    memchr::memmem::find(content.as_bytes(), text.as_bytes()).is_some()
+                    content.lines().any(|line| {
+                        memchr::memmem::find(line.as_bytes(), text.as_bytes()).is_some()
+                    })
                 }
             }
             VerificationStep::Regex(pattern) => {
                 if let Some(re) = get_regex_cache().get_or_compile(pattern) {
-                    re.is_match(content)
+                    content.lines().any(|line| re.is_match(line))
                 } else {
                     false
                 }

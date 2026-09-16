@@ -50,3 +50,12 @@ fn or_includes_branches_without_index_constraints() {
         check_files(query, &["a.txt", "b.txt", "d.txt"]);
     }
 }
+
+#[test]
+fn files_only_obeys_line_regex_and_filter_semantics() {
+    check_files("re:/^needle$/", &["a.txt"]);
+    check_files("re:/^x$/", &["b.txt"]);
+    check_files("needle line:20-30", &[]);
+    check_files("needle line:1-1", &["a.txt", "d.txt"]);
+    check_files("needle -re:/^x$/", &["a.txt", "d.txt"]);
+}
