@@ -929,6 +929,11 @@ impl IndexReader {
         let mut bytes = 0u64;
         for id in candidates.iter() {
             if let Some(doc) = self.get_document(id) {
+                // Oversized files are never admitted; they must not evict the
+                // small-file scan from the policy's estimated cache budget.
+                if doc.size > MAX_CACHEABLE_FILE_SIZE as u64 {
+                    continue;
+                }
                 bytes = bytes.saturating_add(doc.size);
                 if bytes > (FILE_CACHE_SHARDS * FILE_CACHE_SHARD_BYTES) as u64 {
                     return false;
@@ -1386,6 +1391,14 @@ mod tests {
 
         let docs = reader.get_token_docs("xyznonexistent123");
         assert!(docs.is_empty(), "Should not find nonexistent token");
+    }
+
+    #[test]
+    fn noncacheable_files_do_not_consume_scan_admission_budget() {
+        let (_temp_dir, root) = create_test_index();
+        let mut reader = IndexReader::open(&root).unwrap();
+        reader.documents[0].size = (FILE_CACHE_SHARDS * FILE_CACHE_SHARD_BYTES + 1) as u64;
+        assert!(reader.should_cache_scan(reader.valid_doc_ids()));
     }
 
     #[test]
