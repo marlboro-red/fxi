@@ -15,6 +15,25 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// Empty posting files are valid, but cannot be memory mapped on every OS.
+struct MappedBytes(Option<Mmap>);
+impl MappedBytes {
+    fn open(path: &Path) -> Result<Self> {
+        let file = File::open(path)?;
+        Ok(Self(if file.metadata()?.len() == 0 {
+            None
+        } else {
+            Some(unsafe { Mmap::map(&file)? })
+        }))
+    }
+}
+impl std::ops::Deref for MappedBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        self.0.as_deref().unwrap_or(&[])
+    }
+}
+
 /// Trigram dictionary entry
 struct TrigramDictEntry {
     trigram: Trigram,
@@ -70,11 +89,11 @@ struct SegmentReader {
     #[allow(dead_code)]
     segment_id: SegmentId,
     trigram_dict: TrigramDict,
-    trigram_postings: Mmap,
+    trigram_postings: MappedBytes,
     token_dict: TokenDict,
-    token_postings: Mmap,
+    token_postings: MappedBytes,
     /// Memory-mapped token positions file (optional for backwards compat)
-    token_positions: Option<Mmap>,
+    token_positions: Option<MappedBytes>,
     /// Lazily loaded line maps - only loaded when first accessed
     line_maps: OnceLock<HashMap<DocId, Vec<u32>>>,
     /// Path to segment directory for lazy loading
@@ -98,22 +117,7 @@ impl SegmentReader {
         // Read trigram dictionary (already sorted from BTreeMap write)
         let trigram_dict = read_trigram_dict(segment_path)?;
 
-        // mmap trigram postings
-        let postings_path = segment_path.join("grams.postings");
-        let trigram_postings = if postings_path.exists() {
-            let file = File::open(&postings_path)?;
-            unsafe { Mmap::map(&file)? }
-        } else {
-            // Empty mmap for empty segment - use anonymous mapping instead of unrelated file
-            unsafe {
-                Mmap::map(&File::open(postings_path).unwrap_or_else(|_| {
-                    // Create an empty temp file as mmap source
-                    let empty_path = segment_path.join(".empty_postings");
-                    let _ = std::fs::write(&empty_path, b"");
-                    File::open(&empty_path).expect("failed to create empty postings placeholder")
-                }))?
-            }
-        };
+        let trigram_postings = MappedBytes::open(&segment_path.join("grams.postings"))?;
 
         // Check if positions file exists (determines dict format)
         let positions_path = segment_path.join("tokens.positions");
@@ -122,30 +126,56 @@ impl SegmentReader {
         // Read token dictionary (already sorted from BTreeMap write)
         let token_dict = read_token_dict(segment_path, has_positions)?;
 
-        // mmap token postings
-        let token_postings_path = segment_path.join("tokens.postings");
-        let token_postings = if token_postings_path.exists() {
-            let file = File::open(&token_postings_path)?;
-            unsafe { Mmap::map(&file)? }
-        } else {
-            // Empty mmap for empty segment - use anonymous mapping instead of unrelated file
-            unsafe {
-                Mmap::map(&File::open(token_postings_path).unwrap_or_else(|_| {
-                    let empty_path = segment_path.join(".empty_token_postings");
-                    let _ = std::fs::write(&empty_path, b"");
-                    File::open(&empty_path)
-                        .expect("failed to create empty token postings placeholder")
-                }))?
-            }
-        };
-
-        // mmap token positions if present
+        let token_postings = MappedBytes::open(&segment_path.join("tokens.postings"))?;
         let token_positions = if has_positions {
-            let file = File::open(&positions_path)?;
-            Some(unsafe { Mmap::map(&file)? })
+            Some(MappedBytes::open(&positions_path)?)
         } else {
             None
         };
+
+        let fits = |offset: u64, length: u32, size: usize| {
+            offset
+                .checked_add(u64::from(length))
+                .is_some_and(|end| end <= size as u64)
+        };
+        anyhow::ensure!(
+            trigram_dict
+                .entries
+                .iter()
+                .all(|e| fits(e.offset, e.length, trigram_postings.len())),
+            "Truncated trigram postings"
+        );
+        anyhow::ensure!(
+            token_dict
+                .entries
+                .iter()
+                .all(|e| fits(e.offset, e.length, token_postings.len())),
+            "Truncated token postings"
+        );
+        if let Some(positions) = &token_positions {
+            anyhow::ensure!(
+                token_dict.entries.iter().all(|e| fits(
+                    e.pos_offset,
+                    e.pos_length,
+                    positions.len()
+                )),
+                "Truncated token positions"
+            );
+        }
+        anyhow::ensure!(
+            trigram_dict
+                .entries
+                .windows(2)
+                .all(|w| w[0].trigram < w[1].trigram),
+            "Unsorted trigram dictionary"
+        );
+        anyhow::ensure!(
+            token_dict
+                .entries
+                .windows(2)
+                .all(|w| w[0].token < w[1].token),
+            "Unsorted token dictionary"
+        );
 
         // Line maps are NOT loaded here - loaded lazily on first access
 
@@ -347,6 +377,11 @@ impl IndexReader {
         let meta_path = index_path.join("meta.json");
         let meta_file = File::open(&meta_path).context("Failed to open meta.json")?;
         let meta: IndexMeta = serde_json::from_reader(meta_file)?;
+        anyhow::ensure!(
+            meta.version == 1,
+            "Unsupported index version {}; rebuild the index",
+            meta.version
+        );
 
         // Collect all segment IDs to load
         let mut segment_ids: Vec<SegmentId> = Vec::new();
@@ -372,28 +407,23 @@ impl IndexReader {
                         // Load all segments in parallel using par_iter
                         segment_ids
                             .par_iter()
-                            .filter_map(|&seg_id| {
+                            .map(|&seg_id| {
                                 let segment_path = index_path_ref
                                     .join("segments")
                                     .join(format!("seg_{:04}", seg_id));
-                                if segment_path.exists() {
-                                    match SegmentReader::open(&segment_path, seg_id, index_path_ref) {
-                                        Ok(reader) => Some(reader),
-                                        Err(e) => {
-                                            eprintln!("Warning: Failed to open segment {}: {}. Index may be corrupted - try 'fxi index --force' to rebuild.", seg_id, e);
-                                            None
-                                        }
-                                    }
-                                } else {
-                                    None
+                                if meta.has_positions && !segment_path.join("tokens.positions").is_file() {
+                                    anyhow::bail!("Missing position index in segment {seg_id}; rebuild the index");
                                 }
+                                SegmentReader::open(&segment_path, seg_id, index_path_ref)
+                                    .with_context(|| format!("Cannot open segment {seg_id}; rebuild the index"))
                             })
-                            .collect::<Vec<_>>()
+                            .collect::<Result<Vec<_>>>()
                     },
                 )
             },
         );
 
+        let segments = segments?;
         let documents = documents_result?;
         let paths = paths_result?;
 
@@ -910,12 +940,6 @@ pub fn read_paths(index_path: &Path) -> Result<Vec<PathBuf>> {
 fn read_trigram_dict(segment_path: &Path) -> Result<TrigramDict> {
     let dict_path = segment_path.join("grams.dict");
 
-    if !dict_path.exists() {
-        return Ok(TrigramDict {
-            entries: Vec::new(),
-        });
-    }
-
     let mut file = BufReader::new(File::open(&dict_path)?);
 
     let mut buf4 = [0u8; 4];
@@ -961,12 +985,6 @@ fn read_trigram_dict(segment_path: &Path) -> Result<TrigramDict> {
 /// Read token dictionary
 fn read_token_dict(segment_path: &Path, has_positions: bool) -> Result<TokenDict> {
     let dict_path = segment_path.join("tokens.dict");
-
-    if !dict_path.exists() {
-        return Ok(TokenDict {
-            entries: Vec::new(),
-        });
-    }
 
     let mut file = BufReader::new(File::open(&dict_path)?);
 

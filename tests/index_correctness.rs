@@ -77,3 +77,48 @@ fn repeated_compaction_preserves_omitted_gram_coverage() {
         update_index(fixture.0.path()).unwrap();
     }
 }
+
+#[test]
+fn incomplete_segments_fail_open_instead_of_losing_matches() {
+    for file in [
+        "grams.dict",
+        "grams.postings",
+        "tokens.dict",
+        "tokens.postings",
+        "tokens.positions",
+    ] {
+        let fixture = Fixture::new();
+        fs::remove_file(fixture.index().join("segments/seg_0001").join(file)).unwrap();
+        assert!(
+            IndexReader::open(fixture.0.path()).is_err(),
+            "missing {file}"
+        );
+    }
+    let fixture = Fixture::new();
+    fs::remove_dir_all(fixture.index().join("segments/seg_0001")).unwrap();
+    assert!(IndexReader::open(fixture.0.path()).is_err());
+}
+
+#[test]
+fn empty_postings_are_valid_without_placeholder_files() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.path().join("a.txt"), "x").unwrap();
+    build_index_with_options(fixture.0.path(), true, true, None).unwrap();
+    let reader = IndexReader::open(fixture.0.path()).unwrap();
+    assert_eq!(reader.meta.doc_count, 1);
+    assert!(
+        !fixture
+            .index()
+            .join("segments/seg_0001/.empty_postings")
+            .exists()
+    );
+}
+
+#[test]
+fn truncated_postings_fail_open() {
+    for name in ["grams.postings", "tokens.postings", "tokens.positions"] {
+        let fixture = Fixture::new();
+        fs::write(fixture.index().join("segments/seg_0001").join(name), []).unwrap();
+        assert!(IndexReader::open(fixture.0.path()).is_err(), "{name}");
+    }
+}
