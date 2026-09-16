@@ -414,6 +414,7 @@ impl ChunkedIndexWriter {
             let mut dict_file = BufWriter::new(File::create(&dict_path)?);
             let _ = File::create(&postings_path)?;
             dict_file.write_all(&0u32.to_le_bytes())?;
+            dict_file.flush()?;
             return Ok(());
         }
 
@@ -451,28 +452,20 @@ impl ChunkedIndexWriter {
             })
             .collect();
 
-        // Pre-allocate buffers for single write
-        let total_postings: usize = encoded.iter().map(|(_, e, _)| e.len()).sum();
-        let mut dict_buf = Vec::with_capacity(4 + entry_count * 20);
-        let mut postings_buf = Vec::with_capacity(total_postings);
-
-        dict_buf.extend_from_slice(&(entry_count as u32).to_le_bytes());
-        let mut offset: u64 = 0;
-
-        for (trigram, enc, doc_freq) in &encoded {
-            dict_buf.extend_from_slice(&trigram.to_le_bytes());
-            dict_buf.extend_from_slice(&offset.to_le_bytes());
-            dict_buf.extend_from_slice(&(enc.len() as u32).to_le_bytes());
-            dict_buf.extend_from_slice(&doc_freq.to_le_bytes());
-            postings_buf.extend_from_slice(enc);
+        let mut dict_file = BufWriter::with_capacity(65536, File::create(&dict_path)?);
+        let mut postings_file = BufWriter::with_capacity(65536, File::create(&postings_path)?);
+        dict_file.write_all(&(entry_count as u32).to_le_bytes())?;
+        let mut offset = 0u64;
+        for (trigram, enc, doc_freq) in encoded {
+            dict_file.write_all(&trigram.to_le_bytes())?;
+            dict_file.write_all(&offset.to_le_bytes())?;
+            dict_file.write_all(&(enc.len() as u32).to_le_bytes())?;
+            dict_file.write_all(&doc_freq.to_le_bytes())?;
+            postings_file.write_all(&enc)?;
             offset += enc.len() as u64;
         }
-
-        // Single write per file
-        let mut dict_file = BufWriter::new(File::create(&dict_path)?);
-        let mut postings_file = BufWriter::new(File::create(&postings_path)?);
-        dict_file.write_all(&dict_buf)?;
-        postings_file.write_all(&postings_buf)?;
+        dict_file.flush()?;
+        postings_file.flush()?;
 
         Ok(())
     }
@@ -498,6 +491,7 @@ impl ChunkedIndexWriter {
             let _ = File::create(&postings_path)?;
             let _ = File::create(&positions_path)?;
             dict_file.write_all(&0u32.to_le_bytes())?;
+            dict_file.flush()?;
             return Ok(());
         }
 
@@ -510,44 +504,6 @@ impl ChunkedIndexWriter {
             }
         }
         let entry_count = group_starts.len();
-
-        // Build position data per token rank: (rank, encoded positions bytes),
-        // in rank order — consumed by lockstep merge in the dict loop below
-        let position_data: Vec<(u32, Vec<u8>)> = {
-            let mut groups: Vec<(u32, Vec<u8>)> = Vec::new();
-            let mut i = 0;
-            while i < position_triples.len() {
-                let token_rank = position_triples[i].0;
-                let group_start = i;
-                while i < position_triples.len() && position_triples[i].0 == token_rank {
-                    i += 1;
-                }
-                // Group by doc_id within this token
-                let mut doc_positions: Vec<(u32, Vec<u32>)> = Vec::new();
-                let mut j = group_start;
-                while j < i {
-                    let doc_id = position_triples[j].1;
-                    let doc_start = j;
-                    while j < i && position_triples[j].1 == doc_id {
-                        j += 1;
-                    }
-                    let positions: Vec<u32> = position_triples[doc_start..j]
-                        .iter()
-                        .map(|(_, _, p)| *p)
-                        .collect();
-                    doc_positions.push((doc_id, positions));
-                }
-                // Encode
-                let refs: Vec<(u32, &[u32])> = doc_positions
-                    .iter()
-                    .map(|(d, p)| (*d, p.as_slice()))
-                    .collect();
-                let mut buf = Vec::new();
-                crate::utils::encode_position_postings(&refs, &mut buf);
-                groups.push((token_rank, buf));
-            }
-            groups
-        };
 
         // Parallel encode postings
         let encoded: Vec<(u32, Vec<u8>, u32)> = group_starts
@@ -572,58 +528,58 @@ impl ChunkedIndexWriter {
             })
             .collect();
 
-        // Pre-allocate and build buffers
-        let total_postings: usize = encoded.iter().map(|(_, e, _)| e.len()).sum();
-        // Dict size: count(4) + entries * (token_len(2) + token + offset(8) + length(4) + doc_freq(4) + pos_offset(8) + pos_length(4))
-        let total_dict: usize = 4 + encoded
-            .iter()
-            .map(|(r, _, _)| 2 + symbols_sorted[*r as usize].len() + 8 + 4 + 4 + 8 + 4)
-            .sum::<usize>();
-        let mut dict_buf = Vec::with_capacity(total_dict);
-        let mut postings_buf = Vec::with_capacity(total_postings);
-        let mut positions_buf = Vec::new();
-
-        dict_buf.extend_from_slice(&(entry_count as u32).to_le_bytes());
-        let mut offset: u64 = 0;
-        let mut pos_offset: u64 = 0;
-        // Lockstep cursor: both `encoded` and `position_data` are in rank order
+        // Stream each encoded list once. Retaining a second segment-sized copy
+        // of postings and positions needlessly doubles their peak memory.
+        let mut dict_file = BufWriter::with_capacity(65536, File::create(&dict_path)?);
+        let mut postings_file = BufWriter::with_capacity(65536, File::create(&postings_path)?);
+        let mut positions_file = BufWriter::with_capacity(65536, File::create(&positions_path)?);
+        dict_file.write_all(&(entry_count as u32).to_le_bytes())?;
+        let mut offset = 0u64;
+        let mut pos_offset = 0u64;
         let mut pos_idx = 0usize;
+        let mut pos_buf = Vec::new();
+        for (token_rank, enc, doc_freq) in encoded {
+            let token_bytes = symbols_sorted[token_rank as usize].as_bytes();
+            dict_file.write_all(&(token_bytes.len() as u16).to_le_bytes())?;
+            dict_file.write_all(token_bytes)?;
+            dict_file.write_all(&offset.to_le_bytes())?;
+            dict_file.write_all(&(enc.len() as u32).to_le_bytes())?;
+            dict_file.write_all(&doc_freq.to_le_bytes())?;
 
-        for (token_rank, enc, doc_freq) in &encoded {
-            let token_bytes = symbols_sorted[*token_rank as usize].as_bytes();
-            dict_buf.extend_from_slice(&(token_bytes.len() as u16).to_le_bytes());
-            dict_buf.extend_from_slice(token_bytes);
-            dict_buf.extend_from_slice(&offset.to_le_bytes());
-            dict_buf.extend_from_slice(&(enc.len() as u32).to_le_bytes());
-            dict_buf.extend_from_slice(&doc_freq.to_le_bytes());
-
-            // Write position offset and length (merge-join on rank)
-            while pos_idx < position_data.len() && position_data[pos_idx].0 < *token_rank {
+            while pos_idx < position_triples.len() && position_triples[pos_idx].0 < token_rank {
                 pos_idx += 1;
             }
-            if pos_idx < position_data.len() && position_data[pos_idx].0 == *token_rank {
-                let pos_data = &position_data[pos_idx].1;
-                dict_buf.extend_from_slice(&pos_offset.to_le_bytes());
-                dict_buf.extend_from_slice(&(pos_data.len() as u32).to_le_bytes());
-                positions_buf.extend_from_slice(pos_data);
-                pos_offset += pos_data.len() as u64;
-            } else {
-                dict_buf.extend_from_slice(&0u64.to_le_bytes());
-                dict_buf.extend_from_slice(&0u32.to_le_bytes());
+            pos_buf.clear();
+            let mut prev_doc = 0;
+            while pos_idx < position_triples.len() && position_triples[pos_idx].0 == token_rank {
+                let doc = position_triples[pos_idx].1;
+                let start = pos_idx;
+                while pos_idx < position_triples.len()
+                    && position_triples[pos_idx].0 == token_rank
+                    && position_triples[pos_idx].1 == doc
+                {
+                    pos_idx += 1;
+                }
+                crate::utils::encode_varint(doc - prev_doc, &mut pos_buf);
+                crate::utils::encode_varint((pos_idx - start) as u32, &mut pos_buf);
+                let mut prev_pos = 0;
+                for &(_, _, pos) in &position_triples[start..pos_idx] {
+                    crate::utils::encode_varint(pos - prev_pos, &mut pos_buf);
+                    prev_pos = pos;
+                }
+                prev_doc = doc;
             }
-
-            postings_buf.extend_from_slice(enc);
+            let entry_pos_offset = if pos_buf.is_empty() { 0 } else { pos_offset };
+            dict_file.write_all(&entry_pos_offset.to_le_bytes())?;
+            dict_file.write_all(&(pos_buf.len() as u32).to_le_bytes())?;
+            positions_file.write_all(&pos_buf)?;
+            pos_offset += pos_buf.len() as u64;
+            postings_file.write_all(&enc)?;
             offset += enc.len() as u64;
         }
-
-        let mut dict_file = BufWriter::new(File::create(&dict_path)?);
-        let mut postings_file = BufWriter::new(File::create(&postings_path)?);
-        dict_file.write_all(&dict_buf)?;
-        postings_file.write_all(&postings_buf)?;
-
-        // Write positions file
-        let mut positions_file = BufWriter::new(File::create(&positions_path)?);
-        positions_file.write_all(&positions_buf)?;
+        dict_file.flush()?;
+        postings_file.flush()?;
+        positions_file.flush()?;
 
         Ok(())
     }
@@ -1196,6 +1152,78 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn streamed_indexes_match_reference_encoding() {
+        // Exercise empty lists, duplicate documents, absent positions, and
+        // multi-byte deltas against the existing public encoders.
+        for count in [0, 1, 17, 130] {
+            let temp = TempDir::new().unwrap();
+            let symbols: Vec<String> = (0..count).map(|i| format!("token{i:04}")).collect();
+            let mut pairs = Vec::new();
+            let mut triples = Vec::new();
+            let mut grams_dict = (count as u32).to_le_bytes().to_vec();
+            let mut tokens_dict = grams_dict.clone();
+            let mut postings = Vec::new();
+            let mut positions = Vec::new();
+            for rank in 0..count as u32 {
+                let docs = [0, 127, 128, 65536 + rank];
+                let offset = postings.len() as u64;
+                crate::utils::delta_encode(&docs, &mut postings);
+                let length = postings.len() as u32 - offset as u32;
+                for doc in docs {
+                    pairs.extend([(rank, doc), (rank, doc)]);
+                }
+                grams_dict.extend_from_slice(&rank.to_le_bytes());
+                grams_dict.extend_from_slice(&offset.to_le_bytes());
+                grams_dict.extend_from_slice(&length.to_le_bytes());
+                grams_dict.extend_from_slice(&4u32.to_le_bytes());
+                let token = symbols[rank as usize].as_bytes();
+                tokens_dict.extend_from_slice(&(token.len() as u16).to_le_bytes());
+                tokens_dict.extend_from_slice(token);
+                tokens_dict.extend_from_slice(&offset.to_le_bytes());
+                tokens_dict.extend_from_slice(&length.to_le_bytes());
+                tokens_dict.extend_from_slice(&4u32.to_le_bytes());
+                let pos_offset = positions.len() as u64;
+                if rank % 3 != 0 {
+                    let occurrences = [0, 0, 128, 999999];
+                    for doc in docs {
+                        for pos in occurrences {
+                            triples.push((rank, doc, pos));
+                        }
+                    }
+                    let refs: Vec<_> = docs
+                        .iter()
+                        .map(|&doc| (doc, occurrences.as_slice()))
+                        .collect();
+                    crate::utils::encode_position_postings(&refs, &mut positions);
+                    tokens_dict.extend_from_slice(&pos_offset.to_le_bytes());
+                    tokens_dict.extend_from_slice(
+                        &(positions.len() as u32 - pos_offset as u32).to_le_bytes(),
+                    );
+                } else {
+                    tokens_dict.extend_from_slice(&0u64.to_le_bytes());
+                    tokens_dict.extend_from_slice(&0u32.to_le_bytes());
+                }
+            }
+            ChunkedIndexWriter::write_trigram_index_flat(temp.path(), &pairs).unwrap();
+            ChunkedIndexWriter::write_token_index_flat(temp.path(), &pairs, &triples, &symbols)
+                .unwrap();
+            for (name, expected) in [
+                ("grams.dict", &grams_dict),
+                ("grams.postings", &postings),
+                ("tokens.dict", &tokens_dict),
+                ("tokens.postings", &postings),
+                ("tokens.positions", &positions),
+            ] {
+                assert_eq!(
+                    fs::read(temp.path().join(name)).unwrap(),
+                    *expected,
+                    "{name}, count={count}"
+                );
+            }
+        }
+    }
 
     fn create_test_processed_file(rel_path: &str, content: &str) -> ProcessedFile {
         let trigrams: Vec<u32> = content
