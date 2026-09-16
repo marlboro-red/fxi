@@ -573,6 +573,40 @@ impl std::ops::Deref for FileContent {
     }
 }
 
+/// Full builds normally assign consecutive IDs in document-vector order.
+/// Preserve sparse/reordered legacy and incremental layouts without allocating
+/// an extra lookup table for the common contiguous case.
+enum DocumentLookup {
+    Contiguous(DocId),
+    Sparse(HashMap<DocId, usize>),
+}
+
+impl DocumentLookup {
+    fn new(documents: &[Document]) -> Self {
+        if documents
+            .windows(2)
+            .all(|docs| docs[0].doc_id.checked_add(1) == Some(docs[1].doc_id))
+        {
+            Self::Contiguous(documents.first().map_or(0, |doc| doc.doc_id))
+        } else {
+            Self::Sparse(
+                documents
+                    .iter()
+                    .enumerate()
+                    .map(|(index, doc)| (doc.doc_id, index))
+                    .collect(),
+            )
+        }
+    }
+
+    fn index(&self, id: DocId) -> Option<usize> {
+        match self {
+            Self::Contiguous(first) => id.checked_sub(*first).map(|offset| offset as usize),
+            Self::Sparse(indices) => indices.get(&id).copied(),
+        }
+    }
+}
+
 /// Memory-mapped index reader for fast queries
 pub struct IndexReader {
     _generation_lease: Option<File>,
@@ -580,10 +614,10 @@ pub struct IndexReader {
     #[allow(dead_code)]
     index_path: PathBuf,
     pub meta: IndexMeta,
-    /// Documents stored as Vec for iteration, with a HashMap index for O(1) lookup
+    /// Documents stored in on-disk order for iteration.
     documents: Vec<Document>,
     /// O(1) lookup index: doc_id -> index in documents Vec
-    doc_id_to_index: HashMap<DocId, usize>,
+    doc_id_to_index: DocumentLookup,
     paths: Vec<PathBuf>,
     segments: Vec<SegmentReader>,
     /// O(1) stop-gram lookup (converted from Vec on load)
@@ -667,12 +701,7 @@ impl IndexReader {
         let documents = documents_result?;
         let paths = paths_result?;
 
-        // Build O(1) lookup index (fast, ~100ms for 1M docs)
-        let doc_id_to_index: HashMap<DocId, usize> = documents
-            .iter()
-            .enumerate()
-            .map(|(idx, doc)| (doc.doc_id, idx))
-            .collect();
+        let doc_id_to_index = DocumentLookup::new(&documents);
 
         // Convert stop-grams Vec to HashSet for O(1) lookup (was O(512) per check)
         let stop_grams: AHashSet<Trigram> = meta.stop_grams.iter().copied().collect();
@@ -696,11 +725,11 @@ impl IndexReader {
         })
     }
 
-    /// Get document by ID - O(1) lookup via HashMap index
+    /// Get document by ID in constant time.
     pub fn get_document(&self, doc_id: DocId) -> Option<&Document> {
         self.doc_id_to_index
-            .get(&doc_id)
-            .and_then(|&idx| self.documents.get(idx))
+            .index(doc_id)
+            .and_then(|idx| self.documents.get(idx))
     }
 
     /// Get path for document
@@ -1417,6 +1446,46 @@ mod tests {
     fn test_index_reader_open_nonexistent() {
         let result = IndexReader::open(&PathBuf::from("/nonexistent/path"));
         assert!(result.is_err(), "Should fail for nonexistent path");
+    }
+
+    #[test]
+    fn document_lookup_handles_contiguous_sparse_and_extreme_ids() {
+        for ids in [
+            vec![],
+            vec![0],
+            vec![1, 2, 3],
+            vec![u32::MAX],
+            vec![u32::MAX - 1, u32::MAX],
+            vec![1, 3, u32::MAX],
+            vec![2, 1],
+            vec![1, 1],
+        ] {
+            let documents: Vec<_> = ids
+                .iter()
+                .map(|&id| Document {
+                    doc_id: id,
+                    path_id: 0,
+                    size: 0,
+                    mtime: 0,
+                    language: Language::Unknown,
+                    flags: DocFlags::new(),
+                    segment_id: 0,
+                })
+                .collect();
+            let lookup = DocumentLookup::new(&documents);
+            let reference: HashMap<_, _> = ids
+                .iter()
+                .enumerate()
+                .map(|(index, &id)| (id, index))
+                .collect();
+            for id in [0, 1, 2, 3, 4, u32::MAX - 1, u32::MAX] {
+                assert_eq!(
+                    lookup.index(id).filter(|&index| index < documents.len()),
+                    reference.get(&id).copied(),
+                    "{ids:?}, {id}"
+                );
+            }
+        }
     }
 
     #[test]
