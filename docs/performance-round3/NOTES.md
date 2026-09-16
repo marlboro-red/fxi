@@ -126,3 +126,67 @@ bulk** (`linux-metadata-batching.json`), with 20.002 ms of reusable grouping wor
 measured separately. This is effectively neutral and offers no demonstrated
 whole-query gain. The prototype remains an offline experiment; production source
 reads and reconciliation do not use it.
+
+## Ordered file limits and path-processing experiments
+
+The new limit regression reproduced `needle -l -m 1` selecting `0003.rs` while
+`0000.rs` was the first matching path. Candidate document order differs from path
+order after byte-balanced segment construction; racing workers previously chose
+the limited subset before sorting it. Files-only results now use a deterministic
+path-ordered prefix, including path-only filters. Limited parallel verification
+uses ordered batches of 64 candidates and stops after the required prefix.
+
+Dense cached queries reuse an immutable sorted document-ID vector, about 255 KiB
+on this fixture. Content validation remains unchanged; this is metadata reuse,
+not cached query answers. Sparse unlimited queries sort only verified paths;
+all outputs are sorted and old document IDs are removed before verification.
+The regression covers 9- and 500-file fixtures, sequential/parallel execution,
+multiple segments, cached/uncached readers, dense/sparse/path-only queries and
+five limits, repeated three times each. Full Rust tests, strict Clippy and
+Rust 1.88 checks pass.
+
+Successive prototype data are retained as `linux-path-order-{warm,direct}.json`,
+`linux-path-order-final-warm.json`, `linux-path-order-accepted-warm.json`,
+`linux-path-order-adaptive-warm.json` and `linux-path-order-reversed-warm.json`.
+Names such as “final” and “accepted” were provisional experiment labels, not
+claims that those intermediate binaries shipped. Moving path allocation into
+parallel workers reduced broad warm latency substantially but repeatedly added
+about 1 ms to the phrase query; swapping daemon slots reproduced that regression.
+Serially preparing only full paths did not remove it. Restoring the old owned-path collection also failed to remove the regression
+(`linux-path-order-hybrid-warm.json`). The simpler implementation is retained;
+the phrase regression remains an explicit tradeoff, not a claimed improvement.
+
+`scripts/compare-warm-files.py` uses two real daemons, one immutable index and
+interleaved samples, with equivalent distinct regex strings. Every output is
+checked against ripgrep, duplicate paths and CLI fallback are rejected, and both
+servers must remain alive. These are warm storage/cache measurements on the
+controlled Linux fixture, not cold-storage or cross-platform results.
+
+The shipping binary is byte-identical to the measured `accepted` prototype
+(SHA-256 `5926ac2e845eb2e731e9acb7b4f03a931b8d1c0170a279a8ef1614904f3a650b`).
+Twenty-one paired warm samples measured broad `return` **88.065 → 59.919 ms**
+(32% lower latency), selective **4.391 → 4.404 ms**, absent **3.746 → 3.799 ms**,
+and phrase **13.250 → 14.431 ms** (9% higher latency). A swapped-daemon-slot
+repeat confirmed the direction of both the broad benefit and phrase regression.
+This is not an improvement in every workload.
+
+## Benchmark index-selection correction
+
+`compare-startup.py` previously passed `--candidate-indexes` only to warmup,
+then timed both labels against the default index. The original round-two
+small-segment startup conclusion is withdrawn, and its raw data retained only
+for traceability. An executable fake-binary regression now checks the actual
+index environment for every warmup and timed subprocess; it failed before the
+fix and passes afterwards. New results include the harness SHA-256.
+
+The corrected 31-sample run measures 2,000 → 1,000-file segments: absent
+**10.301 → 12.445 ms**, selective **11.845 → 14.207 ms**. tgrep measured
+16.044 and 17.329 ms. Thus smaller segments save build memory at the cost of
+roughly 20% slower one-shot startup on this fixture, in addition to their larger
+index. This strengthens the reason to keep the 2,000-file default.
+
+The final 21-sample direct-query check (`linux-path-order-shipping-direct.json`)
+measured selective **12.194 → 12.146 ms**, absent **10.565 → 10.589 ms**,
+phrase **44.375 → 43.179 ms**, and broad **416.909 → 412.186 ms**. Direct
+queries show small changes; the large gain depends on the daemon's reusable
+metadata/content caches. No cold-cache speedup is claimed.

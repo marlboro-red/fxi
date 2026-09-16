@@ -1,0 +1,180 @@
+{
+  "candidate_indexes": null,
+  "rayon_threads": {
+    "before": null,
+    "after": null
+  },
+  "corpus": "/private/tmp/fxi-linux-corpus",
+  "indexes": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-4rmtodjl/after/indexes",
+  "mode": "direct",
+  "output_mode": "files",
+  "query_syntax": "regex",
+  "binaries": {
+    "before": {
+      "path": "/private/tmp/fxi-live-docs-baseline",
+      "sha256": "deade6e4720cf44e9cac792992b1389d1efd58fc2c0ec5f5635e3fb8e82785fc"
+    },
+    "after": {
+      "path": "/private/tmp/fxi-path-order-experiment",
+      "sha256": "d1dd4b275e96918fe3c8b7ee5f34268528f298b64005c886572c673c3b071f01"
+    }
+  },
+  "rows": [
+    {
+      "query": "folio_wait_bit_common",
+      "pattern": "folio_wait_bit_common",
+      "files": 1,
+      "tools": {
+        "before": {
+          "median_ms": 12.143167,
+          "samples_ms": [
+            12.654542,
+            12.240209,
+            12.007667,
+            12.060792,
+            12.143167,
+            12.419208,
+            11.945166,
+            12.236542,
+            12.145292,
+            12.119167,
+            11.736916
+          ]
+        },
+        "after": {
+          "median_ms": 12.213417,
+          "samples_ms": [
+            12.363917,
+            12.30525,
+            12.213417,
+            11.980208,
+            12.133916,
+            12.505209,
+            12.061209,
+            12.788958,
+            12.044708,
+            12.463291,
+            12.17775
+          ]
+        }
+      }
+    },
+    {
+      "query": "auditNonexistentSymbol94283",
+      "pattern": "auditNonexistentSymbol94283",
+      "files": 0,
+      "tools": {
+        "before": {
+          "median_ms": 10.50575,
+          "samples_ms": [
+            10.759584,
+            10.459125,
+            10.4805,
+            10.868708,
+            10.079708,
+            10.592416,
+            10.375041,
+            11.19925,
+            10.17775,
+            10.890167,
+            10.50575
+          ]
+        },
+        "after": {
+          "median_ms": 10.680584,
+          "samples_ms": [
+            10.659542,
+            11.250917,
+            10.921708,
+            11.100291,
+            10.513416,
+            11.857708,
+            10.152041,
+            10.366958,
+            10.680584,
+            10.592584,
+            11.218875
+          ]
+        }
+      }
+    },
+    {
+      "query": "struct file_operations",
+      "pattern": "struct file_operations",
+      "files": 1240,
+      "tools": {
+        "before": {
+          "median_ms": 41.535667,
+          "samples_ms": [
+            40.678625,
+            41.270833,
+            41.535667,
+            38.637833,
+            46.240667,
+            40.229208,
+            44.392834,
+            46.408541,
+            41.986625,
+            41.233459,
+            44.232209
+          ]
+        },
+        "after": {
+          "median_ms": 44.287709,
+          "samples_ms": [
+            40.846167,
+            45.680125,
+            42.849584,
+            45.380625,
+            43.782792,
+            43.544708,
+            45.040791,
+            43.66475,
+            45.973041,
+            44.287709,
+            45.740208
+          ]
+        }
+      }
+    },
+    {
+      "query": "return",
+      "pattern": "return",
+      "files": 44261,
+      "tools": {
+        "before": {
+          "median_ms": 398.144791,
+          "samples_ms": [
+            398.985708,
+            400.428125,
+            403.849625,
+            386.676084,
+            395.182958,
+            398.144791,
+            425.359583,
+            398.636625,
+            396.759625,
+            387.225708,
+            391.916083
+          ]
+        },
+        "after": {
+          "median_ms": 394.0615,
+          "samples_ms": [
+            416.512292,
+            389.062041,
+            394.0615,
+            414.119333,
+            384.803375,
+            382.24875,
+            394.168208,
+            411.647083,
+            378.132291,
+            386.106708,
+            401.746833
+          ]
+        }
+      }
+    }
+  ]
+}
