@@ -43,6 +43,26 @@ pub fn is_known_binary_ext(ext: &str) -> bool {
     )
 }
 
+/// Largest-first scheduling avoids concentrating byte-heavy directories in
+/// one segment. Path-order ties make parallel discovery deterministic.
+fn balance_chunks<T: Ord>(mut entries: Vec<(u64, T)>, max_files: usize) -> Vec<Vec<T>> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    assert!(max_files > 0);
+    let count = entries.len().div_ceil(max_files);
+    let mut chunks: Vec<Vec<T>> = (0..count).map(|_| Vec::new()).collect();
+    let mut queue: BinaryHeap<_> = (0..count).map(|id| Reverse((0u64, id))).collect();
+    entries.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    for (bytes, entry) in entries {
+        let Reverse((total, id)) = queue.pop().expect("remaining chunk capacity");
+        chunks[id].push(entry);
+        if chunks[id].len() < max_files {
+            queue.push(Reverse((total.saturating_add(bytes), id)));
+        }
+    }
+    chunks
+}
+
 /// Result of processing a single file (computed in parallel)
 pub struct ProcessedFile<T = Vec<String>> {
     pub rel_path: PathBuf,
@@ -289,6 +309,35 @@ pub fn build_index_with_options(
         None => config.chunk_size,
     };
 
+    // Metadata weights prevent one fixed-file-count batch from retaining
+    // a disproportionately large token/position expansion. Keep the existing
+    // number of segments and file-count limit.
+    let chunks = if file_entries.len() <= chunk_size {
+        if file_entries.is_empty() {
+            Vec::new()
+        } else {
+            vec![file_entries]
+        }
+    } else {
+        let weighted = file_entries
+            .into_par_iter()
+            .map(|entry| {
+                let ext = entry.1.extension().and_then(|s| s.to_str()).unwrap_or("");
+                let size = if is_known_binary_ext(ext) {
+                    0
+                } else {
+                    fs::metadata(&entry.0)
+                        .ok()
+                        .map(|m| m.len())
+                        .filter(|&size| size <= max_file_size)
+                        .unwrap_or(0)
+                };
+                (size, entry)
+            })
+            .collect();
+        balance_chunks(weighted, chunk_size)
+    };
+
     // Phase 2: Process in chunks
     let mut chunked_writer = ChunkedIndexWriter::new(&root, config)?;
     let error_count = Arc::new(AtomicUsize::new(0));
@@ -310,7 +359,7 @@ pub fn build_index_with_options(
         );
     }
 
-    for (chunk_idx, chunk) in file_entries.chunks(chunk_size).enumerate() {
+    for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let segment_id = (chunk_idx + 1) as SegmentId;
 
         // Create progress bar for this chunk
@@ -956,6 +1005,39 @@ pub fn build_index_auto(start_path: &Path, force: bool, chunk_size: Option<usize
 #[cfg(test)]
 mod encoding_tests {
     use super::*;
+
+    #[test]
+    fn balanced_chunks_preserve_files_limits_and_determinism() {
+        for count in [0usize, 1, 7, 100, 4097] {
+            for limit in [1, 7, 2000] {
+                let entries: Vec<_> = (0..count).map(|id| ((id % 17) as u64, id)).collect();
+                let chunks = balance_chunks(entries.clone(), limit);
+                assert_eq!(chunks.len(), count.div_ceil(limit));
+                assert!(chunks.iter().all(|c| !c.is_empty() && c.len() <= limit));
+                let mut actual: Vec<_> = chunks.iter().flatten().copied().collect();
+                actual.sort_unstable();
+                assert_eq!(actual, (0..count).collect::<Vec<_>>());
+                assert_eq!(
+                    chunks,
+                    balance_chunks(entries.into_iter().rev().collect(), limit)
+                );
+            }
+        }
+        let sizes: Vec<u64> = (0..6000).map(|i| if i < 2000 { 1000 } else { 1 }).collect();
+        let chunks = balance_chunks(
+            sizes
+                .iter()
+                .enumerate()
+                .map(|(id, &size)| (size, id))
+                .collect(),
+            2000,
+        );
+        let loads: Vec<u64> = chunks
+            .iter()
+            .map(|c| c.iter().map(|&id| sizes[id]).sum())
+            .collect();
+        assert!(loads.iter().max().unwrap() - loads.iter().min().unwrap() <= 1000);
+    }
 
     #[test]
     fn index_eligibility_matches_utf8_verification() {
