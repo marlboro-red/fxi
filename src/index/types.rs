@@ -193,6 +193,7 @@ pub struct Document {
     pub doc_id: DocId,
     pub path_id: PathId,
     pub size: u64,
+    /// Unix modification time in nanoseconds (normalized on read for legacy indexes).
     pub mtime: u64,
     pub language: Language,
     pub flags: DocFlags,
@@ -200,6 +201,9 @@ pub struct Document {
 }
 
 impl Document {
+    pub fn mtime_seconds(&self) -> u64 {
+        self.mtime / 1_000_000_000
+    }
     /// Size of a document entry in bytes (fixed-size for mmap)
     #[allow(dead_code)]
     pub const SIZE: usize = 4 + 4 + 8 + 8 + 2 + 2 + 2; // 30 bytes
@@ -247,7 +251,7 @@ pub struct IndexMeta {
 impl Default for IndexMeta {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             root_path: PathBuf::new(),
             doc_count: 0,
             segment_count: 0,

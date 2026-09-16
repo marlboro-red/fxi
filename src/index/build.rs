@@ -396,7 +396,12 @@ pub fn build_index_with_options(
                 // Get modification time
                 let mtime = metadata
                     .modified()
-                    .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
+                    .map(|t| {
+                        t.duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos()
+                            .min(u64::MAX as u128) as u64
+                    })
                     .unwrap_or(0);
 
                 // Process file content (trigrams, tokens, line map)
@@ -542,12 +547,12 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
     let reader = IndexReader::open(&root)?;
 
     // Build map of indexed files: rel_path -> (doc_id, mtime)
-    let mut indexed_files: HashMap<PathBuf, (u32, u64)> = HashMap::new();
+    let mut indexed_files: HashMap<PathBuf, (u32, u64, u64)> = HashMap::new();
     for doc_id in reader.valid_doc_ids().iter() {
         if let Some(doc) = reader.get_document(doc_id)
             && let Some(path) = reader.get_path(doc)
         {
-            indexed_files.insert(path.clone(), (doc_id, doc.mtime));
+            indexed_files.insert(path.clone(), (doc_id, doc.mtime, doc.size));
         }
     }
 
@@ -598,7 +603,7 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
 /// Compute the difference between indexed files and filesystem
 fn compute_index_diff(
     root: &Path,
-    indexed_files: &HashMap<PathBuf, (u32, u64)>,
+    indexed_files: &HashMap<PathBuf, (u32, u64, u64)>,
     rejected: &HashMap<PathBuf, u64>,
 ) -> Result<IndexDiff> {
     let config = IndexConfig::default();
@@ -606,17 +611,17 @@ fn compute_index_diff(
 
     // Walk the filesystem in parallel: the per-file metadata() stat dominates
     // the scan on large trees, so it runs on the walker threads
-    let scanned: Vec<(PathBuf, PathBuf, u64)> = {
-        let entries: Arc<Mutex<Vec<(PathBuf, PathBuf, u64)>>> =
+    let scanned: Vec<(PathBuf, PathBuf, u64, u64)> = {
+        let entries: Arc<Mutex<Vec<(PathBuf, PathBuf, u64, u64)>>> =
             Arc::new(Mutex::new(Vec::with_capacity(indexed_files.len())));
 
         struct ScanVisitor {
             root: PathBuf,
             max_file_size: u64,
-            shared: Arc<Mutex<Vec<(PathBuf, PathBuf, u64)>>>,
+            shared: Arc<Mutex<Vec<(PathBuf, PathBuf, u64, u64)>>>,
             // Batch into a thread-local vec; take the shared lock once per
             // walker thread instead of once per file
-            local: Vec<(PathBuf, PathBuf, u64)>,
+            local: Vec<(PathBuf, PathBuf, u64, u64)>,
         }
 
         impl ScanVisitor {
@@ -654,10 +659,16 @@ fn compute_index_diff(
                 {
                     let mtime = metadata
                         .modified()
-                        .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
+                        .map(|t| {
+                            t.duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos()
+                                .min(u64::MAX as u128) as u64
+                        })
                         .unwrap_or(0);
                     let rel_path = rel_path.to_path_buf();
-                    self.local.push((entry.into_path(), rel_path, mtime));
+                    self.local
+                        .push((entry.into_path(), rel_path, mtime, metadata.len()));
                 }
                 ignore::WalkState::Continue
             }
@@ -672,7 +683,7 @@ fn compute_index_diff(
         struct ScanBuilder {
             root: PathBuf,
             max_file_size: u64,
-            shared: Arc<Mutex<Vec<(PathBuf, PathBuf, u64)>>>,
+            shared: Arc<Mutex<Vec<(PathBuf, PathBuf, u64, u64)>>>,
         }
 
         impl<'s> ignore::ParallelVisitorBuilder<'s> for ScanBuilder {
@@ -723,12 +734,12 @@ fn compute_index_diff(
     let mut seen_paths: std::collections::HashSet<&Path> =
         std::collections::HashSet::with_capacity(scanned.len());
 
-    for (full_path, rel_path, current_mtime) in &scanned {
+    for (full_path, rel_path, current_mtime, current_size) in &scanned {
         seen_paths.insert(rel_path.as_path());
 
-        if let Some(&(doc_id, indexed_mtime)) = indexed_files.get(rel_path) {
+        if let Some(&(doc_id, indexed_mtime, indexed_size)) = indexed_files.get(rel_path) {
             // File exists in index - check if modified
-            if *current_mtime != indexed_mtime {
+            if *current_mtime != indexed_mtime || *current_size != indexed_size {
                 modified_files.push((full_path.clone(), rel_path.clone(), doc_id));
             }
         } else if rejected.get(rel_path) == Some(current_mtime) {
@@ -778,7 +789,12 @@ fn process_file_for_update(
     // against this for change detection)
     let mtime = metadata
         .modified()
-        .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
+        .map(|t| {
+            t.duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .min(u64::MAX as u128) as u64
+        })
         .unwrap_or(0);
 
     let content = fs::read(full_path).ok()?;
@@ -836,7 +852,12 @@ fn perform_incremental_update(root: &Path, meta: &IndexMeta, diff: IndexDiff) ->
                     let mtime = fs::metadata(full)
                         .ok()
                         .and_then(|m| m.modified().ok())
-                        .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
+                        .map(|t| {
+                            t.duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos()
+                                .min(u64::MAX as u128) as u64
+                        })
                         .unwrap_or(0);
                     Err(((*rel).clone(), mtime))
                 }

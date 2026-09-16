@@ -890,12 +890,12 @@ impl<'a> QueryExecutor<'a> {
 
                 // Modification time filters
                 if let Some(min) = filter.mtime_min
-                    && doc.mtime < min
+                    && doc.mtime_seconds() < min
                 {
                     return;
                 }
                 if let Some(max) = filter.mtime_max
-                    && doc.mtime > max
+                    && doc.mtime_seconds() > max
                 {
                     return;
                 }
@@ -1004,7 +1004,7 @@ impl<'a> QueryExecutor<'a> {
                             self.reader.get_full_path(doc).map(|full_path| {
                                 let rel_path =
                                     self.reader.get_path(doc).cloned().unwrap_or_default();
-                                (doc_id, full_path, rel_path, doc.mtime, Vec::new())
+                                (doc_id, full_path, rel_path, doc.mtime_seconds(), Vec::new())
                             })
                         })
                     })
@@ -1023,7 +1023,7 @@ impl<'a> QueryExecutor<'a> {
                 self.reader.get_document(doc_id).and_then(|doc| {
                     self.reader.get_full_path(doc).map(|full_path| {
                         let rel_path = self.reader.get_path(doc).cloned().unwrap_or_default();
-                        (doc_id, full_path, rel_path, doc.mtime)
+                        (doc_id, full_path, rel_path, doc.mtime_seconds())
                     })
                 })
             })

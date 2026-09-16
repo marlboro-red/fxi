@@ -392,7 +392,7 @@ impl IndexReader {
         let meta_file = File::open(&meta_path).context("Failed to open meta.json")?;
         let meta: IndexMeta = serde_json::from_reader(meta_file)?;
         anyhow::ensure!(
-            meta.version == 1,
+            matches!(meta.version, 1 | 2),
             "Unsupported index version {}; rebuild the index",
             meta.version
         );
@@ -874,6 +874,8 @@ impl IndexReader {
 
 /// Read documents from docs.bin
 pub fn read_documents(index_path: &Path) -> Result<Vec<Document>> {
+    let meta: IndexMeta = serde_json::from_reader(File::open(index_path.join("meta.json"))?)?;
+
     let docs_path = index_path.join("docs.bin");
     let mut file = BufReader::new(File::open(&docs_path)?);
 
@@ -898,7 +900,14 @@ pub fn read_documents(index_path: &Path) -> Result<Vec<Document>> {
         let size = u64::from_le_bytes(buf8);
 
         file.read_exact(&mut buf8)?;
-        let mtime = u64::from_le_bytes(buf8);
+        let raw_mtime = u64::from_le_bytes(buf8);
+        // Legacy full builds used seconds, but legacy watcher deltas already
+        // used nanoseconds. Normalize both when importing that mixed format.
+        let mtime = if meta.version == 1 && raw_mtime < 1_000_000_000_000 {
+            raw_mtime.saturating_mul(1_000_000_000)
+        } else {
+            raw_mtime
+        };
 
         file.read_exact(&mut buf2)?;
         let lang_val = u16::from_le_bytes(buf2);

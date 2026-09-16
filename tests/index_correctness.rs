@@ -209,3 +209,61 @@ fn concurrent_opens_observe_complete_rebuild_generations() {
     }
     worker.join().unwrap();
 }
+
+#[test]
+fn incremental_scan_detects_subsecond_and_same_stamp_size_changes() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let fixture = Fixture::new();
+    let path = fixture.0.path().join("a.txt");
+    for i in 0..10 {
+        fs::write(fixture.0.path().join(format!("filler{i}.txt")), "other").unwrap();
+    }
+    let stamp = UNIX_EPOCH + Duration::new(1_700_000_000, 100_000_000);
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(stamp))
+        .unwrap();
+    build_index_with_options(fixture.0.path(), true, true, None).unwrap();
+    for (text, nanos) in [
+        ("changed content", 200_000_000),
+        ("much longer changed content", 200_000_000),
+    ] {
+        fs::write(&path, text).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::new(1_700_000_000, nanos)),
+            )
+            .unwrap();
+        fxi::index::build::update_index(fixture.0.path()).unwrap();
+        let reader = IndexReader::open(fixture.0.path()).unwrap();
+        let docs = reader.get_token_docs("changed") & reader.valid_doc_ids();
+        assert_eq!(docs.len(), 1);
+        let doc = reader.get_document(docs.min().unwrap()).unwrap();
+        assert_eq!(doc.size, text.len() as u64);
+        assert_eq!(doc.mtime_seconds(), 1_700_000_000);
+        assert_eq!(doc.mtime, 1_700_000_000_000_000_000 + nanos as u64);
+    }
+}
+
+#[test]
+fn legacy_seconds_and_watcher_nanoseconds_normalize_on_read() {
+    for raw in [1_700_000_000_u64, 1_700_000_000_000_000_000_u64] {
+        let fixture = Fixture::new();
+        let index = fixture.index();
+        let mut meta: serde_json::Value =
+            serde_json::from_slice(&fs::read(index.join("meta.json")).unwrap()).unwrap();
+        meta["version"] = 1.into();
+        fs::write(index.join("meta.json"), serde_json::to_vec(&meta).unwrap()).unwrap();
+        let mut docs = fs::read(index.join("docs.bin")).unwrap();
+        docs[20..28].copy_from_slice(&raw.to_le_bytes());
+        fs::write(index.join("docs.bin"), docs).unwrap();
+        let reader = IndexReader::open(fixture.0.path()).unwrap();
+        assert_eq!(reader.documents()[0].mtime, 1_700_000_000_000_000_000);
+        assert_eq!(reader.documents()[0].mtime_seconds(), 1_700_000_000);
+    }
+}

@@ -1157,7 +1157,12 @@ fn process_file_for_delta(
     // Get modification time
     let mtime = metadata
         .modified()
-        .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64)
+        .map(|t| {
+            t.duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .min(u64::MAX as u128) as u64
+        })
         .unwrap_or(0);
 
     Some(ProcessedFile {

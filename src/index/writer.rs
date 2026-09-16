@@ -821,7 +821,7 @@ impl ChunkedIndexWriter {
         let delta_baseline = delta_segments.len();
 
         let meta = IndexMeta {
-            version: 1,
+            version: 2,
             root_path: self.root_path.clone(),
             doc_count: self.all_documents.len() as u32,
             segment_count: self.segment_ids.len() as u16,
@@ -1068,6 +1068,7 @@ impl DeltaSegmentWriter {
         write_paths_atomic(&self.index_path, &all_paths)?;
 
         // Update meta
+        meta.version = 2;
         meta.doc_count = all_documents.len() as u32;
         if has_new_documents {
             meta.delta_segments.push(self.segment_id);

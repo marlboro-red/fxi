@@ -159,7 +159,7 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
         .as_secs();
 
     let new_meta = IndexMeta {
-        version: meta.version,
+        version: 2,
         root_path: meta.root_path,
         doc_count: remapping.valid_docs.len() as u32,
         segment_count: 1,
