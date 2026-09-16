@@ -66,6 +66,21 @@ fn should_use_parallel(candidate_count: usize) -> bool {
     candidate_count > parallel_threshold
 }
 
+/// Limit concurrent source-file reads independently of indexing parallelism.
+/// More outstanding opens can increase filesystem contention, even on a warm
+/// cache. The default is conservative; the profiling harness can sweep it.
+fn search_batch_size(candidate_count: usize) -> usize {
+    static PARALLELISM: OnceLock<usize> = OnceLock::new();
+    let tasks = *PARALLELISM.get_or_init(|| {
+        std::env::var("FXI_SEARCH_PARALLELISM")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or_else(|| get_num_threads().min(4))
+    });
+    (candidate_count / tasks).max(1)
+}
+
 /// Editable files must be owned snapshots: a concurrent truncate or rewrite
 /// must not invalidate a mapped page or a previously validated UTF-8 borrow.
 fn read_file_content(path: &Path) -> Option<FileContent> {
@@ -442,16 +457,17 @@ impl<'a> QueryExecutor<'a> {
             }
             results
         } else {
-            // Parallel processing with early termination and memory-mapped I/O
+            // Parallel processing with early termination and owned content snapshots
             candidate_infos
                 .into_par_iter()
+                .with_min_len(search_batch_size(candidate_count))
                 .filter_map(|(_doc_id, full_path, rel_path)| {
                     // Early termination check
                     if match_count.load(Ordering::Relaxed) >= effective_limit {
                         return None;
                     }
 
-                    // Read file content using mmap for large files
+                    // Read an owned snapshot of editable file content
                     let content = read_file_content(&full_path)?;
 
                     // Check if file has ANY match
@@ -1133,12 +1149,12 @@ impl<'a> QueryExecutor<'a> {
             }
             results
         } else {
-            // Large result set: use parallel memory-mapped reads with early termination
+            // Large result set: parallel owned reads with early termination
             let match_count = AtomicUsize::new(0);
 
             candidate_infos
                 .into_par_iter()
-                .with_min_len(4)
+                .with_min_len(search_batch_size(candidate_count))
                 .filter_map(|(doc_id, full_path, rel_path, mtime)| {
                     // Early termination check
                     if let Some(target) = target_matches
