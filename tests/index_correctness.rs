@@ -267,3 +267,26 @@ fn legacy_seconds_and_watcher_nanoseconds_normalize_on_read() {
         assert_eq!(reader.documents()[0].mtime_seconds(), 1_700_000_000);
     }
 }
+
+#[test]
+fn impossible_record_counts_and_path_lengths_fail_before_allocation() {
+    for name in [
+        "docs.bin",
+        "paths.bin",
+        "segments/seg_0001/grams.dict",
+        "segments/seg_0001/tokens.dict",
+    ] {
+        let fixture = Fixture::new();
+        let path = fixture.index().join(name);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+        assert!(IndexReader::open(fixture.0.path()).is_err(), "{name}");
+    }
+    let fixture = Fixture::new();
+    let path = fixture.index().join("paths.bin");
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    fs::write(path, bytes).unwrap();
+    assert!(IndexReader::open(fixture.0.path()).is_err());
+}

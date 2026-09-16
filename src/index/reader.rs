@@ -917,6 +917,21 @@ impl IndexReader {
     }
 }
 
+/// Reject impossible on-disk counts before using them as allocation sizes.
+fn validate_disk_count(
+    file: &BufReader<File>,
+    count: usize,
+    header: u64,
+    minimum_record: u64,
+) -> Result<u64> {
+    let bytes = file.get_ref().metadata()?.len().saturating_sub(header);
+    anyhow::ensure!(
+        count as u64 <= bytes / minimum_record,
+        "Index count exceeds file bounds"
+    );
+    Ok(bytes)
+}
+
 /// Read documents from docs.bin
 pub fn read_documents(index_path: &Path) -> Result<Vec<Document>> {
     let meta: IndexMeta = serde_json::from_reader(File::open(index_path.join("meta.json"))?)?;
@@ -932,6 +947,7 @@ pub fn read_documents(index_path: &Path) -> Result<Vec<Document>> {
     file.read_exact(&mut buf4)?;
     let count = u32::from_le_bytes(buf4) as usize;
 
+    validate_disk_count(&file, count, 4, 30)?;
     let mut documents = Vec::with_capacity(count);
 
     for _ in 0..count {
@@ -989,6 +1005,7 @@ pub fn read_paths(index_path: &Path) -> Result<Vec<PathBuf>> {
     file.read_exact(&mut buf4)?;
     let count = u32::from_le_bytes(buf4) as usize;
 
+    let mut remaining = validate_disk_count(&file, count, 4, 4)?;
     let mut paths = Vec::with_capacity(count);
 
     for _ in 0..count {
@@ -996,6 +1013,9 @@ pub fn read_paths(index_path: &Path) -> Result<Vec<PathBuf>> {
         file.read_exact(&mut buf4)?;
         let len = u32::from_le_bytes(buf4) as usize;
 
+        remaining = remaining.checked_sub(4).context("Truncated path record")?;
+        anyhow::ensure!(len as u64 <= remaining, "Path length exceeds file bounds");
+        remaining -= len as u64;
         // Read path bytes
         let mut path_bytes = vec![0u8; len];
         file.read_exact(&mut path_bytes)?;
@@ -1020,6 +1040,7 @@ fn read_trigram_dict(segment_path: &Path) -> Result<TrigramDict> {
     file.read_exact(&mut buf4)?;
     let count = u32::from_le_bytes(buf4) as usize;
 
+    validate_disk_count(&file, count, 4, 20)?;
     let mut entries = Vec::with_capacity(count);
 
     for _ in 0..count {
@@ -1067,6 +1088,7 @@ fn read_token_dict(segment_path: &Path, has_positions: bool) -> Result<TokenDict
     file.read_exact(&mut buf4)?;
     let count = u32::from_le_bytes(buf4) as usize;
 
+    validate_disk_count(&file, count, 4, if has_positions { 30 } else { 18 })?;
     let mut entries = Vec::with_capacity(count);
 
     for i in 0..count {
@@ -1139,6 +1161,7 @@ fn read_line_maps(segment_path: &Path) -> Result<HashMap<DocId, Vec<u32>>> {
     file.read_exact(&mut buf4)?;
     let count = u32::from_le_bytes(buf4) as usize;
 
+    let mut remaining = validate_disk_count(&file, count, 4, 12)?;
     let mut line_maps = HashMap::with_capacity(count);
 
     for _ in 0..count {
@@ -1154,6 +1177,14 @@ fn read_line_maps(segment_path: &Path) -> Result<HashMap<DocId, Vec<u32>>> {
         file.read_exact(&mut buf4)?;
         let encoded_len = u32::from_le_bytes(buf4) as usize;
 
+        remaining = remaining
+            .checked_sub(12)
+            .context("Truncated line map record")?;
+        anyhow::ensure!(
+            encoded_len as u64 <= remaining,
+            "Line map length exceeds file bounds"
+        );
+        remaining -= encoded_len as u64;
         // encoded data
         let mut encoded = vec![0u8; encoded_len];
         file.read_exact(&mut encoded)?;
@@ -1188,6 +1219,8 @@ fn read_bloom_filter(segment_path: &Path) -> Result<BloomFilter> {
     file.read_exact(&mut buf4)?;
     let num_words = u32::from_le_bytes(buf4) as usize;
 
+    validate_disk_count(&file, num_words, 5, 8)?;
+    anyhow::ensure!(num_words > 0, "Empty bloom filter");
     // Read bit data
     let mut bits = Vec::with_capacity(num_words);
     for _ in 0..num_words {
