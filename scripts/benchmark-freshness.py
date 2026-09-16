@@ -93,6 +93,18 @@ for rep in range(args.repetitions):
             time.sleep(.1)
         visible_log = log_path.read_text()
         after_last_edit = time.monotonic() - last_edit
+        # Preserve the old match while forcing another posting update. A
+        # fresh marker proves the daemon loaded that update before we check
+        # that old segment entries did not produce duplicate paths.
+        retained_marker = f'freshnessRetainedMarker{rep}Z73'
+        assert search(retained_marker) == set()
+        (root / 'file_001.rs').write_text(needle + '\n' + retained_marker + '\n')
+        deadline = time.monotonic() + args.timeout
+        while search(retained_marker) != {'file_001.rs'}:
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Retained-match edit was not indexed')
+            time.sleep(.1)
+        assert search(needle) == expected
         # Deletion/replacement must remove old results as well.
         (root / 'new.rs').unlink()
         (root / 'file_001.rs').write_text('replacement without the needle\n')

@@ -1,0 +1,34 @@
+{
+  "bulk_samples_ms": [
+    41.604166,
+    40.51925,
+    40.121292000000004,
+    41.339208,
+    40.451083,
+    40.105875,
+    40.460125,
+    39.633583,
+    81.019875,
+    40.972084,
+    40.145667
+  ],
+  "corpus": "/private/tmp/fxi-linux-corpus",
+  "directories": 4428,
+  "files": 65287,
+  "grouping_ms": 20.002083,
+  "note": "Primitive experiment only. Directory grouping is reported separately and reused; discovery and equality checks are outside timing. Every dev/inode/size/mtime/ctime/birthtime agrees with std metadata on the static fixture. No production integration or whole-query speed claim.",
+  "stat_samples_ms": [
+    41.345625,
+    41.936415999999994,
+    41.615917,
+    42.168290999999996,
+    40.472750000000005,
+    41.621166,
+    41.66308299999999,
+    41.662209,
+    40.884041,
+    40.187917,
+    41.231249999999996
+  ],
+  "threads": 8
+}

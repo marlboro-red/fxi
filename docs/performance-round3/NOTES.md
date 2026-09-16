@@ -94,3 +94,35 @@ A larger screening fixture copies the controlled Linux corpus, adds the same
 that large-root reconciliation remains a gap, not a precise speed ratio.
 All probes check exact new/edited/removal results through real daemons. Raw
 records include binary and harness hashes. These are warm-storage measurements.
+
+## Tombstones and retained-match validation
+
+`b170d71` fixes a query correctness bug: gram/token candidate plans could retain
+old document IDs after incremental updates. Verifying old IDs against the current
+path duplicated matches when an edit retained the searched text. Deleted paths
+recreated with ignored content could also be resurrected through old postings.
+Every candidate plan now intersects the immutable live-document bitmap before
+verification. Regression coverage exercises three successive updates, five query
+forms, files/counts/content/ranked output and ignored-path recreation.
+
+The native-watcher probe now preserves an existing match while adding a second
+marker. It waits until the marker is searchable, then verifies that the retained
+match has no duplicate paths. Three fresh fixtures pass
+(`freshness-live-docs-validation.json`). Full tests, strict Clippy, release and
+Rust 1.88 checks pass.
+
+## Bulk metadata experiment: not adopted
+
+`examples/metadata_lab.rs` compares parallel per-file metadata with macOS
+`getattrlistbulk` directory batches. It verifies every regular-file stamp against
+standard metadata outside timing, including device/inode, length and timestamp
+fields. Native tests span multiple buffers, Unicode names, symlinks and short
+directory records; malformed records are checked for panics. The API and layout
+come from Apple's [manual](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/getattrlistbulk.2)
+and [attribute definitions](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/attr.h).
+
+Eleven interleaved Linux-fixture samples: **41.616 ms standard versus 40.460 ms
+bulk** (`linux-metadata-batching.json`), with 20.002 ms of reusable grouping work
+measured separately. This is effectively neutral and offers no demonstrated
+whole-query gain. The prototype remains an offline experiment; production source
+reads and reconciliation do not use it.
