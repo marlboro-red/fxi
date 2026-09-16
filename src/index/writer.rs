@@ -29,7 +29,7 @@ struct AssignedFile {
 /// Token postings in dictionary order, then document/position order.
 struct InvertedTokens {
     postings: Vec<(u32, DocId)>,
-    positions: Vec<(u32, DocId, u32)>,
+    positions: Vec<Vec<u8>>,
     symbols: Vec<String>,
 }
 
@@ -40,7 +40,12 @@ fn invert_token_postings(files: &mut [AssignedFile]) -> InvertedTokens {
     debug_assert!(files.windows(2).all(|f| f[0].doc_id < f[1].doc_id));
     let mut ids = ahash::AHashMap::<String, u32>::new();
     let mut counts = Vec::<usize>::new();
-    let mut position_counts = Vec::<usize>::new();
+    let mut positions = Vec::<Vec<u8>>::new();
+    let mut previous_docs = Vec::<DocId>::new();
+    let mut file_slots = Vec::<usize>::new();
+    let mut starts = Vec::<usize>::new();
+    let mut cursors = Vec::<usize>::new();
+    let mut grouped = Vec::<u32>::new();
     let mut local_ids = Vec::with_capacity(files.len());
     for file in files.iter_mut() {
         let mut local = Vec::with_capacity(file.tokens.len());
@@ -54,13 +59,54 @@ fn invert_token_postings(files: &mut [AssignedFile]) -> InvertedTokens {
             };
             if id == next {
                 counts.push(0);
-                position_counts.push(0);
+                positions.push(Vec::new());
+                previous_docs.push(0);
+                file_slots.push(0);
             }
             counts[id as usize] += 1;
             local.push(id);
         }
-        for &(idx, _) in &file.token_positions {
-            position_counts[local[idx as usize] as usize] += 1;
+        // Canonicalize duplicate local symbols supplied by API callers: all
+        // occurrences of one global token belong in a single document entry.
+        for (slot, &id) in local.iter().enumerate() {
+            file_slots[id as usize] = slot;
+        }
+        let mut occurrences = std::mem::take(&mut file.token_positions);
+        if !occurrences.is_sorted_by_key(|&(_, pos)| pos) {
+            occurrences.sort_unstable_by_key(|&(_, pos)| pos);
+        }
+        starts.clear();
+        starts.resize(local.len() + 1, 0);
+        for &(idx, _) in &occurrences {
+            starts[file_slots[local[idx as usize] as usize] + 1] += 1;
+        }
+        for i in 1..starts.len() {
+            starts[i] += starts[i - 1];
+        }
+        cursors.clone_from(&starts);
+        grouped.resize(occurrences.len(), 0);
+        for (idx, pos) in occurrences {
+            let slot = file_slots[local[idx as usize] as usize];
+            grouped[cursors[slot]] = pos;
+            cursors[slot] += 1;
+        }
+        // Compress in document order immediately. Only one file's positions
+        // need a grouping buffer; no segment-wide occurrence triples exist.
+        for (slot, &id) in local.iter().enumerate() {
+            let values = &grouped[starts[slot]..starts[slot + 1]];
+            if values.is_empty() {
+                continue;
+            }
+            let id = id as usize;
+            let encoded = &mut positions[id];
+            crate::utils::encode_varint(file.doc_id - previous_docs[id], encoded);
+            crate::utils::encode_varint(values.len() as u32, encoded);
+            let mut previous = 0;
+            for &pos in values {
+                crate::utils::encode_varint(pos - previous, encoded);
+                previous = pos;
+            }
+            previous_docs[id] = file.doc_id;
         }
         local_ids.push(local);
     }
@@ -72,37 +118,26 @@ fn invert_token_postings(files: &mut [AssignedFile]) -> InvertedTokens {
     order.par_sort_unstable_by(|&a, &b| symbols[a].cmp(&symbols[b]));
     let mut ranks = vec![0u32; symbols.len()];
     let mut offsets = vec![0usize; symbols.len()];
-    let mut position_offsets = vec![0usize; symbols.len()];
-    let (mut total, mut position_total) = (0, 0);
+    let mut total = 0;
     for (rank, &id) in order.iter().enumerate() {
         ranks[id] = rank as u32;
         offsets[id] = total;
-        position_offsets[id] = position_total;
         total += counts[id];
-        position_total += position_counts[id];
     }
     let mut postings = vec![(0, 0); total];
-    let mut positions = vec![(0, 0, 0); position_total];
     for (file, local) in files.iter_mut().zip(local_ids) {
         for &id in &local {
             let id = id as usize;
             postings[offsets[id]] = (ranks[id], file.doc_id);
             offsets[id] += 1;
         }
-        // The tokenizer already emits increasing positions. Preserve support
-        // for callers constructing ProcessedFile with unordered occurrences.
-        if !file.token_positions.is_sorted_by_key(|&(_, pos)| pos) {
-            file.token_positions.sort_unstable_by_key(|&(_, pos)| pos);
-        }
-        for (idx, pos) in std::mem::take(&mut file.token_positions) {
-            let id = local[idx as usize] as usize;
-            positions[position_offsets[id]] = (ranks[id], file.doc_id, pos);
-            position_offsets[id] += 1;
-        }
     }
     InvertedTokens {
         postings,
-        positions,
+        positions: order
+            .iter()
+            .map(|&id| std::mem::take(&mut positions[id]))
+            .collect(),
         symbols: order
             .into_iter()
             .map(|id| std::mem::take(&mut symbols[id]))
@@ -348,7 +383,7 @@ impl ChunkedIndexWriter {
 
         let InvertedTokens {
             postings: token_pairs,
-            positions: position_triples,
+            positions: encoded_positions,
             symbols: symbols_sorted,
         } = invert_token_postings(&mut job.files);
         let trigram_count = job.files.iter().map(|f| f.trigrams.len()).sum();
@@ -416,7 +451,7 @@ impl ChunkedIndexWriter {
                 Self::write_token_index_flat(
                     &job.segment_path,
                     &token_pairs,
-                    &position_triples,
+                    &encoded_positions,
                     &symbols_sorted,
                 )
             });
@@ -520,13 +555,12 @@ impl ChunkedIndexWriter {
     /// Write token index from pre-sorted flat pairs, and token positions file.
     /// The token dict is extended with pos_offset and pos_length fields per entry.
     ///
-    /// `pairs` and `position_triples` are keyed by lexicographic token rank
-    /// (see process_and_write_segment); `symbols_sorted[rank]` is the token
-    /// string. Both lists are sorted, so group order equals dict order.
+    /// `pairs` and compressed `positions` are keyed by lexicographic token
+    /// rank; `symbols_sorted[rank]` is the token string.
     fn write_token_index_flat(
         segment_path: &Path,
         pairs: &[(u32, DocId)],
-        position_triples: &[(u32, DocId, u32)],
+        positions: &[Vec<u8>],
         symbols_sorted: &[String],
     ) -> Result<()> {
         let dict_path = segment_path.join("tokens.dict");
@@ -583,8 +617,6 @@ impl ChunkedIndexWriter {
         dict_file.write_all(&(entry_count as u32).to_le_bytes())?;
         let mut offset = 0u64;
         let mut pos_offset = 0u64;
-        let mut pos_idx = 0usize;
-        let mut pos_buf = Vec::new();
         for (token_rank, enc, doc_freq) in encoded {
             let token_bytes = symbols_sorted[token_rank as usize].as_bytes();
             dict_file.write_all(&(token_bytes.len() as u16).to_le_bytes())?;
@@ -593,33 +625,11 @@ impl ChunkedIndexWriter {
             dict_file.write_all(&(enc.len() as u32).to_le_bytes())?;
             dict_file.write_all(&doc_freq.to_le_bytes())?;
 
-            while pos_idx < position_triples.len() && position_triples[pos_idx].0 < token_rank {
-                pos_idx += 1;
-            }
-            pos_buf.clear();
-            let mut prev_doc = 0;
-            while pos_idx < position_triples.len() && position_triples[pos_idx].0 == token_rank {
-                let doc = position_triples[pos_idx].1;
-                let start = pos_idx;
-                while pos_idx < position_triples.len()
-                    && position_triples[pos_idx].0 == token_rank
-                    && position_triples[pos_idx].1 == doc
-                {
-                    pos_idx += 1;
-                }
-                crate::utils::encode_varint(doc - prev_doc, &mut pos_buf);
-                crate::utils::encode_varint((pos_idx - start) as u32, &mut pos_buf);
-                let mut prev_pos = 0;
-                for &(_, _, pos) in &position_triples[start..pos_idx] {
-                    crate::utils::encode_varint(pos - prev_pos, &mut pos_buf);
-                    prev_pos = pos;
-                }
-                prev_doc = doc;
-            }
+            let pos_buf = &positions[token_rank as usize];
             let entry_pos_offset = if pos_buf.is_empty() { 0 } else { pos_offset };
             dict_file.write_all(&entry_pos_offset.to_le_bytes())?;
             dict_file.write_all(&(pos_buf.len() as u32).to_le_bytes())?;
-            positions_file.write_all(&pos_buf)?;
+            positions_file.write_all(pos_buf)?;
             pos_offset += pos_buf.len() as u64;
             postings_file.write_all(&enc)?;
             offset += enc.len() as u64;
@@ -1223,9 +1233,10 @@ mod tests {
         for file_count in [0, 1, 7, 35] {
             let mut files = Vec::new();
             for doc in 0..file_count {
-                let tokens: Vec<String> = (0..(doc % 11 + 1))
+                let mut tokens: Vec<String> = (0..(doc % 11 + 1))
                     .map(|i| format!("symbol{:03}", (i * 7 + doc) % 19))
                     .collect();
+                tokens.push(tokens[0].clone());
                 // Deliberately reversed positions, repeated occurrences, shared
                 // tokens, and document IDs spanning varint boundaries.
                 let token_positions = (0..doc * 31)
@@ -1270,7 +1281,21 @@ mod tests {
             let inverted = invert_token_postings(&mut files);
             assert_eq!(inverted.symbols, symbols);
             assert_eq!(inverted.postings, expected_pairs);
-            assert_eq!(inverted.positions, expected_positions);
+            let decoded: Vec<_> = inverted
+                .positions
+                .iter()
+                .enumerate()
+                .flat_map(|(rank, bytes)| {
+                    crate::utils::decode_position_postings(bytes)
+                        .into_iter()
+                        .flat_map(move |(doc, positions)| {
+                            positions
+                                .into_iter()
+                                .map(move |pos| (rank as u32, doc, pos))
+                        })
+                })
+                .collect();
+            assert_eq!(decoded, expected_positions);
         }
     }
 
@@ -1282,7 +1307,7 @@ mod tests {
             let temp = TempDir::new().unwrap();
             let symbols: Vec<String> = (0..count).map(|i| format!("token{i:04}")).collect();
             let mut pairs = Vec::new();
-            let mut triples = Vec::new();
+            let mut encoded_positions = Vec::new();
             let mut grams_dict = (count as u32).to_le_bytes().to_vec();
             let mut tokens_dict = grams_dict.clone();
             let mut postings = Vec::new();
@@ -1308,11 +1333,6 @@ mod tests {
                 let pos_offset = positions.len() as u64;
                 if rank % 3 != 0 {
                     let occurrences = [0, 0, 128, 999999];
-                    for doc in docs {
-                        for pos in occurrences {
-                            triples.push((rank, doc, pos));
-                        }
-                    }
                     let refs: Vec<_> = docs
                         .iter()
                         .map(|&doc| (doc, occurrences.as_slice()))
@@ -1326,10 +1346,16 @@ mod tests {
                     tokens_dict.extend_from_slice(&0u64.to_le_bytes());
                     tokens_dict.extend_from_slice(&0u32.to_le_bytes());
                 }
+                encoded_positions.push(positions[pos_offset as usize..].to_vec());
             }
             ChunkedIndexWriter::write_trigram_index_flat(temp.path(), &pairs).unwrap();
-            ChunkedIndexWriter::write_token_index_flat(temp.path(), &pairs, &triples, &symbols)
-                .unwrap();
+            ChunkedIndexWriter::write_token_index_flat(
+                temp.path(),
+                &pairs,
+                &encoded_positions,
+                &symbols,
+            )
+            .unwrap();
             for (name, expected) in [
                 ("grams.dict", &grams_dict),
                 ("grams.postings", &postings),
