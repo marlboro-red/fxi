@@ -365,8 +365,12 @@ impl ChunkedIndexWriter {
         let t_sort = std::time::Instant::now();
 
         // Build bloom filter from sorted unique trigrams only
-        let estimated_trigrams = file_count * 500;
-        let mut bloom_filter = BloomFilter::new(estimated_trigrams.max(10000), 0.01);
+        let unique_trigrams = usize::from(!trigram_pairs.is_empty())
+            + trigram_pairs
+                .windows(2)
+                .filter(|pair| pair[0].0 != pair[1].0)
+                .count();
+        let mut bloom_filter = BloomFilter::new(unique_trigrams, 0.01);
         {
             let mut prev: Option<u32> = None;
             for &(trigram, _) in &trigram_pairs {
@@ -1176,6 +1180,27 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn repeated_documents_do_not_enlarge_the_gram_bloom() {
+        let produce = |copies| {
+            let temp = TempDir::new().unwrap();
+            let mut writer = ChunkedIndexWriter::new(temp.path(), IndexConfig::default()).unwrap();
+            let files = (0..copies)
+                .map(|i| {
+                    create_test_processed_file(&format!("file{i}.rs"), "same shared token sequence")
+                })
+                .collect();
+            writer.write_chunk(1, files).unwrap();
+            writer.finalize().unwrap();
+            let index = crate::utils::get_index_dir(temp.path()).unwrap();
+            let bytes = fs::read(index.join("segments/seg_0001/bloom.bin")).unwrap();
+            drop(writer);
+            let _ = crate::utils::remove_index(temp.path());
+            bytes
+        };
+        assert_eq!(produce(1), produce(32));
+    }
 
     #[test]
     fn stable_token_inversion_matches_full_sort() {
