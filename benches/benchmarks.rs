@@ -180,6 +180,7 @@ fn bench_protocol(c: &mut Criterion) {
         .collect();
     let response = Response::ContentSearch(ContentSearchResponse {
         file_paths: None,
+        file_counts: None,
         matches,
         duration_ms: 12.5,
         files_with_matches: 100,

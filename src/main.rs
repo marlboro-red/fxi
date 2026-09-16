@@ -450,6 +450,7 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
         case_insensitive: opts.ignore_case,
         files_only: opts.files_with_matches, // Optimize for -l mode
         compact_files: opts.files_with_matches,
+        counts_only: opts.count && !opts.files_with_matches,
     };
 
     let color = match opts.color {
@@ -457,6 +458,39 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
         ColorChoice::Never => false,
         ColorChoice::Auto => std::io::stdout().is_terminal(),
     };
+
+    if search_options.counts_only {
+        if let Some(mut client) = server::IndexClient::connect() {
+            match client.content_search(
+                &combined_pattern,
+                Some(&root),
+                opts.max_count,
+                search_options,
+            ) {
+                Ok(response) => {
+                    if let Some(counts) = response.file_counts {
+                        output::print_file_counts(&counts, color)?;
+                    } else {
+                        // Older servers ignore the new option and return full records.
+                        output::print_match_counts(&response.matches, color)?;
+                    }
+                    return Ok(());
+                }
+                Err(e) => eprintln!("Daemon search failed, falling back to direct search: {e}"),
+            }
+        }
+        let reader = index::reader::IndexReader::open_uncached(&root)?;
+        warn_if_stale(&reader, &root);
+        let mut parsed = query::parse_query(&combined_pattern);
+        parsed.options.case_insensitive = opts.ignore_case;
+        let counts = if parsed.is_empty() {
+            Vec::new()
+        } else {
+            query::QueryExecutor::new(&reader).execute_match_counts(&parsed, opts.max_count)?
+        };
+        output::print_file_counts(&counts, color)?;
+        return Ok(());
+    }
 
     // Try to use daemon for warm search
     let matches = if let Some(mut client) = server::IndexClient::connect() {

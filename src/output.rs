@@ -272,9 +272,6 @@ fn print_path_iter<'a>(
 
 /// Print match count per file (for -c flag)
 pub fn print_match_counts(matches: &[ContentMatch], color: bool) -> io::Result<()> {
-    let mut stdout = buffered_stdout(color);
-    let colors = Colors::new();
-
     let mut counts: std::collections::HashMap<&std::path::Path, usize> =
         std::collections::HashMap::new();
 
@@ -285,7 +282,24 @@ pub fn print_match_counts(matches: &[ContentMatch], color: bool) -> io::Result<(
     let mut sorted: Vec<_> = counts.into_iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(b.0));
 
-    for (path, count) in sorted {
+    print_count_iter(sorted, color)
+}
+
+/// Print already aggregated path/count pairs in the supplied order.
+pub fn print_file_counts(counts: &[(std::path::PathBuf, usize)], color: bool) -> io::Result<()> {
+    print_count_iter(
+        counts.iter().map(|(path, count)| (path.as_path(), *count)),
+        color,
+    )
+}
+
+fn print_count_iter<'a>(
+    counts: impl IntoIterator<Item = (&'a std::path::Path, usize)>,
+    color: bool,
+) -> io::Result<()> {
+    let mut stdout = buffered_stdout(color);
+    let colors = Colors::new();
+    for (path, count) in counts {
         stdout.set_color(&colors.path)?;
         write!(stdout, "{}", path.display())?;
         stdout.reset()?;

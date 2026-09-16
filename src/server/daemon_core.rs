@@ -642,6 +642,7 @@ impl IndexServer {
         if parsed.is_empty() {
             return Response::ContentSearch(ContentSearchResponse {
                 file_paths: None,
+                file_counts: None,
                 matches: vec![],
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 files_with_matches: 0,
@@ -673,6 +674,7 @@ impl IndexServer {
                 return Response::ContentSearch(ContentSearchResponse {
                     matches: Vec::new(),
                     file_paths: Some(matching_files),
+                    file_counts: None,
                     duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                     files_with_matches: file_count,
                     resolved_root: Some(root_path.clone()),
@@ -698,10 +700,31 @@ impl IndexServer {
 
             return Response::ContentSearch(ContentSearchResponse {
                 file_paths: None,
+                file_counts: None,
                 matches: match_data,
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 files_with_matches: file_count,
                 resolved_root: Some(root_path.clone()),
+            });
+        }
+
+        if options.counts_only {
+            let counts = match executor.execute_match_counts(&parsed, limit) {
+                Ok(counts) => counts,
+                Err(e) => {
+                    return Response::Error {
+                        message: format!("Search failed: {e}"),
+                    };
+                }
+            };
+            self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
+            return Response::ContentSearch(ContentSearchResponse {
+                files_with_matches: counts.len(),
+                file_counts: Some(counts),
+                file_paths: None,
+                matches: Vec::new(),
+                duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+                resolved_root: Some(root_path),
             });
         }
 
@@ -748,6 +771,7 @@ impl IndexServer {
 
         Response::ContentSearch(ContentSearchResponse {
             file_paths: None,
+            file_counts: None,
             matches: match_data,
             duration_ms: start.elapsed().as_secs_f64() * 1000.0,
             files_with_matches: file_count,
@@ -1117,6 +1141,49 @@ mod tests {
         }
         std::fs::write(root.join("K.txt"), "absent\n").unwrap();
         assert_eq!(search(true, 0), vec![PathBuf::from("with space.txt")]);
+        drop(server);
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn count_responses_preserve_legacy_counts_and_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(root.join(name), "needle needle\nneedle\n").unwrap();
+        }
+        build_index_with_progress(&root, true, true).unwrap();
+        let server = IndexServer::new(false);
+        for limit in [0, 1, 3] {
+            let search = |counts_only| {
+                let response = server.handle_content_search(
+                    "re:/needle/".into(),
+                    Some(root.clone()),
+                    limit,
+                    ContentSearchOptions {
+                        counts_only,
+                        ..Default::default()
+                    },
+                );
+                let Response::ContentSearch(response) = response else {
+                    panic!("search failed")
+                };
+                response
+            };
+            let legacy = search(false);
+            assert!(legacy.file_counts.is_none());
+            let mut expected = std::collections::BTreeMap::new();
+            for m in legacy.matches {
+                *expected.entry(m.path).or_insert(0usize) += 1;
+            }
+            let compact = search(true);
+            assert!(compact.matches.is_empty());
+            assert_eq!(compact.files_with_matches, expected.len());
+            assert_eq!(
+                compact.file_counts.unwrap(),
+                expected.into_iter().collect::<Vec<_>>()
+            );
+        }
         drop(server);
         crate::utils::remove_index(&root).unwrap();
     }

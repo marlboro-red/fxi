@@ -374,6 +374,70 @@ impl<'a> QueryExecutor<'a> {
         Ok(all_results)
     }
 
+    /// Count verified matches without retaining match text or per-line paths.
+    /// `limit` preserves the CLI's global path-ordered match limit; zero is unlimited.
+    pub fn execute_match_counts(
+        &self,
+        query: &Query,
+        limit: usize,
+    ) -> Result<Vec<(PathBuf, usize)>> {
+        let plan = QueryPlan::from_query(query);
+        let candidates = self.execute_plan(&plan)?;
+        let cache_scan = self.reader.should_cache_scan(&candidates);
+        let (line_start, line_end) = Self::extract_line_filter(&plan.steps);
+        let accepts_line = |line: u32| {
+            line_start.is_none_or(|start| line >= start) && line_end.is_none_or(|end| line <= end)
+        };
+        let regex = match &plan.verification {
+            Some(VerificationStep::Regex(pattern)) => get_regex_cache().get_or_compile(pattern),
+            _ => None,
+        };
+        let count_file = |id| {
+            let doc = self.reader.get_document(id)?;
+            let path = self.reader.get_path(doc)?;
+            let count = if let Some(verification) = &plan.verification {
+                let full_path = self.reader.get_full_path(doc)?;
+                let content = self.reader.read_file_for_scan(&full_path, cache_scan)?;
+                if let Some(regex) = &regex {
+                    content
+                        .lines()
+                        .enumerate()
+                        .filter(|(number, line)| {
+                            accepts_line((*number + 1) as u32) && regex.is_match(line)
+                        })
+                        .count()
+                } else {
+                    Self::verify_content_static(&content, verification, id)
+                        .iter()
+                        .filter(|(line, _, _, _)| accepts_line(*line))
+                        .count()
+                }
+            } else {
+                1
+            };
+            (count > 0).then(|| (path.clone(), count))
+        };
+        let ids: Vec<_> = candidates.iter().collect();
+        let mut counts: Vec<_> = if should_use_parallel(ids.len()) {
+            ids.par_iter()
+                .with_min_len(search_batch_size(ids.len()))
+                .filter_map(|&id| count_file(id))
+                .collect()
+        } else {
+            ids.into_iter().filter_map(count_file).collect()
+        };
+        counts.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        if limit != 0 {
+            let mut remaining = limit;
+            counts.retain_mut(|(_, count)| {
+                *count = (*count).min(remaining);
+                remaining -= *count;
+                *count != 0
+            });
+        }
+        Ok(counts)
+    }
+
     /// Execute query returning only unique files that match (optimized for -l mode)
     /// This is much faster than execute_with_content for common patterns because it:
     /// 1. Stops scanning each file after finding the first match
@@ -1723,6 +1787,73 @@ def format_warning(msg: str) -> str:
         let reader = IndexReader::open(&root_path).expect("Failed to open index");
 
         (temp_dir, root_path, reader)
+    }
+
+    #[test]
+    fn aggregated_counts_match_full_content_and_limits() {
+        for file_count in [1, 70] {
+            let dir = TempDir::new().unwrap();
+            for i in 0..file_count {
+                fs::write(
+                    dir.path().join(format!("{i:03}.txt")),
+                    "needle needle\r\n\nKelvin NEEDLE\nother\nneedle",
+                )
+                .unwrap();
+            }
+            crate::index::build::build_index(dir.path(), false).unwrap();
+            let reader = IndexReader::open(dir.path()).unwrap();
+            let executor = QueryExecutor::new(&reader);
+            for pattern in [
+                "re:/needle/",
+                "re:/^$/",
+                "re:/(?i)kelvin/",
+                "re:/^/",
+                "re:/absent/",
+                "re:/needle|other/",
+                "needle",
+                "needle OR other",
+                "needle other",
+                "file:*.txt",
+                "needle line:2-4",
+            ] {
+                let query = parse_query(pattern);
+                let full = executor.execute_with_content(&query, 0, 0).unwrap();
+                for limit in [0, 1, 3, 99] {
+                    let mut expected = std::collections::BTreeMap::new();
+                    for hit in full
+                        .iter()
+                        .take(if limit == 0 { usize::MAX } else { limit })
+                    {
+                        *expected.entry(hit.path.clone()).or_insert(0usize) += 1;
+                    }
+                    assert_eq!(
+                        executor.execute_match_counts(&query, limit).unwrap(),
+                        expected.into_iter().collect::<Vec<_>>(),
+                        "{pattern}, limit={limit}"
+                    );
+                }
+            }
+            let query = parse_query("re:/needle/");
+            assert!(
+                executor
+                    .execute_match_counts(&query, 0)
+                    .unwrap()
+                    .iter()
+                    .all(|(_, count)| *count == 2)
+            );
+            fs::write(dir.path().join("000.txt"), "absent").unwrap();
+            assert_eq!(
+                executor.execute_match_counts(&query, 0).unwrap().len(),
+                file_count - 1
+            );
+            assert!(
+                executor
+                    .execute_match_counts(&parse_query("re:/[/"), 0)
+                    .is_err()
+            );
+            drop(reader);
+            crate::utils::remove_index(dir.path()).unwrap();
+        }
     }
 
     #[test]

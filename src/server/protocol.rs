@@ -29,6 +29,9 @@ pub struct ContentSearchOptions {
     /// preserves old clients; old servers ignore this additional request field.
     #[serde(default)]
     pub compact_files: bool,
+    /// Return per-file counts without transferring individual match records.
+    #[serde(default)]
+    pub counts_only: bool,
 }
 
 /// Request from client to server
@@ -179,6 +182,8 @@ pub struct ContentSearchResponse {
     /// Present only when explicitly negotiated with compact_files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_paths: Option<Vec<PathBuf>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_counts: Option<Vec<(PathBuf, usize)>>,
     pub duration_ms: f64,
     pub files_with_matches: usize,
     /// The resolved codebase root the server used
@@ -341,11 +346,13 @@ mod tests {
         }))
         .unwrap();
         assert!(!old_options.compact_files);
+        assert!(!old_options.counts_only);
         let old_response: ContentSearchResponse = serde_json::from_value(serde_json::json!({
             "matches": [], "duration_ms": 0.0, "files_with_matches": 0
         }))
         .unwrap();
         assert!(old_response.file_paths.is_none());
+        assert!(old_response.file_counts.is_none());
         let paths = vec![
             PathBuf::from("with space/K.rs"),
             PathBuf::from("quote\".rs"),
@@ -353,6 +360,7 @@ mod tests {
         let response = Response::ContentSearch(ContentSearchResponse {
             matches: Vec::new(),
             file_paths: Some(paths.clone()),
+            file_counts: None,
             duration_ms: 0.0,
             files_with_matches: 2,
             resolved_root: None,
@@ -366,6 +374,27 @@ mod tests {
         };
         assert_eq!(decoded.file_paths, Some(paths));
         assert!(decoded.matches.is_empty());
+    }
+
+    #[test]
+    fn count_response_roundtrips() {
+        let counts = vec![(PathBuf::from("space/K.rs"), 123456)];
+        let response = Response::ContentSearch(ContentSearchResponse {
+            matches: Vec::new(),
+            file_paths: None,
+            file_counts: Some(counts.clone()),
+            duration_ms: 0.0,
+            files_with_matches: 1,
+            resolved_root: None,
+        });
+        let mut wire = Vec::new();
+        write_message_with_id(&mut wire, &response, Some("counts")).unwrap();
+        let (decoded, id): (Response, _) = read_message_with_id(&mut Cursor::new(wire)).unwrap();
+        assert_eq!(id.as_deref(), Some("counts"));
+        let Response::ContentSearch(decoded) = decoded else {
+            panic!("wrong response")
+        };
+        assert_eq!(decoded.file_counts, Some(counts));
     }
 
     #[test]
