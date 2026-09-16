@@ -208,24 +208,25 @@ fn main() -> Result<()> {
             // it reconciled at watch start and applies file events as they
             // happen, so a scan here would only race its delta writes.
             // --force still rebuilds locally.
-            if !force && chunk_size.is_none() {
-                if let Some(mut client) = server::IndexClient::connect() {
-                    let root = utils::find_codebase_root(&path)?;
-                    if let Ok((true, pending)) = client.watch_status(Some(&root)) {
-                        if pending == 0 {
-                            println!(
-                                "Index is watched by the daemon and up to date: {}",
-                                root.display()
-                            );
-                        } else {
-                            println!(
-                                "Index is watched by the daemon; {} pending change(s) will be flushed shortly: {}",
-                                pending,
-                                root.display()
-                            );
-                        }
-                        return Ok(());
+            if !force
+                && chunk_size.is_none()
+                && let Some(mut client) = server::IndexClient::connect()
+            {
+                let root = utils::find_codebase_root(&path)?;
+                if let Ok((true, pending)) = client.watch_status(Some(&root)) {
+                    if pending == 0 {
+                        println!(
+                            "Index is watched by the daemon and up to date: {}",
+                            root.display()
+                        );
+                    } else {
+                        println!(
+                            "Index is watched by the daemon; {} pending change(s) will be flushed shortly: {}",
+                            pending,
+                            root.display()
+                        );
                     }
+                    return Ok(());
                 }
             }
 

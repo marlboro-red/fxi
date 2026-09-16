@@ -1077,10 +1077,10 @@ impl<'a> QueryExecutor<'a> {
 
             for (doc_id, full_path, rel_path, mtime) in candidate_infos {
                 // Early termination check
-                if let Some(target) = target_matches {
-                    if total_matches >= target {
-                        break;
-                    }
+                if let Some(target) = target_matches
+                    && total_matches >= target
+                {
+                    break;
                 }
 
                 let content = match self.reader.read_file_cached(&full_path) {
@@ -1114,10 +1114,10 @@ impl<'a> QueryExecutor<'a> {
                 .with_min_len(4)
                 .filter_map(|(doc_id, full_path, rel_path, mtime)| {
                     // Early termination check
-                    if let Some(target) = target_matches {
-                        if match_count.load(Ordering::Relaxed) >= target {
-                            return None;
-                        }
+                    if let Some(target) = target_matches
+                        && match_count.load(Ordering::Relaxed) >= target
+                    {
+                        return None;
                     }
 
                     let content = read_file_content(&full_path)?;

@@ -254,28 +254,28 @@ impl WatcherConfig {
         }
 
         // Then, apply environment variable overrides
-        if let Ok(val) = std::env::var("FXI_DEBOUNCE_MS") {
-            if let Ok(ms) = val.parse() {
-                config.debounce_ms = ms;
-            }
+        if let Ok(val) = std::env::var("FXI_DEBOUNCE_MS")
+            && let Ok(ms) = val.parse()
+        {
+            config.debounce_ms = ms;
         }
 
-        if let Ok(val) = std::env::var("FXI_DELTA_FLUSH_SECS") {
-            if let Ok(secs) = val.parse() {
-                config.delta_flush_interval_secs = secs;
-            }
+        if let Ok(val) = std::env::var("FXI_DELTA_FLUSH_SECS")
+            && let Ok(secs) = val.parse()
+        {
+            config.delta_flush_interval_secs = secs;
         }
 
-        if let Ok(val) = std::env::var("FXI_MERGE_SEGMENTS") {
-            if let Ok(count) = val.parse() {
-                config.merge_segment_threshold = count;
-            }
+        if let Ok(val) = std::env::var("FXI_MERGE_SEGMENTS")
+            && let Ok(count) = val.parse()
+        {
+            config.merge_segment_threshold = count;
         }
 
-        if let Ok(val) = std::env::var("FXI_REBUILD_THRESHOLD") {
-            if let Ok(pct) = val.parse() {
-                config.rebuild_threshold_percent = pct;
-            }
+        if let Ok(val) = std::env::var("FXI_REBUILD_THRESHOLD")
+            && let Ok(pct) = val.parse()
+        {
+            config.rebuild_threshold_percent = pct;
         }
 
         config

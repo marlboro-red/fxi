@@ -830,12 +830,11 @@ impl IndexReader {
     /// Returns None if the file cannot be read.
     pub fn read_file_cached(&self, path: &Path) -> Option<FileContent> {
         let stamp = FileStamp::from_metadata(&std::fs::metadata(path).ok()?);
-        if let Ok(mut cache) = self.file_cache.lock() {
-            if let Some((cached_stamp, content)) = cache.get(path) {
-                if *cached_stamp == stamp {
-                    return Some(FileContent::Cached(Arc::clone(content)));
-                }
-            }
+        if let Ok(mut cache) = self.file_cache.lock()
+            && let Some((cached_stamp, content)) = cache.get(path)
+            && *cached_stamp == stamp
+        {
+            return Some(FileContent::Cached(Arc::clone(content)));
         }
 
         let mut file = File::open(path).ok()?;
