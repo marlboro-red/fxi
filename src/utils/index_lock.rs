@@ -20,6 +20,25 @@ pub struct IndexLock {
 }
 
 impl IndexLock {
+    /// Attempt a mutation without blocking other roots' watcher updates.
+    pub(crate) fn try_acquire(root: &Path) -> Result<Option<IndexLock>> {
+        let lock_path = get_index_container(root)?.with_extension("lock");
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = File::create(&lock_path)
+            .with_context(|| format!("Failed to create lock file {}", lock_path.display()))?;
+        match file.try_lock_exclusive() {
+            Ok(()) => Ok(Some(Self { file })),
+            Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+                Ok(None)
+            }
+            Err(error) => {
+                Err(error).with_context(|| format!("Failed to lock {}", lock_path.display()))
+            }
+        }
+    }
+
     /// Acquire the exclusive write lock for the index of `root`. Blocks if
     /// another writer (e.g. a daemon flush) holds it, with a note on stderr
     /// so a waiting CLI invocation doesn't look hung.
@@ -59,6 +78,21 @@ impl Drop for IndexLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_lock_distinguishes_contention_from_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let held = IndexLock::try_acquire(root).unwrap().unwrap();
+        assert!(IndexLock::try_acquire(root).unwrap().is_none());
+        drop(held);
+        drop(IndexLock::try_acquire(root).unwrap().unwrap());
+        let lock_path = get_index_container(root).unwrap().with_extension("lock");
+        fs::remove_file(&lock_path).unwrap();
+        fs::create_dir(&lock_path).unwrap();
+        assert!(IndexLock::try_acquire(root).is_err());
+        fs::remove_dir(lock_path).unwrap();
+    }
 
     #[test]
     fn test_lock_excludes_second_writer() {

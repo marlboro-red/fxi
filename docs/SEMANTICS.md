@@ -127,7 +127,9 @@ How the index stays fresh:
   daemon's pending-change count; `fxi index --force` rebuilds locally.
 - All index writers (CLI builds, daemon flushes, compaction) hold a
   per-index advisory lock, so two writers can never interleave segment or
-  metadata writes.
+  metadata writes. Ordinary watcher batches defer when another writer holds
+  that lock, allowing other roots to progress. Failed batches remain pending
+  and retry with a one-second backoff.
 - Searching without a daemon prints a stderr note when the index is more
   than an hour old (`FXI_STALE_WARN_SECS`, 0 disables).
 
