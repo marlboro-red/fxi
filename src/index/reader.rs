@@ -53,6 +53,12 @@ fn le64(bytes: &[u8]) -> u64 {
     u64::from_le_bytes(bytes[..8].try_into().unwrap())
 }
 
+fn posting_range_fits(offset: u64, length: u32, size: usize) -> bool {
+    offset
+        .checked_add(u64::from(length))
+        .is_some_and(|end| end <= size as u64)
+}
+
 impl TrigramDict {
     fn entry(&self, index: usize) -> TrigramDictEntry {
         let bytes = &self.data[4 + index * 20..];
@@ -252,9 +258,6 @@ impl SegmentReader {
         let positions_path = segment_path.join("tokens.positions");
         let has_positions = positions_path.exists();
 
-        // Read token dictionary (already sorted from BTreeMap write)
-        let token_dict = read_token_dict(segment_path, has_positions)?;
-
         let token_postings = MappedBytes::open(&segment_path.join("tokens.postings"))?;
         let token_positions = if has_positions {
             Some(MappedBytes::open(&positions_path)?)
@@ -262,17 +265,16 @@ impl SegmentReader {
             None
         };
 
-        let fits = |offset: u64, length: u32, size: usize| {
-            offset
-                .checked_add(u64::from(length))
-                .is_some_and(|end| end <= size as u64)
-        };
-        // Decode each entry once for all structural checks. In particular,
-        // repeating token iterators repeats UTF-8 validation of every token.
+        let token_dict = read_token_dict(
+            segment_path,
+            token_postings.len(),
+            token_positions.as_ref().map(|positions| positions.len()),
+        )?;
+        // Validate each immutable gram record once.
         let mut previous_gram = None;
         for entry in trigram_dict.iter() {
             anyhow::ensure!(
-                fits(entry.offset, entry.length, trigram_postings.len()),
+                posting_range_fits(entry.offset, entry.length, trigram_postings.len()),
                 "Truncated trigram postings"
             );
             anyhow::ensure!(
@@ -281,25 +283,6 @@ impl SegmentReader {
             );
             previous_gram = Some(entry.trigram);
         }
-        let mut previous_token = None;
-        for entry in token_dict.iter() {
-            anyhow::ensure!(
-                fits(entry.offset, entry.length, token_postings.len()),
-                "Truncated token postings"
-            );
-            if let Some(positions) = &token_positions {
-                anyhow::ensure!(
-                    fits(entry.pos_offset, entry.pos_length, positions.len()),
-                    "Truncated token positions"
-                );
-            }
-            anyhow::ensure!(
-                previous_token.is_none_or(|token| token < entry.token),
-                "Unsorted token dictionary"
-            );
-            previous_token = Some(entry.token);
-        }
-
         // Line maps are NOT loaded here - loaded lazily on first access
 
         // Load bloom filter if it exists (optional for backwards compat)
@@ -1250,7 +1233,12 @@ fn read_trigram_dict(segment_path: &Path) -> Result<TrigramDict> {
     Ok(TrigramDict { data, count })
 }
 
-fn read_token_dict(segment_path: &Path, has_positions: bool) -> Result<TokenDict> {
+fn read_token_dict(
+    segment_path: &Path,
+    posting_size: usize,
+    position_size: Option<usize>,
+) -> Result<TokenDict> {
+    let has_positions = position_size.is_some();
     let data = MappedBytes::open(&segment_path.join("tokens.dict"))?;
     anyhow::ensure!(data.len() >= 4, "Truncated token dictionary header");
     let count = le32(&data) as usize;
@@ -1261,6 +1249,7 @@ fn read_token_dict(segment_path: &Path, has_positions: bool) -> Result<TokenDict
     );
     let mut offsets = Vec::with_capacity(count);
     let mut cursor = 4;
+    let mut previous_token = None;
     for _ in 0..count {
         anyhow::ensure!(
             data.len() - cursor >= fixed_size,
@@ -1271,7 +1260,24 @@ fn read_token_dict(segment_path: &Path, has_positions: bool) -> Result<TokenDict
             len <= data.len() - cursor - fixed_size,
             "Token length exceeds file bounds"
         );
-        std::str::from_utf8(&data[cursor + 2..cursor + 2 + len]).context("Invalid token UTF-8")?;
+        let token = std::str::from_utf8(&data[cursor + 2..cursor + 2 + len])
+            .context("Invalid token UTF-8")?;
+        anyhow::ensure!(
+            previous_token.is_none_or(|previous| previous < token),
+            "Unsorted token dictionary"
+        );
+        previous_token = Some(token);
+        let fields = &data[cursor + 2 + len..cursor + fixed_size + len];
+        anyhow::ensure!(
+            posting_range_fits(le64(fields), le32(&fields[8..]), posting_size),
+            "Truncated token postings"
+        );
+        if let Some(size) = position_size {
+            anyhow::ensure!(
+                posting_range_fits(le64(&fields[16..]), le32(&fields[24..]), size),
+                "Truncated token positions"
+            );
+        }
         offsets.push(cursor);
         cursor += fixed_size + len;
     }

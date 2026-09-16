@@ -358,3 +358,41 @@ fn common_grams_remain_selective_after_repeated_compaction() {
         merge_segments(fixture.0.path()).unwrap();
     }
 }
+
+#[test]
+fn token_dictionary_order_and_overflowed_ranges_fail_open() {
+    for corruption in 0..4 {
+        let fixture = Fixture::new();
+        let path = fixture.index().join("segments/seg_0001/tokens.dict");
+        let original = fs::read(&path).unwrap();
+        assert!(u32::from_le_bytes(original[..4].try_into().unwrap()) >= 2);
+        let first_len = u16::from_le_bytes(original[4..6].try_into().unwrap()) as usize;
+        let second = 4 + 30 + first_len;
+        let second_len =
+            u16::from_le_bytes(original[second..second + 2].try_into().unwrap()) as usize;
+        let end = second + 30 + second_len;
+        let mut bytes = original.clone();
+        match corruption {
+            0 | 3 => {
+                bytes.truncate(4);
+                if corruption == 0 {
+                    bytes.extend_from_slice(&original[second..end]);
+                } else {
+                    bytes.extend_from_slice(&original[4..second]);
+                }
+                bytes.extend_from_slice(&original[4..second]);
+                bytes.extend_from_slice(&original[end..]);
+            }
+            _ => {
+                let fields = 6 + first_len + if corruption == 2 { 16 } else { 0 };
+                bytes[fields..fields + 8].copy_from_slice(&(u64::MAX - 1).to_le_bytes());
+                bytes[fields + 8..fields + 12].copy_from_slice(&4u32.to_le_bytes());
+            }
+        }
+        fs::write(path, bytes).unwrap();
+        assert!(
+            IndexReader::open(fixture.0.path()).is_err(),
+            "corruption {corruption}"
+        );
+    }
+}
