@@ -392,7 +392,8 @@ Press `F1` or `?` to show help in the TUI.
 ## Performance and validation
 
 Current measurements, correctness fixes, research experiments, and remaining gaps
-are documented in [the latest experiments](docs/performance-round2/NOTES.md) and
+are documented in [the watcher and metadata experiments](docs/performance-round3/NOTES.md),
+[the indexing and query experiments](docs/performance-round2/NOTES.md), and
 [the first engineering report](docs/audit-2026-09-17/PROGRESS.md).
 The [benchmark harness](docs/audit-2026-09-17/benchmark.py) compares full matching
 file sets against ripgrep on every run, with pinned Redis, CPython, and Linux corpora,

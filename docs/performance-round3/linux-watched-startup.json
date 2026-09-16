@@ -1,0 +1,38 @@
+{
+  "corpus": "/private/tmp/fxi-linux-corpus",
+  "indexes": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-4rmtodjl/after/indexes",
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-watch-start-e4g88v6r",
+  "pattern": "folio_wait_bit_common",
+  "matching_files": 1,
+  "harness_sha256": "45c23c3120c00bd2ac1dee3cd16e3fa6bcd763de925fc8c8bfcee751d384d9ca",
+  "tools": {
+    "before": {
+      "binary": "/private/tmp/fxi-watch-retry-baseline",
+      "sha256": "f76787a2c2542b56091d58d5a082a3011fec4de7bcc3e47b0947329ffacf97a3",
+      "samples_ms": [
+        180.045791,
+        176.6495,
+        177.919208,
+        178.604542,
+        181.939708,
+        175.201416,
+        177.720625
+      ],
+      "median_ms": 177.919208
+    },
+    "after": {
+      "binary": "/private/tmp/fxi-reconcile-reuse-experiment",
+      "sha256": "3246cc73fded98a6dc531fd12fac67acc97b085eb9b02aafd1be28715c3df4a9",
+      "samples_ms": [
+        194.289667,
+        147.031917,
+        146.375875,
+        149.120875,
+        145.798583,
+        144.950792,
+        146.263167
+      ],
+      "median_ms": 146.375875
+    }
+  }
+}
