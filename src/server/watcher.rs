@@ -17,11 +17,11 @@ use crate::utils::app_data::get_app_data_dir;
 /// Default debounce window in milliseconds
 pub const DEFAULT_DEBOUNCE_MS: u64 = 500;
 
-/// Default interval for flushing accumulated changes to delta segments (in
-/// seconds). This bounds how long a newly created file stays invisible to
-/// search while watched; the debouncer already coalesces save bursts, and
-/// auto-compaction (15 delta segments) absorbs the extra segment churn.
-pub const DEFAULT_DELTA_FLUSH_INTERVAL_SECS: u64 = 60;
+/// Additional delay after the debouncer delivers a ready batch. By default
+/// publish immediately: without a live overlay, postponing publication hides
+/// newly created or newly matching files from every indexed query. Users can
+/// opt into a longer interval when reducing disk-write frequency matters more.
+pub const DEFAULT_DELTA_FLUSH_INTERVAL_SECS: u64 = 0;
 
 /// Default threshold for triggering segment merge (number of delta segments)
 /// Higher values mean less frequent merging but more memory/segments during queries

@@ -1099,6 +1099,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_watcher_publishes_ready_batches_without_an_extra_delay() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for i in 0..8 {
+            std::fs::write(root.join(format!("{i}.rs")), "old content\n").unwrap();
+        }
+        build_index_with_progress(&root, true, true).unwrap();
+        let mut server = IndexServer::new(false);
+        Arc::get_mut(&mut server).unwrap().watcher_config = WatcherConfig::default();
+        server.ensure_index_loaded(&root).unwrap();
+        std::fs::write(root.join("0.rs"), "freshneedle\n").unwrap();
+        std::fs::write(root.join("new.rs"), "freshneedle\n").unwrap();
+        let mut batch = ChangeBatch::new();
+        // Native notifications are reconciliation hints, including directory
+        // and ignore-rule changes; an empty path intentionally means rescan.
+        batch.add(crate::server::watcher::FileChange {
+            path: PathBuf::new(),
+            kind: ChangeKind::Modified,
+        });
+        server.accumulate_changes(root.clone(), batch);
+        server.flush_expired_changes(server.watcher_config.delta_flush_duration());
+        let response = server.handle_content_search(
+            "freshneedle".into(),
+            Some(root.clone()),
+            0,
+            ContentSearchOptions {
+                files_only: true,
+                compact_files: true,
+                ..Default::default()
+            },
+        );
+        let Response::ContentSearch(response) = response else {
+            panic!("search failed")
+        };
+        assert_eq!(
+            response.file_paths.unwrap(),
+            vec![PathBuf::from("0.rs"), PathBuf::from("new.rs")]
+        );
+        assert!(!server.pending_changes.lock().unwrap().contains_key(&root));
+        drop(server);
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
     fn compact_files_preserve_legacy_results_limits_and_freshness() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();

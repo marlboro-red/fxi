@@ -114,9 +114,12 @@ How the index stays fresh:
 - `fxi index` performs an incremental update (parallel tree scan, mtime
   comparison, delta segment for changes).
 - A daemon started with `--watch` reconciles each root with one incremental
-  scan when its watcher starts, then reconciles debounced file events through the same ignore-aware walker as CLI indexing (flushed
-  to a delta segment periodically — `FXI_DELTA_FLUSH_SECS`, default 60s).
-  A newly created file is searchable only after the next flush. Startup
+  scan when its watcher starts, then reconciles debounced file events through
+  the same ignore-aware walker as CLI indexing. Ready batches publish immediately
+  by default, after the 500 ms quiet debounce (or two-second maximum event age).
+  `FXI_DELTA_FLUSH_SECS` can add a publication delay; its default is 0. A newly
+  created file becomes searchable after notification delivery, debounce and
+  reconciliation complete; this is not an immediate live overlay. Startup
   registration, notification errors and periodic five-minute reconciliation
   also repair membership. Reconciliation currently scans file metadata; a
   sound event-only update path is a future optimization.
