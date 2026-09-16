@@ -885,12 +885,15 @@ fn perform_incremental_update(root: &Path, meta: &IndexMeta, diff: IndexDiff) ->
 
     // Next segment id after base + existing deltas
     let next_segment_id = meta
-        .delta_segments
-        .iter()
+        .base_segment
+        .into_iter()
+        .chain(meta.delta_segments.iter().copied())
         .max()
-        .copied()
-        .unwrap_or(meta.base_segment.unwrap_or(0))
-        + 1;
+        .unwrap_or(0)
+        .checked_add(1)
+        .context(
+            "Segment ID capacity exhausted; compact the index or rebuild with a larger chunk size",
+        )?;
 
     let mut writer = DeltaSegmentWriter::new(root, next_segment_id)?;
 
@@ -1020,6 +1023,46 @@ mod encoding_tests {
         assert!(checked_chunk_count(1, 0).is_err());
         assert_eq!(checked_chunk_count(usize::MAX, usize::MAX).unwrap(), 1);
         assert_eq!(checked_chunk_count(0, 2000).unwrap(), 0);
+    }
+
+    #[test]
+    fn exhausted_delta_ids_preserve_the_published_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::write(root.join("base.txt"), "needle\n").unwrap();
+        let mut writer =
+            ChunkedIndexWriter::new(&root, crate::index::types::IndexConfig::default()).unwrap();
+        let file = process_file_content(PathBuf::from("base.txt"), b"needle\n", 0).unwrap();
+        writer.write_chunk(SegmentId::MAX, vec![file]).unwrap();
+        writer.finalize().unwrap();
+        drop(writer);
+        let published = get_index_dir(&root).unwrap();
+        let before = fs::read(published.join("meta.json")).unwrap();
+        let meta: IndexMeta = serde_json::from_slice(&before).unwrap();
+        assert_eq!(meta.base_segment, Some(SegmentId::MAX));
+        fs::write(root.join("new.txt"), "new needle\n").unwrap();
+        let diff = IndexDiff {
+            new_files: vec![(root.join("new.txt"), PathBuf::from("new.txt"))],
+            modified_files: vec![],
+            deleted_files: vec![],
+            rejected_unchanged: vec![],
+            indexed_count: 1,
+        };
+        let error = perform_incremental_update(&root, &meta, diff).unwrap_err();
+        assert!(error.to_string().contains("Segment ID capacity exhausted"));
+        assert_eq!(get_index_dir(&root).unwrap(), published);
+        assert_eq!(fs::read(published.join("meta.json")).unwrap(), before);
+        let reader = IndexReader::open(&root).unwrap();
+        assert_eq!(reader.valid_doc_ids().len(), 1);
+        let query = crate::query::parse_query("needle");
+        assert_eq!(
+            crate::query::QueryExecutor::new(&reader)
+                .execute_files_only(&query, 0)
+                .unwrap(),
+            vec![PathBuf::from("base.txt")]
+        );
+        drop(reader);
+        crate::utils::remove_index(&root).unwrap();
     }
 
     #[test]
