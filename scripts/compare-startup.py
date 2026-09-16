@@ -79,7 +79,7 @@ for label, pattern in queries:
         order = list(commands)
         random.Random(1729 + rep).shuffle(order)
         for name in order:
-            elapsed, paths = run(commands[name], threads.get(name))
+            elapsed, paths = run(commands[name], threads.get(name), args.candidate_indexes if name == 'after' else None)
             assert paths == expected, (label, name, paths ^ expected)
             samples[name].append(elapsed)
     row = {'query': label, 'pattern': pattern, 'files': len(expected),
@@ -87,7 +87,7 @@ for label, pattern in queries:
                      for name, values in samples.items()}}
     rows.append(row)
     print(label, {name: data['median_ms'] for name, data in row['tools'].items()}, flush=True)
-result = {'candidate_indexes': str(args.candidate_indexes.resolve()) if args.candidate_indexes else None, 'rayon_threads': threads, 'corpus': str(root), 'indexes': str(args.indexes.resolve()), 'mode': 'direct', 'output_mode': 'count' if args.count else 'files', 'query_syntax': 'plain' if args.literal else 'regex',
+result = {'harness_sha256': hashlib.sha256(P.Path(__file__).read_bytes()).hexdigest(), 'candidate_indexes': str(args.candidate_indexes.resolve()) if args.candidate_indexes else None, 'rayon_threads': threads, 'corpus': str(root), 'indexes': str(args.indexes.resolve()), 'mode': 'direct', 'output_mode': 'count' if args.count else 'files', 'query_syntax': 'plain' if args.literal else 'regex',
           'binaries': {name: {'path': str(binary), 'sha256': hashlib.sha256(binary.read_bytes()).hexdigest()}
                        for name, binary in binaries.items()}, 'rows': rows}
 args.output.write_text(json.dumps(result, indent=2))

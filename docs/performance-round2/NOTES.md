@@ -488,12 +488,17 @@ is insufficient for the CPython regression. The source was reverted and its
 patch/data preserved (`sequential-small-open-experiment.patch`, applying to
 `d6298ca`; `python-small-open-startup.json`, `redis-small-open-startup.json`).
 
-Using the same experimental binary for both Linux layouts (both exceed four
-segments, so the prototype branch is inactive), 31 interleaved samples found
-no material startup difference between 2,000 and 1,000 files per segment:
-absent 10.274 → 10.385 ms, selective 11.941 → 11.915 ms. tgrep measured
-16.286 and 17.423 ms. `linux-small-segments-startup.json` records both index
-roots and identical binary hashes. The default remains 2,000; users prioritizing
+Correction: the original `linux-small-segments-startup.json` comparison is
+invalid: `compare-startup.py` selected the alternate index for warmup but omitted
+it from timed samples, so both timed labels used the default layout. The original
+raw file is retained for traceability, not evidence of layout equivalence.
+The harness is fixed. A replacement 31-sample interleaved run, using the same
+experimental binary on both layouts (both exceed four segments), measured
+2,000 → 1,000-file segments: absent **10.301 → 12.445 ms**, selective
+**11.845 → 14.207 ms**. tgrep measured 16.044 and 17.329 ms.
+See `../performance-round3/linux-small-segments-corrected.json`. The corrected
+measurements show a roughly 20% startup penalty for the smaller segments.
+The default remains 2,000; users prioritizing
 build memory can reproduce the alternative with `fxi index --force --chunk-size
 1000 ROOT`. The 1,000-file configuration has not received the full seven-query,
 both-mode validation used for the default, and a file-count cap is not a hard
