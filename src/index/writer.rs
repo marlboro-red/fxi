@@ -99,11 +99,10 @@ impl ChunkedIndexWriter {
         let segments_path = index_path.join("segments");
         fs::create_dir_all(&segments_path)?;
 
-        // Create channel for async segment writes. Bounded so file
-        // processing applies backpressure instead of queueing unbounded
-        // SegmentWriteJobs (each holds full token/trigram data for a whole
-        // chunk) when the writer thread falls behind.
-        let (tx, rx) = mpsc::sync_channel::<SegmentWriteJob>(2);
+        // Hand off one segment directly to the writer, then tokenize the
+        // next concurrently. Queuing extra complete segments multiplies peak
+        // memory without increasing steady-state pipeline throughput.
+        let (tx, rx) = mpsc::sync_channel::<SegmentWriteJob>(0);
 
         // Create channel for completion notifications
         let (completion_tx, completion_rx) = mpsc::channel::<SegmentId>();
