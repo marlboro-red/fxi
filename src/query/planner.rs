@@ -420,12 +420,13 @@ impl QueryPlanner {
 
                 for node in nodes {
                     let (steps, verification) = self.plan_node(node);
-                    if !steps.is_empty() {
-                        sub_plans.push(QueryPlan {
-                            steps,
-                            verification: verification.clone(),
-                        });
-                    }
+                    // An empty plan means all documents, not no documents.
+                    // Keeping it in the union preserves matches from short
+                    // literals and regexes that cannot use the index.
+                    sub_plans.push(QueryPlan {
+                        steps,
+                        verification: verification.clone(),
+                    });
                     if let Some(v) = verification {
                         verifications.push(v);
                     }
