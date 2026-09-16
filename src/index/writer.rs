@@ -655,25 +655,7 @@ impl ChunkedIndexWriter {
 
     /// Write bloom filter to segment for fast pre-filtering
     fn write_bloom_filter(segment_path: &Path, bloom_filter: &BloomFilter) -> Result<()> {
-        let bloom_path = segment_path.join("bloom.bin");
-        let mut file = BufWriter::with_capacity(65536, File::create(&bloom_path)?);
-
-        // Write num_hashes (u8)
-        file.write_all(&[bloom_filter.num_hashes()])?;
-
-        // Write number of u64 words
-        let bits = bloom_filter.bits();
-        file.write_all(&(bits.len() as u32).to_le_bytes())?;
-
-        // Write bit data in one buffer instead of one write per u64 word
-        let mut bit_buf = Vec::with_capacity(bits.len() * 8);
-        for &word in bits {
-            bit_buf.extend_from_slice(&word.to_le_bytes());
-        }
-        file.write_all(&bit_buf)?;
-
-        file.flush()?;
-        Ok(())
+        crate::index::segment_io::write_bloom_file(segment_path, bloom_filter)
     }
 
     /// Compute stop-grams from accumulated frequencies

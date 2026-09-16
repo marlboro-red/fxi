@@ -3,28 +3,18 @@
 //! Uses multiple hash functions derived from fast bit-mixing operations
 //! for cache-friendly membership testing optimized for u32 trigrams.
 
-use ahash::RandomState;
-use std::hash::{BuildHasher, Hasher};
-use std::sync::OnceLock;
+/// Leading zero makes legacy readers either reject the unfamiliar length or
+/// use zero hash probes (MatchAll), rather than risk a false negative.
+pub(crate) const BLOOM_MAGIC: &[u8; 6] = b"\0FXBF\x01";
 
-/// Pre-computed random states for hashing - initialized once, reused forever.
-/// This avoids the overhead of creating new RandomState instances on every hash.
-static HASH_STATES: OnceLock<(RandomState, RandomState)> = OnceLock::new();
-
-/// Get or initialize the pre-computed hash states
+/// Fixed SplitMix64 finalizer, part of bloom format version 1. Public-domain
+/// reference: https://prng.di.unimi.it/splitmix64.c . Do not replace this with
+/// a process-, architecture-, or library-version-dependent hash.
 #[inline]
-fn get_hash_states() -> &'static (RandomState, RandomState) {
-    HASH_STATES.get_or_init(|| {
-        (
-            RandomState::with_seeds(0, 0, 0, 0),
-            RandomState::with_seeds(
-                0x517cc1b727220a95,
-                0x9e3779b97f4a7c15,
-                0xbf58476d1ce4e5b9,
-                0x94d049bb133111eb,
-            ),
-        )
-    })
+fn mix64(mut value: u64) -> u64 {
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+    value ^ (value >> 31)
 }
 
 /// A space-efficient probabilistic data structure for fast membership testing.
@@ -101,7 +91,7 @@ impl BloomFilter {
         for i in 0..self.num_hashes as u64 {
             // Double hashing: h(i) = h1 + i*h2
             let hash = h1.wrapping_add(i.wrapping_mul(h2));
-            let bit_index = (hash as usize) % self.num_bits;
+            let bit_index = (hash % self.num_bits as u64) as usize;
             let word_index = bit_index / 64;
             let bit_offset = bit_index % 64;
             self.bits[word_index] |= 1u64 << bit_offset;
@@ -116,7 +106,7 @@ impl BloomFilter {
 
         for i in 0..self.num_hashes as u64 {
             let hash = h1.wrapping_add(i.wrapping_mul(h2));
-            let bit_index = (hash as usize) % self.num_bits;
+            let bit_index = (hash % self.num_bits as u64) as usize;
             let word_index = bit_index / 64;
             let bit_offset = bit_index % 64;
 
@@ -139,22 +129,22 @@ impl BloomFilter {
         true
     }
 
-    /// Compute two hash values for double hashing using pre-computed ahash states.
-    /// This avoids the overhead of creating new RandomState instances on every call.
+    /// Portable double-hash probes, specified by bloom format version 1.
     #[inline]
     fn hash_pair(&self, item: u32) -> (u64, u64) {
-        let (state1, state2) = get_hash_states();
+        (
+            mix64(u64::from(item).wrapping_add(0x9e3779b97f4a7c15)),
+            mix64(u64::from(item).wrapping_add(0x3c6ef372fe94f82a)) | 1,
+        )
+    }
 
-        // Build hashers from pre-computed states - much faster than creating new RandomState
-        let mut hasher1 = state1.build_hasher();
-        hasher1.write_u32(item);
-        let h1 = hasher1.finish();
-
-        let mut hasher2 = state2.build_hasher();
-        hasher2.write_u32(item);
-        let h2 = hasher2.finish();
-
-        (h1, h2)
+    /// Detect accidental damage before using this optional rejection filter.
+    /// Covers the probe count, length, and every word; not an authentication MAC.
+    pub(crate) fn checksum(&self) -> u64 {
+        self.bits.iter().fold(
+            mix64(self.bits.len() as u64 ^ u64::from(self.num_hashes)),
+            |state, &word| state.rotate_left(7) ^ mix64(word),
+        )
     }
 
     /// Get the raw bits for serialization
@@ -182,7 +172,11 @@ impl BloomFilter {
     /// Merge another bloom filter into this one (union)
     #[allow(dead_code)]
     pub fn merge(&mut self, other: &BloomFilter) {
-        debug_assert_eq!(self.bits.len(), other.bits.len());
+        assert_eq!(self.bits.len(), other.bits.len(), "Bloom sizes must match");
+        assert_eq!(
+            self.num_hashes, other.num_hashes,
+            "Bloom probe counts must match"
+        );
         for (a, b) in self.bits.iter_mut().zip(other.bits.iter()) {
             *a |= *b;
         }
@@ -199,6 +193,24 @@ impl Default for BloomFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "Bloom probe counts must match")]
+    fn merging_incompatible_probe_counts_is_rejected() {
+        let mut a = BloomFilter::with_params(64, 1);
+        let b = BloomFilter::with_params(64, 2);
+        a.merge(&b);
+    }
+
+    #[test]
+    fn portable_hash_has_fixed_vectors() {
+        let filter = BloomFilter::new(100, 0.01);
+        assert_eq!(
+            filter.hash_pair(0),
+            (0xe220a8397b1dcdaf, 0x6e789e6aa1b965f5)
+        );
+        assert_eq!(filter.hash_pair(1).0, 0x910a2dec89025cc1);
+    }
 
     #[test]
     fn test_bloom_filter_basic() {

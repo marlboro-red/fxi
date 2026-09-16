@@ -191,6 +191,7 @@ pub fn write_bloom_file(segment_path: &Path, bloom_filter: &BloomFilter) -> Resu
     let bloom_path = segment_path.join("bloom.bin");
     let mut file = BufWriter::with_capacity(65536, File::create(&bloom_path)?);
 
+    file.write_all(crate::utils::bloom::BLOOM_MAGIC)?;
     file.write_all(&[bloom_filter.num_hashes()])?;
     let bits = bloom_filter.bits();
     file.write_all(&(bits.len() as u32).to_le_bytes())?;
@@ -198,6 +199,7 @@ pub fn write_bloom_file(segment_path: &Path, bloom_filter: &BloomFilter) -> Resu
         file.write_all(&word.to_le_bytes())?;
     }
 
+    file.write_all(&bloom_filter.checksum().to_le_bytes())?;
     file.flush()?;
     Ok(())
 }

@@ -1209,36 +1209,40 @@ fn read_line_maps(segment_path: &Path) -> Result<HashMap<DocId, Vec<u32>>> {
 
 /// Read bloom filter from segment
 fn read_bloom_filter(segment_path: &Path) -> Result<BloomFilter> {
-    let bloom_path = segment_path.join("bloom.bin");
-
-    if !bloom_path.exists() {
-        anyhow::bail!("Bloom filter not found");
-    }
-
-    let mut file = BufReader::new(File::open(&bloom_path)?);
-
-    let mut buf1 = [0u8; 1];
-    let mut buf4 = [0u8; 4];
-    let mut buf8 = [0u8; 8];
-
-    // Read num_hashes (u8)
-    file.read_exact(&mut buf1)?;
-    let num_hashes = buf1[0];
-
-    // Read number of u64 words
-    file.read_exact(&mut buf4)?;
-    let num_words = u32::from_le_bytes(buf4) as usize;
-
-    validate_disk_count(&file, num_words, 5, 8)?;
+    let mut file = BufReader::new(File::open(segment_path.join("bloom.bin"))?);
+    let mut magic = [0u8; 6];
+    file.read_exact(&mut magic)?;
+    anyhow::ensure!(
+        &magic == crate::utils::bloom::BLOOM_MAGIC,
+        "Unrecognized bloom hash format; optional filter disabled"
+    );
+    let mut probe_count = [0u8; 1];
+    let mut count = [0u8; 4];
+    file.read_exact(&mut probe_count)?;
+    file.read_exact(&mut count)?;
+    let num_hashes = probe_count[0];
+    let num_words = u32::from_le_bytes(count) as usize;
+    anyhow::ensure!((1..=16).contains(&num_hashes), "Invalid bloom probe count");
     anyhow::ensure!(num_words > 0, "Empty bloom filter");
-    // Read bit data
+    // Six-byte magic, probe count, word count, and checksum trailer.
+    let remaining = validate_disk_count(&file, num_words, 19, 8)?;
+    anyhow::ensure!(
+        remaining == num_words as u64 * 8,
+        "Invalid bloom file length"
+    );
     let mut bits = Vec::with_capacity(num_words);
+    let mut word = [0u8; 8];
     for _ in 0..num_words {
-        file.read_exact(&mut buf8)?;
-        bits.push(u64::from_le_bytes(buf8));
+        file.read_exact(&mut word)?;
+        bits.push(u64::from_le_bytes(word));
     }
-
-    Ok(BloomFilter::from_raw(bits, num_hashes))
+    file.read_exact(&mut word)?;
+    let filter = BloomFilter::from_raw(bits, num_hashes);
+    anyhow::ensure!(
+        filter.checksum() == u64::from_le_bytes(word),
+        "Bloom checksum mismatch"
+    );
+    Ok(filter)
 }
 
 #[cfg(test)]

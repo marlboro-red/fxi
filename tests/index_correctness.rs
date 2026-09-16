@@ -306,3 +306,31 @@ fn mapped_dictionaries_reject_bad_lengths_and_token_encoding() {
         assert!(IndexReader::open(fixture.0.path()).is_err());
     }
 }
+
+#[test]
+fn damaged_or_legacy_optional_blooms_cannot_hide_documents() {
+    for corruption in 0..5 {
+        let fixture = Fixture::new();
+        let path = fixture.index().join("segments/seg_0001/bloom.bin");
+        let mut bytes = fs::read(&path).unwrap();
+        assert_eq!(&bytes[..6], b"\0FXBF\x01");
+        match corruption {
+            0 => {
+                // A valid old-format filter with all bits unset must be ignored.
+                bytes = vec![7, 1, 0, 0, 0];
+                bytes.extend_from_slice(&0u64.to_le_bytes());
+            }
+            1 => bytes[11] ^= 1, // valid lengths, damaged bit payload
+            2 => bytes[6] = 0,   // corrupt probe count
+            3 => bytes[5] = 99,  // unknown hash version
+            _ => {
+                bytes.pop();
+            } // truncated checksum
+        }
+        fs::write(path, bytes).unwrap();
+        let reader = IndexReader::open(fixture.0.path()).unwrap();
+        let docs = reader
+            .get_trigram_docs_with_bloom(&[fxi::index::types::bytes_to_trigram(b'v', b'e', b'c')]);
+        assert_eq!(docs.iter().collect::<Vec<_>>(), vec![1]);
+    }
+}
