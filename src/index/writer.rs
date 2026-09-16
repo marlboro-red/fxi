@@ -26,6 +26,85 @@ struct AssignedFile {
     token_positions: Vec<(u32, u32)>,
 }
 
+/// Token postings in dictionary order, then document/position order.
+struct InvertedTokens {
+    postings: Vec<(u32, DocId)>,
+    positions: Vec<(u32, DocId, u32)>,
+    symbols: Vec<String>,
+}
+
+/// Invert the document-ordered occurrence stream with counting and stable
+/// scatter. Sorting every occurrence repeats information already supplied by
+/// document order; only the unique dictionary strings need comparison sorting.
+fn invert_token_postings(files: &mut [AssignedFile]) -> InvertedTokens {
+    debug_assert!(files.windows(2).all(|f| f[0].doc_id < f[1].doc_id));
+    let mut ids = ahash::AHashMap::<String, u32>::new();
+    let mut counts = Vec::<usize>::new();
+    let mut position_counts = Vec::<usize>::new();
+    let mut local_ids = Vec::with_capacity(files.len());
+    for file in files.iter_mut() {
+        let mut local = Vec::with_capacity(file.tokens.len());
+        for token in std::mem::take(&mut file.tokens) {
+            let next = ids.len() as u32;
+            let id = *ids.entry(token).or_insert(next);
+            if id == next {
+                counts.push(0);
+                position_counts.push(0);
+            }
+            counts[id as usize] += 1;
+            local.push(id);
+        }
+        for &(idx, _) in &file.token_positions {
+            position_counts[local[idx as usize] as usize] += 1;
+        }
+        local_ids.push(local);
+    }
+    let mut symbols = vec![String::new(); ids.len()];
+    for (token, id) in ids {
+        symbols[id as usize] = token;
+    }
+    let mut order: Vec<usize> = (0..symbols.len()).collect();
+    order.par_sort_unstable_by(|&a, &b| symbols[a].cmp(&symbols[b]));
+    let mut ranks = vec![0u32; symbols.len()];
+    let mut offsets = vec![0usize; symbols.len()];
+    let mut position_offsets = vec![0usize; symbols.len()];
+    let (mut total, mut position_total) = (0, 0);
+    for (rank, &id) in order.iter().enumerate() {
+        ranks[id] = rank as u32;
+        offsets[id] = total;
+        position_offsets[id] = position_total;
+        total += counts[id];
+        position_total += position_counts[id];
+    }
+    let mut postings = vec![(0, 0); total];
+    let mut positions = vec![(0, 0, 0); position_total];
+    for (file, local) in files.iter_mut().zip(local_ids) {
+        for &id in &local {
+            let id = id as usize;
+            postings[offsets[id]] = (ranks[id], file.doc_id);
+            offsets[id] += 1;
+        }
+        // The tokenizer already emits increasing positions. Preserve support
+        // for callers constructing ProcessedFile with unordered occurrences.
+        if !file.token_positions.is_sorted_by_key(|&(_, pos)| pos) {
+            file.token_positions.sort_unstable_by_key(|&(_, pos)| pos);
+        }
+        for (idx, pos) in std::mem::take(&mut file.token_positions) {
+            let id = local[idx as usize] as usize;
+            positions[position_offsets[id]] = (ranks[id], file.doc_id, pos);
+            position_offsets[id] += 1;
+        }
+    }
+    InvertedTokens {
+        postings,
+        positions,
+        symbols: order
+            .into_iter()
+            .map(|id| std::mem::take(&mut symbols[id]))
+            .collect(),
+    }
+}
+
 /// Data needed to write a segment to disk (sent to background thread)
 struct SegmentWriteJob {
     segment_id: SegmentId,
@@ -236,93 +315,30 @@ impl ChunkedIndexWriter {
     }
 
     /// Process files and write segment to disk (called from background thread)
-    fn process_and_write_segment(job: SegmentWriteJob) -> Result<()> {
+    fn process_and_write_segment(mut job: SegmentWriteJob) -> Result<()> {
         // Create segment directory
         fs::create_dir_all(&job.segment_path)?;
 
         let file_count = job.files.len();
         let t_start = std::time::Instant::now();
 
-        // Flat vectors instead of HashMaps — just collect pairs, sort later.
-        // Tokens are interned to dense u32 ids while collecting so the big
-        // sorts below compare integers instead of Strings; the ids are then
-        // remapped to lexicographic ranks so group order (and thus the
-        // on-disk dict order) is identical to sorting by token string.
-        // Every input list is already resident: size the flattened arrays
-        // exactly instead of repeatedly doubling large allocations.
+        let InvertedTokens {
+            postings: token_pairs,
+            positions: position_triples,
+            symbols: symbols_sorted,
+        } = invert_token_postings(&mut job.files);
         let trigram_count = job.files.iter().map(|f| f.trigrams.len()).sum();
-        let token_count = job.files.iter().map(|f| f.tokens.len()).sum();
-        let position_count = job.files.iter().map(|f| f.token_positions.len()).sum();
-        let mut trigram_pairs: Vec<(u32, u32)> = Vec::with_capacity(trigram_count);
-        let mut token_pairs: Vec<(u32, DocId)> = Vec::with_capacity(token_count);
-        let mut line_maps: Vec<(DocId, Vec<u32>)> = Vec::with_capacity(file_count);
-        // Position triples: (token_id, doc_id, word_position)
-        let mut position_triples: Vec<(u32, DocId, u32)> = Vec::with_capacity(position_count);
-
-        let mut token_ids: ahash::AHashMap<String, u32> =
-            ahash::AHashMap::with_capacity(file_count * 32);
-
-        // Process each file - just append to flat vectors
+        let mut trigram_pairs = Vec::with_capacity(trigram_count);
+        let mut line_maps = Vec::with_capacity(file_count);
         for file in job.files {
-            let doc_id = file.doc_id;
-
-            // Add trigram pairs
-            for trigram in file.trigrams {
-                trigram_pairs.push((trigram, doc_id));
-            }
-
-            // Add token pairs (interned), remembering each file-local
-            // token index -> intern id for the position triples below
-            let mut file_token_ids = Vec::with_capacity(file.tokens.len());
-            for token in file.tokens {
-                let next_id = token_ids.len() as u32;
-                let id = *token_ids.entry(token).or_insert(next_id);
-                file_token_ids.push(id);
-                token_pairs.push((id, doc_id));
-            }
-
-            // Add position triples (positions index into the file's tokens)
-            for (idx, pos) in file.token_positions {
-                position_triples.push((file_token_ids[idx as usize], doc_id, pos));
-            }
-
-            // Store line map
-            line_maps.push((doc_id, file.line_offsets));
+            trigram_pairs.extend(file.trigrams.into_iter().map(|gram| (gram, file.doc_id)));
+            line_maps.push((file.doc_id, file.line_offsets));
         }
-
-        // Compute lexicographic ranks: only the unique tokens are sorted as
-        // strings (typically orders of magnitude fewer than occurrences)
-        let unique_count = token_ids.len();
-        let mut symbols: Vec<String> = vec![String::new(); unique_count];
-        for (token, id) in token_ids {
-            symbols[id as usize] = token;
-        }
-        let mut order: Vec<u32> = (0..unique_count as u32).collect();
-        order.par_sort_unstable_by(|&a, &b| symbols[a as usize].cmp(&symbols[b as usize]));
-        let mut rank = vec![0u32; unique_count];
-        for (r, &id) in order.iter().enumerate() {
-            rank[id as usize] = r as u32;
-        }
-        // Unique tokens in lexicographic order (indexed by rank)
-        let symbols_sorted: Vec<String> = order
-            .iter()
-            .map(|&id| std::mem::take(&mut symbols[id as usize]))
-            .collect();
-
-        // Remap intern ids to ranks so integer sort order == string sort order
-        token_pairs
-            .par_iter_mut()
-            .for_each(|p| p.0 = rank[p.0 as usize]);
-        position_triples
-            .par_iter_mut()
-            .for_each(|t| t.0 = rank[t.0 as usize]);
 
         let t_collect = std::time::Instant::now();
 
         // Sort flat pairs — par_sort is very cache-friendly on contiguous data
         trigram_pairs.par_sort_unstable();
-        token_pairs.par_sort_unstable();
-        position_triples.par_sort_unstable();
 
         let t_sort = std::time::Instant::now();
 
@@ -1156,6 +1172,58 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn stable_token_inversion_matches_full_sort() {
+        for file_count in [0, 1, 7, 35] {
+            let mut files = Vec::new();
+            for doc in 0..file_count {
+                let tokens: Vec<String> = (0..(doc % 11 + 1))
+                    .map(|i| format!("symbol{:03}", (i * 7 + doc) % 19))
+                    .collect();
+                // Deliberately reversed positions, repeated occurrences, shared
+                // tokens, and document IDs spanning varint boundaries.
+                let token_positions = (0..doc * 31)
+                    .rev()
+                    .map(|i| ((i as usize % tokens.len()) as u32, i / 2))
+                    .collect();
+                files.push(AssignedFile {
+                    doc_id: doc * 131,
+                    trigrams: vec![],
+                    tokens,
+                    line_offsets: vec![],
+                    token_positions,
+                });
+            }
+            let mut symbols: Vec<String> = files
+                .iter()
+                .flat_map(|f| f.tokens.iter().cloned())
+                .collect();
+            symbols.sort();
+            symbols.dedup();
+            let mut expected_pairs = Vec::new();
+            let mut expected_positions = Vec::new();
+            for file in &files {
+                for token in &file.tokens {
+                    expected_pairs
+                        .push((symbols.binary_search(token).unwrap() as u32, file.doc_id));
+                }
+                for &(idx, pos) in &file.token_positions {
+                    expected_positions.push((
+                        symbols.binary_search(&file.tokens[idx as usize]).unwrap() as u32,
+                        file.doc_id,
+                        pos,
+                    ));
+                }
+            }
+            expected_pairs.sort_unstable();
+            expected_positions.sort_unstable();
+            let inverted = invert_token_postings(&mut files);
+            assert_eq!(inverted.symbols, symbols);
+            assert_eq!(inverted.postings, expected_pairs);
+            assert_eq!(inverted.positions, expected_positions);
+        }
+    }
 
     #[test]
     fn streamed_indexes_match_reference_encoding() {
