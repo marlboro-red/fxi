@@ -72,10 +72,34 @@ fn read_file_content(path: &Path) -> Option<FileContent> {
     fs::read_to_string(path).ok().map(FileContent::Owned)
 }
 
+/// Whole-buffer existence checks are equivalent to per-line checks only when
+/// a nonempty match cannot cross a line terminator or inspect its surroundings.
+struct CachedRegex {
+    regex: Regex,
+    line_local: bool,
+}
+
+impl std::ops::Deref for CachedRegex {
+    type Target = Regex;
+    fn deref(&self) -> &Regex {
+        &self.regex
+    }
+}
+
+impl CachedRegex {
+    fn is_match_in_lines(&self, content: &str) -> bool {
+        if self.line_local {
+            self.regex.is_match(content)
+        } else {
+            content.lines().any(|line| self.regex.is_match(line))
+        }
+    }
+}
+
 /// Thread-safe regex cache for avoiding repeated compilation.
 /// Uses RwLock to allow concurrent reads (cache hits are common in parallel workloads).
 struct RegexCache {
-    cache: RwLock<HashMap<String, Arc<Regex>>>,
+    cache: RwLock<HashMap<String, Arc<CachedRegex>>>,
     max_size: usize,
 }
 
@@ -90,7 +114,7 @@ impl RegexCache {
     /// Get or compile a regex pattern.
     /// Uses read lock for cache lookups (allows concurrent readers),
     /// only acquires write lock when inserting new patterns.
-    fn get_or_compile(&self, pattern: &str) -> Option<Arc<Regex>> {
+    fn get_or_compile(&self, pattern: &str) -> Option<Arc<CachedRegex>> {
         // Fast path: check cache with read lock (allows concurrent readers)
         {
             let cache = self.cache.read().ok()?;
@@ -101,7 +125,10 @@ impl RegexCache {
 
         // Compile the regex (outside of any lock)
         let re = Regex::new(pattern).ok()?;
-        let arc_re = Arc::new(re);
+        let arc_re = Arc::new(CachedRegex {
+            regex: re,
+            line_local: super::regex_plan::is_line_local(pattern),
+        });
 
         // Slow path: insert with write lock
         if let Ok(mut cache) = self.cache.write() {
@@ -471,7 +498,7 @@ impl<'a> QueryExecutor<'a> {
             }
             VerificationStep::Regex(pattern) => {
                 if let Some(re) = get_regex_cache().get_or_compile(pattern) {
-                    content.lines().any(|line| re.is_match(line))
+                    re.is_match_in_lines(content)
                 } else {
                     false
                 }
@@ -509,7 +536,7 @@ impl<'a> QueryExecutor<'a> {
 
         get_regex_cache()
             .get_or_compile(&format!("(?i:{})", regex::escape(text)))
-            .is_some_and(|re| content.lines().any(|line| re.is_match(line)))
+            .is_some_and(|re| re.is_match_in_lines(content))
     }
 
     /// Extract context lines around a match.
