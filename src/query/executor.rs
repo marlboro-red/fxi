@@ -424,6 +424,27 @@ impl<'a> QueryExecutor<'a> {
         };
         let regex = match &plan.verification {
             Some(VerificationStep::Regex(pattern)) => get_regex_cache().get_or_compile(pattern),
+            Some(
+                VerificationStep::Literal(text) | VerificationStep::BoostedLiteral { text, .. },
+            ) => get_regex_cache().get_or_compile(&format!("(?i:{})", regex::escape(text))),
+            Some(
+                VerificationStep::Phrase {
+                    text,
+                    case_insensitive,
+                }
+                | VerificationStep::BoostedPhrase {
+                    text,
+                    case_insensitive,
+                    ..
+                },
+            ) => {
+                let pattern = regex::escape(text);
+                get_regex_cache().get_or_compile(&if *case_insensitive {
+                    format!("(?i:{pattern})")
+                } else {
+                    pattern
+                })
+            }
             _ => None,
         };
         let count_file = |id| {
@@ -1903,6 +1924,9 @@ def format_warning(msg: str) -> str:
                 "re:/absent/",
                 "re:/needle|other/",
                 "needle",
+                "\"needle\"",
+                "^needle",
+                "^\"needle\"",
                 "needle OR other",
                 "needle other",
                 "file:*.txt",
