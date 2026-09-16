@@ -55,6 +55,10 @@ impl EventDebouncer {
                 // Create + Delete = remove from pending (noop)
                 (ChangeKind::Created, ChangeKind::Deleted) => {
                     self.pending.remove(&path);
+                    if self.pending.is_empty() {
+                        self.last_event = None;
+                        self.first_event = None;
+                    }
                     return;
                 }
                 // Modify + Delete = Delete
@@ -91,14 +95,7 @@ impl EventDebouncer {
 
     /// Check if the debounce window has elapsed since the last event
     pub fn is_ready(&self) -> bool {
-        if let Some(last) = self.last_event {
-            last.elapsed() >= self.config.debounce_duration()
-                || self
-                    .first_event
-                    .is_some_and(|first| first.elapsed() >= Duration::from_secs(2))
-        } else {
-            false
-        }
+        self.time_until_ready().is_some_and(|delay| delay.is_zero())
     }
 
     /// Check if there are any pending changes
@@ -107,17 +104,16 @@ impl EventDebouncer {
     }
 
     /// Get the time until the next batch is ready (None if no pending events)
-    #[allow(dead_code)]
     pub fn time_until_ready(&self) -> Option<Duration> {
-        self.last_event.map(|last| {
-            let elapsed = last.elapsed();
-            let debounce = self.config.debounce_duration();
-            if elapsed >= debounce {
-                Duration::ZERO
-            } else {
-                debounce - elapsed
-            }
-        })
+        if self.pending.is_empty() {
+            return None;
+        }
+        let quiet = self
+            .config
+            .debounce_duration()
+            .saturating_sub(self.last_event?.elapsed());
+        let age = Duration::from_secs(2).saturating_sub(self.first_event?.elapsed());
+        Some(quiet.min(age))
     }
 
     /// Flush all pending changes into a batch
@@ -167,6 +163,28 @@ mod tests {
             debounce_ms: 50, // Short for testing
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn wait_deadline_includes_maximum_event_age() {
+        let mut debouncer = EventDebouncer::new(WatcherConfig::default());
+        debouncer.add_event(PathBuf::from("a.rs"), ChangeKind::Modified);
+        debouncer.first_event = Some(Instant::now() - Duration::from_secs(3));
+        assert!(debouncer.is_ready());
+        assert_eq!(debouncer.time_until_ready(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn cancelling_the_last_event_resets_the_next_batch_deadline() {
+        let mut debouncer = EventDebouncer::new(WatcherConfig::default());
+        debouncer.add_event(PathBuf::from("a.rs"), ChangeKind::Created);
+        debouncer.first_event = Some(Instant::now() - Duration::from_secs(3));
+        debouncer.add_event(PathBuf::from("a.rs"), ChangeKind::Deleted);
+        assert_eq!(debouncer.time_until_ready(), None);
+        assert!(!debouncer.is_ready());
+        debouncer.add_event(PathBuf::from("b.rs"), ChangeKind::Created);
+        assert!(!debouncer.is_ready());
+        assert!(debouncer.time_until_ready().unwrap() > Duration::ZERO);
     }
 
     #[test]

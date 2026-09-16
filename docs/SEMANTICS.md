@@ -116,7 +116,7 @@ How the index stays fresh:
 - A daemon started with `--watch` reconciles each root with one incremental
   scan when its watcher starts, then reconciles debounced file events through
   the same ignore-aware walker as CLI indexing. Ready batches publish immediately
-  by default, after the 500 ms quiet debounce (or two-second maximum event age).
+  by default, after the 100 ms quiet debounce (or two-second maximum event age).
   `FXI_DELTA_FLUSH_SECS` can add a publication delay; its default is 0. A newly
   created file becomes searchable after notification delivery, debounce and
   reconciliation complete; this is not an immediate live overlay. Startup

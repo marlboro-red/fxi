@@ -181,6 +181,18 @@ impl IndexServer {
         })
     }
 
+    /// Drain a bounded backlog before reconciling. One slow scan must not turn
+    /// already queued notifications into a sequence of redundant full scans.
+    fn receive_watcher_messages(&self) -> Vec<WatcherMessage> {
+        let rx = self.watcher_rx.lock().unwrap();
+        let Ok(first) = rx.recv_timeout(Duration::from_millis(100)) else {
+            return Vec::new();
+        };
+        let mut messages = vec![first];
+        messages.extend(rx.try_iter().take(1023));
+        messages
+    }
+
     /// Start the server (blocking)
     /// Run the watcher message processor
     pub(crate) fn run_watcher_processor(self: &Arc<Self>) {
@@ -193,16 +205,7 @@ impl IndexServer {
                 break;
             }
 
-            // Try to receive messages with a timeout
-            let msg = {
-                if let Ok(rx) = self.watcher_rx.lock() {
-                    rx.recv_timeout(Duration::from_millis(100)).ok()
-                } else {
-                    None
-                }
-            };
-
-            if let Some(message) = msg {
+            for message in self.receive_watcher_messages() {
                 match message {
                     WatcherMessage::ChangesReady { root_path, batch } => {
                         self.accumulate_changes(root_path, batch);
@@ -1098,8 +1101,11 @@ fn run_watcher_thread(
             break;
         }
 
-        // Check for events with timeout
-        match event_rx.recv_timeout(Duration::from_millis(100)) {
+        let timeout = debouncer
+            .time_until_ready()
+            .unwrap_or(Duration::from_millis(100))
+            .min(Duration::from_millis(100));
+        match event_rx.recv_timeout(timeout) {
             Ok(event) => {
                 let needs_reconcile = match event {
                     Ok(event) => !matches!(event.kind, EventKind::Access(_)),
@@ -1172,6 +1178,38 @@ mod tests {
             .collect();
         paths.sort();
         paths
+    }
+
+    #[test]
+    fn watcher_backlog_is_bounded_and_preserves_every_message() {
+        let server = IndexServer::new(false);
+        for i in 0..1300 {
+            server
+                .watcher_tx
+                .send(WatcherMessage::ChangesReady {
+                    root_path: PathBuf::from(i.to_string()),
+                    batch: ChangeBatch::new(),
+                })
+                .unwrap();
+        }
+        let mut messages = server.receive_watcher_messages();
+        assert_eq!(messages.len(), 1024);
+        messages.extend(server.receive_watcher_messages());
+        let roots: Vec<_> = messages
+            .into_iter()
+            .map(|message| {
+                let WatcherMessage::ChangesReady { root_path, .. } = message else {
+                    panic!("wrong message")
+                };
+                root_path
+            })
+            .collect();
+        assert_eq!(
+            roots,
+            (0..1300)
+                .map(|i| PathBuf::from(i.to_string()))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

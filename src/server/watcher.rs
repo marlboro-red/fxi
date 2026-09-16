@@ -15,7 +15,7 @@ use std::time::Duration;
 use crate::utils::app_data::get_app_data_dir;
 
 /// Default debounce window in milliseconds
-pub const DEFAULT_DEBOUNCE_MS: u64 = 500;
+pub const DEFAULT_DEBOUNCE_MS: u64 = 100;
 
 /// Additional delay after the debouncer delivers a ready batch. By default
 /// publish immediately: without a live overlay, postponing publication hides
