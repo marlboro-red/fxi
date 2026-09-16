@@ -306,6 +306,34 @@ impl SegmentReader {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileStamp {
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+impl FileStamp {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+            created: metadata.created().ok(),
+            #[cfg(unix)]
+            identity: {
+                use std::os::unix::fs::MetadataExt;
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            },
+        }
+    }
+}
+
 /// Default file cache size (number of files to cache)
 const DEFAULT_FILE_CACHE_SIZE: usize = 256;
 
@@ -343,7 +371,7 @@ pub struct IndexReader {
     /// O(1) stop-gram lookup (converted from Vec on load)
     stop_grams: AHashSet<Trigram>,
     /// LRU cache for file contents (speeds up repeated queries on same files)
-    file_cache: Mutex<LruCache<PathBuf, Arc<str>>>,
+    file_cache: Mutex<LruCache<PathBuf, (FileStamp, Arc<str>)>>,
     /// Lazily-built bitmap of valid doc IDs. Safe to cache: documents are
     /// immutable after open (index updates swap in a whole new reader).
     valid_docs_cache: OnceLock<RoaringBitmap>,
@@ -801,22 +829,24 @@ impl IndexReader {
     /// plain Strings without the Arc conversion copy.
     /// Returns None if the file cannot be read.
     pub fn read_file_cached(&self, path: &Path) -> Option<FileContent> {
-        // Check cache first
-        {
-            let mut cache = self.file_cache.lock().ok()?;
-            if let Some(content) = cache.get(path) {
-                return Some(FileContent::Cached(Arc::clone(content)));
+        let stamp = FileStamp::from_metadata(&std::fs::metadata(path).ok()?);
+        if let Ok(mut cache) = self.file_cache.lock() {
+            if let Some((cached_stamp, content)) = cache.get(path) {
+                if *cached_stamp == stamp {
+                    return Some(FileContent::Cached(Arc::clone(content)));
+                }
             }
         }
 
-        // Read from disk
-        let content = std::fs::read_to_string(path).ok()?;
-
-        // Only cache if file is small enough
-        if content.len() <= MAX_CACHEABLE_FILE_SIZE {
+        let mut file = File::open(path).ok()?;
+        let before = FileStamp::from_metadata(&file.metadata().ok()?);
+        let mut content = String::new();
+        file.read_to_string(&mut content).ok()?;
+        let after = FileStamp::from_metadata(&file.metadata().ok()?);
+        if content.len() <= MAX_CACHEABLE_FILE_SIZE && before == after {
             let content: Arc<str> = content.into();
             if let Ok(mut cache) = self.file_cache.lock() {
-                cache.put(path.to_path_buf(), Arc::clone(&content));
+                cache.put(path.to_path_buf(), (after, Arc::clone(&content)));
             }
             Some(FileContent::Cached(content))
         } else {

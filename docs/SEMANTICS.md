@@ -97,7 +97,7 @@ Consequences worth knowing:
 ## Freshness
 
 Search results reflect **the index as of its last update**, with one
-correction: every candidate file is re-read and verified at query time, so a
+correction: every candidate file is verified against a read or metadata-validated snapshot at query time, so a
 file whose content changed since indexing never produces stale *lines*.
 
 The asymmetry to understand: stale matches are pruned, but **files created or
@@ -122,8 +122,12 @@ How the index stays fresh:
 
 ## Result caching
 
-The daemon caches query results keyed on (pattern, options, limit). A cache
-hit returns the previous result **for the same index version**; any index
-update (reload, watcher flush, delta write) clears the cache. Repeated
-identical queries are therefore answered in single-digit milliseconds without
-a staleness penalty beyond the index's own freshness, described above.
+Whole-query results are not memoized: an index generation alone does not
+prove that editable source files are unchanged. Every query verifies its
+candidates against current file snapshots. Small-file content caching checks
+file size, high-resolution modification/creation timestamps and, on Unix,
+file identity/change timestamps before reusing an immutable copy. A concurrent
+edit can race a query; results are not a transactional snapshot of the entire
+filesystem.
+
+New or newly matching files still require an index update to become candidates.

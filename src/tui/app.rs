@@ -5,9 +5,7 @@ use crate::query::{QueryExecutor, parse_query};
 use crate::server::IndexClient;
 use crate::utils::find_codebase_root;
 use anyhow::Result;
-use lru::LruCache;
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -53,9 +51,6 @@ pub struct SearchResult {
     pub query: String,
 }
 
-/// LRU cache size for search results (larger = more memory, faster re-queries)
-const SEARCH_CACHE_SIZE: usize = 64;
-
 /// Application state
 pub struct App {
     /// The codebase root (detected or specified)
@@ -90,8 +85,6 @@ pub struct App {
     load_state: IndexLoadState,
     /// Background search state
     search_state: SearchState,
-    /// LRU cache of recent search results for instant recall
-    search_cache: LruCache<String, Vec<SearchMatch>>,
     /// Prefetched preview content for adjacent results
     prefetch_cache: HashMap<PathBuf, String>,
 }
@@ -135,7 +128,6 @@ impl App {
                     editing: true,
                     load_state: IndexLoadState::Ready,
                     search_state: SearchState::Idle,
-                    search_cache: LruCache::new(NonZeroUsize::new(SEARCH_CACHE_SIZE).unwrap()),
                     prefetch_cache: HashMap::new(),
                 });
             }
@@ -184,7 +176,6 @@ impl App {
             editing: true,
             load_state,
             search_state: SearchState::Idle,
-            search_cache: LruCache::new(NonZeroUsize::new(SEARCH_CACHE_SIZE).unwrap()),
             prefetch_cache: HashMap::new(),
         })
     }
@@ -291,9 +282,6 @@ impl App {
                                         elapsed.as_secs_f64() * 1000.0
                                     );
 
-                                    // Cache the results (LRU automatically evicts oldest)
-                                    self.search_cache.put(result.query.clone(), matches.clone());
-
                                     self.results = matches;
                                     self.selected = 0;
                                     self.update_preview();
@@ -359,16 +347,6 @@ impl App {
             } else {
                 "No index. Press F5 to build.".to_string()
             };
-            return;
-        }
-
-        // Check local cache first for instant results (LRU cache)
-        if let Some(cached) = self.search_cache.get(&self.query) {
-            self.results = cached.clone();
-            self.selected = 0;
-            self.status_message = format!("{} matches (cached)", self.results.len());
-            self.update_preview();
-            self.prefetch_adjacent_previews();
             return;
         }
 
@@ -570,7 +548,6 @@ impl App {
     pub fn reindex(&mut self) {
         self.status_message = "Building index...".to_string();
         // Clear caches on reindex
-        self.search_cache.clear();
         self.prefetch_cache.clear();
 
         match build_index_with_progress(&self.root_path, true, true) {

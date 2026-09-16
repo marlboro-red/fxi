@@ -23,19 +23,14 @@ use crate::utils::{
     extract_tokens_and_positions, extract_trigrams, get_index_dir, is_binary, is_minified,
 };
 use anyhow::Result;
-use lru::LruCache;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
-
-/// LRU cache size for search results per index
-const CACHE_SIZE: usize = 128;
 
 /// Compaction threshold: trigger merge when tombstone ratio exceeds this
 const COMPACTION_TOMBSTONE_THRESHOLD: f32 = 0.15; // 15%
@@ -45,24 +40,12 @@ const COMPACTION_TOMBSTONE_THRESHOLD: f32 = 0.15; // 15%
 /// Set very high since the protocol already has a 100MB message limit
 const MAX_RESULTS_CAP: usize = 10_000_000;
 
-/// Content-search result cache: query key -> (Arc'd matches, file count).
-/// Arc'd so a cache hit clones a refcount, not the result set.
-type ContentCache = LruCache<String, (Arc<Vec<ContentMatch>>, usize)>;
-
 /// Cached index with its query cache and optional file watcher
 struct CachedIndex {
     /// Current reader (swapped atomically via Mutex)
     reader: Mutex<Arc<IndexReader>>,
-    /// Query result cache (cleared on reader swap). Entries are Arc'd so a
-    /// cache hit clones only the (limit-truncated) response, not the full
-    /// uncapped result set.
-    query_cache: Mutex<LruCache<String, Arc<Vec<SearchMatchData>>>>,
-    /// Content search result cache (cleared on reader swap)
-    content_cache: Mutex<ContentCache>,
     /// Last access time
     last_used: Mutex<Instant>,
-    /// Reader version for cache invalidation
-    reader_version: AtomicU64,
     /// File watcher handle (if watching is active)
     watcher_handle: Mutex<Option<WatcherHandle>>,
 }
@@ -71,10 +54,7 @@ impl CachedIndex {
     fn new(reader: IndexReader) -> Self {
         Self {
             reader: Mutex::new(Arc::new(reader)),
-            query_cache: Mutex::new(LruCache::new(NonZeroUsize::new(CACHE_SIZE).unwrap())),
-            content_cache: Mutex::new(LruCache::new(NonZeroUsize::new(CACHE_SIZE).unwrap())),
             last_used: Mutex::new(Instant::now()),
-            reader_version: AtomicU64::new(0),
             watcher_handle: Mutex::new(None),
         }
     }
@@ -97,15 +77,6 @@ impl CachedIndex {
         if let Ok(mut current) = self.reader.lock() {
             *current = new_reader;
         }
-        // Clear caches since index changed
-        if let Ok(mut cache) = self.query_cache.lock() {
-            cache.clear();
-        }
-        if let Ok(mut cache) = self.content_cache.lock() {
-            cache.clear();
-        }
-        // Increment version
-        self.reader_version.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Check if file watching is active
@@ -677,29 +648,8 @@ impl IndexServer {
         // Get the reader (handles pending swap)
         let reader = cached.get_reader();
 
-        // Check query cache first
-        if let Ok(mut cache) = cached.query_cache.lock()
-            && let Some(cached_matches) = cache.get(&query)
-        {
-            self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-            self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
-
-            // Clone only the part of the cached set that is returned
-            // (0 means use query's top:N limit -> full set)
-            let matches = if limit > 0 && limit < cached_matches.len() {
-                cached_matches[..limit].to_vec()
-            } else {
-                cached_matches.as_ref().clone()
-            };
-
-            return Response::Search(SearchResponse {
-                matches,
-                duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-                cached: true,
-                resolved_root: Some(root_path.clone()),
-            });
-        }
-
+        // Source verification is live. A generation-keyed result cache alone
+        // cannot detect edits to candidates that produced no previous result.
         self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
 
         // Parse and execute query
@@ -734,11 +684,6 @@ impl IndexServer {
                 })
                 .collect(),
         );
-
-        // Cache the results (refcount bump, not a copy)
-        if let Ok(mut cache) = cached.query_cache.lock() {
-            cache.put(query, Arc::clone(&match_data));
-        }
 
         self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
@@ -799,32 +744,6 @@ impl IndexServer {
         // Get the reader (handles pending swap)
         let reader = cached.get_reader();
 
-        // Build cache key from pattern + options + limit
-        let cache_key = format!(
-            "{}\x00{}\x00{}\x00{}\x00{}\x00{}",
-            pattern,
-            options.context_before,
-            options.context_after,
-            options.case_insensitive,
-            options.files_only,
-            limit
-        );
-
-        // Check content cache first
-        if let Ok(mut cache) = cached.content_cache.lock()
-            && let Some((cached_matches, cached_file_count)) = cache.get(&cache_key)
-        {
-            self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-            self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
-
-            return Response::ContentSearch(ContentSearchResponse {
-                matches: cached_matches.as_ref().clone(),
-                duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-                files_with_matches: *cached_file_count,
-                resolved_root: Some(root_path.clone()),
-            });
-        }
-
         self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
 
         // Parse and execute query. Case-insensitivity is applied at the plan
@@ -876,11 +795,6 @@ impl IndexServer {
                     .collect(),
             );
 
-            // Cache the results (refcount bump, not a copy)
-            if let Ok(mut cache) = cached.content_cache.lock() {
-                cache.put(cache_key, (Arc::clone(&match_data), file_count));
-            }
-
             self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
             return Response::ContentSearch(ContentSearchResponse {
@@ -930,11 +844,6 @@ impl IndexServer {
             })
             .collect(),
         );
-
-        // Cache the results (refcount bump, not a copy)
-        if let Ok(mut cache) = cached.content_cache.lock() {
-            cache.put(cache_key, (Arc::clone(&match_data), file_count));
-        }
 
         self.stats.queries_served.fetch_add(1, Ordering::Relaxed);
 
@@ -1373,6 +1282,37 @@ fn run_watcher_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_queries_reverify_changed_and_deleted_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("a.txt");
+        std::fs::write(&path, "needle\n").unwrap();
+        build_index_with_progress(&root, true, true).unwrap();
+        let server = IndexServer::new(false);
+        let query = || {
+            server.handle_content_search(
+                "needle".into(),
+                Some(root.clone()),
+                0,
+                ContentSearchOptions::default(),
+            )
+        };
+        let count = |r| match r {
+            Response::ContentSearch(r) => r.matches.len(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(count(query()), 1);
+        std::fs::write(&path, "absent\n").unwrap();
+        assert_eq!(count(query()), 0);
+        std::fs::write(&path, "needle\n").unwrap();
+        assert_eq!(count(query()), 1);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(count(query()), 0);
+        drop(server);
+        crate::utils::remove_index(&root).unwrap();
+    }
 
     #[test]
     fn delta_recovery_reuses_held_writer_lock() {
