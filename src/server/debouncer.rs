@@ -27,6 +27,7 @@ pub struct EventDebouncer {
     pending: HashMap<PathBuf, FileState>,
     /// Time of the last event (any file)
     last_event: Option<Instant>,
+    first_event: Option<Instant>,
 }
 
 impl EventDebouncer {
@@ -36,6 +37,7 @@ impl EventDebouncer {
             config,
             pending: HashMap::new(),
             last_event: None,
+            first_event: None,
         }
     }
 
@@ -43,6 +45,7 @@ impl EventDebouncer {
     pub fn add_event(&mut self, path: PathBuf, kind: ChangeKind) {
         let now = Instant::now();
         self.last_event = Some(now);
+        self.first_event.get_or_insert(now);
 
         // Normalize the change based on existing state
         if let Some(existing) = self.pending.get(&path) {
@@ -90,6 +93,9 @@ impl EventDebouncer {
     pub fn is_ready(&self) -> bool {
         if let Some(last) = self.last_event {
             last.elapsed() >= self.config.debounce_duration()
+                || self
+                    .first_event
+                    .is_some_and(|first| first.elapsed() >= Duration::from_secs(2))
         } else {
             false
         }
@@ -131,6 +137,7 @@ impl EventDebouncer {
         }
 
         self.last_event = None;
+        self.first_event = None;
 
         if batch.is_empty() { None } else { Some(batch) }
     }
@@ -140,6 +147,7 @@ impl EventDebouncer {
     pub fn clear(&mut self) {
         self.pending.clear();
         self.last_event = None;
+        self.first_event = None;
     }
 
     /// Get the number of pending file changes

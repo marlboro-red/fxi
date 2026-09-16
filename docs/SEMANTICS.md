@@ -109,9 +109,12 @@ How the index stays fresh:
 - `fxi index` performs an incremental update (parallel tree scan, mtime
   comparison, delta segment for changes).
 - A daemon started with `--watch` reconciles each root with one incremental
-  scan when its watcher starts, then applies file events (debounced; flushed
+  scan when its watcher starts, then reconciles debounced file events through the same ignore-aware walker as CLI indexing (flushed
   to a delta segment periodically — `FXI_DELTA_FLUSH_SECS`, default 60s).
-  A newly created file is searchable only after the next flush.
+  A newly created file is searchable only after the next flush. Startup
+  registration, notification errors and periodic five-minute reconciliation
+  also repair membership. Reconciliation currently scans file metadata; a
+  sound event-only update path is a future optimization.
 - While a root is watched, `fxi index` skips its own scan and reports the
   daemon's pending-change count; `fxi index --force` rebuilds locally.
 - All index writers (CLI builds, daemon flushes, compaction) hold a

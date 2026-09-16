@@ -5,10 +5,9 @@
 //! `daemon_windows`: named pipe) only accept connections, frame messages,
 //! and call [`IndexServer::handle_request`].
 
-use crate::index::build::{ProcessedFile, build_index_with_progress, is_known_binary_ext};
+use crate::index::build::build_index_with_progress;
 use crate::index::reader::IndexReader;
-use crate::index::types::{DocFlags, IndexMeta, Language};
-use crate::index::writer::DeltaSegmentWriter;
+use crate::index::types::IndexMeta;
 use crate::query::{QueryExecutor, parse_query};
 use crate::server::debouncer::EventDebouncer;
 use crate::server::protocol::{
@@ -16,12 +15,10 @@ use crate::server::protocol::{
     SearchMatchData, SearchResponse, StatusResponse,
 };
 use crate::server::watcher::{
-    ChangeBatch, ChangeKind, WatcherConfig, WatcherHandle, WatcherMessage, build_gitignore_matcher,
-    should_ignore_path,
+    ChangeBatch, ChangeKind, WatcherConfig, WatcherHandle, WatcherMessage,
 };
-use crate::utils::{
-    extract_tokens_and_positions, extract_trigrams, get_index_dir, is_binary, is_minified,
-};
+#[cfg(test)]
+use crate::utils::get_index_dir;
 use anyhow::Result;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
@@ -320,12 +317,8 @@ impl IndexServer {
                 .unwrap_or(0)
         };
 
-        if doc_count == 0 {
-            return;
-        }
-
         // Calculate change percentage
-        let change_percent = (total * 100) / doc_count;
+        let change_percent = (total * 100) / doc_count.max(1);
 
         if change_percent > self.watcher_config.rebuild_threshold_percent {
             eprintln!(
@@ -349,135 +342,37 @@ impl IndexServer {
     }
 
     /// Apply an incremental update using delta segments
-    fn apply_incremental_update(&self, root_path: &PathBuf, batch: ChangeBatch) {
-        // Serialize against CLI indexers and other writers on this root
+    fn apply_incremental_update(&self, root_path: &PathBuf, _batch: ChangeBatch) {
         let _lock = match crate::utils::IndexLock::acquire(root_path) {
-            Ok(l) => l,
+            Ok(lock) => lock,
             Err(e) => {
-                eprintln!(
-                    "fxid: failed to lock index for {}: {}",
-                    root_path.display(),
-                    e
-                );
+                eprintln!("fxid: cannot lock index: {e}");
                 return;
             }
         };
-
-        // Load current meta to check delta segment count
-        let index_path = match get_index_dir(root_path) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("fxid: failed to get index dir: {}", e);
-                return;
-            }
-        };
-
-        let meta_path = index_path.join("meta.json");
-        let mut meta: IndexMeta = match std::fs::File::open(&meta_path)
-            .map_err(anyhow::Error::from)
-            .and_then(|f| serde_json::from_reader(f).map_err(anyhow::Error::from))
-        {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("fxid: failed to read meta.json: {}", e);
-                self.rebuild_with_lock(root_path, &_lock);
-                return;
-            }
-        };
-
-        // Calculate next segment ID
-        let next_segment_id = meta
-            .delta_segments
-            .iter()
-            .max()
-            .copied()
-            .unwrap_or(meta.base_segment.unwrap_or(0))
-            + 1;
-
-        // Create delta writer
-        let mut writer = match DeltaSegmentWriter::new(root_path, next_segment_id) {
-            Ok(w) => w,
-            Err(e) => {
-                eprintln!("fxid: failed to create delta writer: {}", e);
-                self.rebuild_with_lock(root_path, &_lock);
-                return;
-            }
-        };
-
-        // Mark tombstones for deleted + modified files
-        for path in batch.deleted.iter().chain(batch.modified.iter()) {
-            eprintln!("fxid: [delta] marking tombstone: {}", path.display());
-            writer.mark_tombstone(path);
-        }
-
-        // Process created + modified files
-        let mut added_count = 0;
-        for rel_path in batch.created.iter().chain(batch.modified.iter()) {
-            let full_path = root_path.join(rel_path);
-
-            if let Some(processed) = process_file_for_delta(&full_path, rel_path) {
-                eprintln!(
-                    "fxid: [delta] indexing: {} ({} bytes)",
-                    rel_path.display(),
-                    processed.size
-                );
-                writer.add_file(processed);
-                added_count += 1;
-            }
-        }
-        eprintln!(
-            "fxid: [delta] {} files indexed, {} tombstones marked",
-            added_count,
-            batch.deleted.len() + batch.modified.len()
-        );
-
-        // Check if there are any changes to write
-        if !writer.has_changes() {
-            eprintln!("fxid: no valid changes to apply");
-            return;
-        }
-
-        // Finalize (writes segment + updates global files atomically)
-        if let Err(e) = writer.finalize(&mut meta) {
-            eprintln!("fxid: failed to finalize delta segment: {}", e);
+        // Notifications are hints, not an authoritative file list. Reconcile
+        // through the same walker as CLI indexing so directory renames, nested
+        // ignore rules, removals and symlinks have identical semantics.
+        if let Err(e) = crate::index::build::update_index(root_path) {
+            eprintln!("fxid: reconcile failed: {e}; rebuilding");
             self.rebuild_with_lock(root_path, &_lock);
             return;
         }
-
-        // Check if compaction is needed after this delta segment
-        if should_compact(&meta, self.watcher_config.merge_segment_threshold) {
-            let new_deltas = meta
-                .delta_segments
-                .len()
-                .saturating_sub(meta.delta_baseline);
-            eprintln!(
-                "fxid: triggering segment merge (tombstones={}, new_deltas={}, threshold={})...",
-                meta.tombstone_count, new_deltas, self.watcher_config.merge_segment_threshold
-            );
-            if let Err(e) = crate::index::compact::merge_segments(root_path) {
-                eprintln!("fxid: merge failed, falling back to rebuild: {}", e);
-                self.rebuild_with_lock(root_path, &_lock);
-                return;
+        let refreshed = IndexReader::open(root_path).and_then(|reader| {
+            if should_compact(&reader.meta, self.watcher_config.merge_segment_threshold) {
+                crate::index::compact::merge_segments(root_path)?;
+                IndexReader::open(root_path)
+            } else {
+                Ok(reader)
             }
-            eprintln!("fxid: segment merge completed successfully");
-        }
-
-        // Hot-swap reader
-        match IndexReader::open(root_path) {
+        });
+        match refreshed {
             Ok(reader) => {
-                let indexes = self.indexes.read().unwrap();
-                if let Some(cached) = indexes.get(root_path) {
+                if let Some(cached) = self.indexes.read().unwrap().get(root_path) {
                     cached.set_pending_reader(reader);
-                    eprintln!(
-                        "fxid: index updated for {} (delta segment {})",
-                        root_path.display(),
-                        next_segment_id
-                    );
                 }
             }
-            Err(e) => {
-                eprintln!("fxid: failed to reload index: {}", e);
-            }
+            Err(e) => eprintln!("fxid: cannot reload reconciled index: {e}"),
         }
     }
 
@@ -1094,101 +989,6 @@ fn should_compact(meta: &IndexMeta, segment_threshold: usize) -> bool {
     new_deltas >= segment_threshold
 }
 
-/// Process a single file for delta segment indexing
-fn process_file_for_delta(
-    full_path: &std::path::Path,
-    rel_path: &std::path::Path,
-) -> Option<ProcessedFile> {
-    use std::time::UNIX_EPOCH;
-
-    // Fast-path for known binary extensions
-    let ext = rel_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-
-    if is_known_binary_ext(ext) {
-        return None;
-    }
-
-    // Get metadata and check size BEFORE reading file content
-    let metadata = match std::fs::metadata(full_path) {
-        Ok(m) => m,
-        Err(_) => return None,
-    };
-
-    // Skip empty or too large files
-    const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
-    if metadata.len() == 0 || metadata.len() > MAX_FILE_SIZE {
-        return None;
-    }
-
-    // Read file content
-    let content = match std::fs::read(full_path) {
-        Ok(c) => c,
-        Err(_) => return None,
-    };
-
-    // Check if binary
-    if is_binary(&content) {
-        return None;
-    }
-
-    // Detect language
-    let language = Language::from_extension(ext);
-
-    // Check for minified
-    let mut flags = DocFlags::new();
-    if is_minified(&content) {
-        flags.0 |= DocFlags::MINIFIED;
-    }
-
-    // Extract trigrams
-    let trigrams: Vec<u32> = extract_trigrams(&content);
-
-    // Extract tokens and token positions in a single scan of the content
-    let (tokens, token_positions): (Vec<String>, Vec<(u32, u32)>) =
-        if let Ok(text) = std::str::from_utf8(&content) {
-            extract_tokens_and_positions(text)
-        } else {
-            (Vec::new(), Vec::new())
-        };
-
-    // Build line map
-    let line_offsets = build_line_map_simple(&content);
-
-    // Get modification time
-    let mtime = metadata
-        .modified()
-        .map(|t| {
-            t.duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-                .min(u64::MAX as u128) as u64
-        })
-        .unwrap_or(0);
-
-    Some(ProcessedFile {
-        rel_path: rel_path.to_path_buf(),
-        mtime,
-        size: content.len() as u64,
-        language,
-        flags,
-        trigrams,
-        tokens,
-        token_positions,
-        line_offsets,
-    })
-}
-
-/// Build line offset map from content
-fn build_line_map_simple(content: &[u8]) -> Vec<u32> {
-    let mut offsets = vec![0u32];
-    for (i, &byte) in content.iter().enumerate() {
-        if byte == b'\n' && i + 1 < content.len() {
-            offsets.push((i + 1) as u32);
-        }
-    }
-    offsets
-}
-
 /// Run the file watcher thread
 fn run_watcher_thread(
     root_path: PathBuf,
@@ -1202,9 +1002,8 @@ fn run_watcher_thread(
     // Create the watcher
     let mut watcher = RecommendedWatcher::new(
         move |res: Result<Event, notify::Error>| {
-            if let Ok(event) = res {
-                let _ = event_tx.send(event);
-            }
+            // Errors/overflow also require reconciliation.
+            let _ = event_tx.send(res);
         },
         notify::Config::default(),
     )?;
@@ -1212,8 +1011,10 @@ fn run_watcher_thread(
     // Start watching
     watcher.watch(&root_path, RecursiveMode::Recursive)?;
 
-    // Build gitignore matcher once for the root
-    let gitignore = build_gitignore_matcher(&root_path);
+    // The initial scan predates watch registration. Reconcile once more now
+    // that events are buffered, closing the startup notification gap.
+    debouncer.add_event(PathBuf::new(), ChangeKind::Modified);
+    let mut last_reconcile = Instant::now();
 
     eprintln!("fxid: watching {} for changes", root_path.display());
 
@@ -1226,40 +1027,14 @@ fn run_watcher_thread(
         // Check for events with timeout
         match event_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(event) => {
-                // Convert notify event to our change kind
-                let kind = match event.kind {
-                    EventKind::Create(_) => Some(ChangeKind::Created),
-                    EventKind::Modify(_) => Some(ChangeKind::Modified),
-                    EventKind::Remove(_) => Some(ChangeKind::Deleted),
-                    _ => None,
+                let needs_reconcile = match event {
+                    Ok(event) => !matches!(event.kind, EventKind::Access(_)),
+                    Err(_) => true,
                 };
-
-                if let Some(change_kind) = kind {
-                    for path in event.paths {
-                        // Skip non-files and hidden/ignored paths
-                        if !path.is_file() {
-                            continue;
-                        }
-
-                        // Get relative path
-                        if let Ok(rel_path) = path.strip_prefix(&root_path) {
-                            // Skip ignored paths (hardcoded dirs, hidden files, gitignore patterns)
-                            if should_ignore_path(&gitignore, rel_path, false) {
-                                continue;
-                            }
-
-                            // Log the detected change
-                            let change_type = match change_kind {
-                                ChangeKind::Created => "created",
-                                ChangeKind::Modified => "modified",
-                                ChangeKind::Deleted => "deleted",
-                                ChangeKind::Renamed => "renamed",
-                            };
-                            eprintln!("fxid: [watch] {} {}", change_type, rel_path.display());
-
-                            debouncer.add_event(rel_path.to_path_buf(), change_kind);
-                        }
-                    }
+                if needs_reconcile {
+                    // No existence/ignore check here: a removed path no longer
+                    // exists, and changes to ignore rules alter membership.
+                    debouncer.add_event(PathBuf::new(), ChangeKind::Modified);
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -1268,6 +1043,11 @@ fn run_watcher_thread(
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 break;
             }
+        }
+
+        if last_reconcile.elapsed() >= Duration::from_secs(300) {
+            debouncer.add_event(PathBuf::new(), ChangeKind::Modified);
+            last_reconcile = Instant::now();
         }
 
         // Check if we should flush the debouncer
@@ -1287,6 +1067,76 @@ fn run_watcher_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_watcher_reports_deleted_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let file = root.join("deleted.txt");
+        std::fs::write(&file, "text").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = shutdown.clone();
+        let worker = std::thread::spawn(move || {
+            run_watcher_thread(
+                root,
+                tx,
+                WatcherConfig {
+                    debounce_ms: 20,
+                    ..Default::default()
+                },
+                worker_shutdown,
+            )
+            .unwrap()
+        });
+        // The startup reconciliation is emitted only after registration.
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        std::fs::remove_file(file).unwrap();
+        let received = rx.recv_timeout(Duration::from_secs(5));
+        shutdown.store(true, Ordering::SeqCst);
+        worker.join().unwrap();
+        assert!(matches!(received, Ok(WatcherMessage::ChangesReady { .. })));
+    }
+
+    #[test]
+    fn watcher_reconciliation_handles_subtrees_and_nested_ignore_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::create_dir(root.join("old")).unwrap();
+        std::fs::write(root.join("old/a.txt"), "needle").unwrap();
+        build_index_with_progress(&root, true, true).unwrap();
+        let server = IndexServer::new(false);
+        server.ensure_index_loaded(&root).unwrap();
+        std::fs::rename(root.join("old"), root.join("new")).unwrap();
+        server.apply_incremental_update(&root, ChangeBatch::default());
+        let paths = || {
+            let cached = server.indexes.read().unwrap().get(&root).unwrap().clone();
+            let reader = cached.get_reader();
+            reader
+                .valid_doc_ids()
+                .iter()
+                .map(|id| {
+                    reader
+                        .get_path(reader.get_document(id).unwrap())
+                        .unwrap()
+                        .clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(paths(), vec![PathBuf::from("new/a.txt")]);
+        std::fs::write(root.join("new/.gitignore"), "*.txt\n").unwrap();
+        server.apply_incremental_update(&root, ChangeBatch::default());
+        assert!(paths().is_empty());
+        std::fs::remove_file(root.join("new/.gitignore")).unwrap();
+        server.apply_incremental_update(&root, ChangeBatch::default());
+        assert_eq!(paths(), vec![PathBuf::from("new/a.txt")]);
+        std::fs::remove_dir_all(root.join("new")).unwrap();
+        server.apply_incremental_update(&root, ChangeBatch::default());
+        assert!(paths().is_empty());
+        drop(server);
+        crate::utils::remove_index(&root).unwrap();
+    }
 
     #[test]
     fn repeated_queries_reverify_changed_and_deleted_sources() {
