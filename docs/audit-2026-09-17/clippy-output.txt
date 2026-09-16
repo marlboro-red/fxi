@@ -1,0 +1,2 @@
+    Checking fxi v0.1.0 (/Users/cjpark/Desktop/Projects/fxi)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.26s

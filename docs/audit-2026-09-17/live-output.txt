@@ -1,0 +1,34 @@
+0
+UNICODE 101 "\nthread 'main' (58596) panicked at src/output.rs:227:38:\nbyte index 2 is not a char boundary; it is inside 'K' (bytes 0..3) of `K foo`\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+FIRST a.txt
+MODIFIED a.txt
+WATCH_MTIME 1789567971706943333 EXPECTED_SECONDS 1789567974
+DELETED_CONTENT a.txt
+DELETED_FILE a.txt
+filler8.txt
+filler9.txt
+filler4.txt
+filler5.txt
+filler7.txt
+filler6.txt
+filler2.txt
+filler3.txt
+filler1.txt
+filler0.txt
+LOG Running daemon in foreground (Ctrl+C to stop)...
+fxid: config: watch=true, debounce=50ms, delta_flush=1s, merge_segments=15, rebuild_threshold=30%
+fxid: listening on /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-live-qffqz0iw/run/s
+fxid: loading index for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-live-qffqz0iw/corpus
+fxid: loaded 11 files from /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-live-qffqz0iw/corpus
+fxid: reconciling index for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-live-qffqz0iw/corpus
+Index is up to date, no changes detected.
+fxid: starting file watcher for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-live-qffqz0iw/corpus
+fxid: watching /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-live-qffqz0iw/corpus for changes
+fxid: [watch] created a.txt
+fxid: [watch] modified a.txt
+fxid: [watch] modified a.txt
+fxid: applying 1 changes to /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-live-qffqz0iw/corpus (1 created, 0 modified, 0 deleted)
+fxid: [delta] indexing: a.txt (15 bytes)
+fxid: [delta] 1 files indexed, 0 tombstones marked
+fxid: index updated for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-live-qffqz0iw/corpus (delta segment 2)
+

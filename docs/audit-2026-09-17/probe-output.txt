@@ -1,0 +1,44 @@
+   Compiling fxi v0.1.0 (/Users/cjpark/Desktop/Projects/fxi)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.32s
+     Running tests/audit_probe.rs (target/debug/deps/audit_probe-044323c333cb5899)
+
+running 2 tests
+PROBE "needle | x": lines=[("b.txt", 1, 0, 6)]; files=["b.txt"]; ranked=["needle.md", "b.txt"]
+PROBE "need": lines=[("b.txt", 1, 0, 4)]; files=["b.txt"]; ranked=["needle.md", "b.txt"]
+PROBE "oo": lines=[]; files=[]; ranked=[]
+PROBE "\"bar baz\"": lines=[]; files=[]; ranked=[]
+PROBE "re:/^needle$/": lines=[("b.txt", 1, 0, 6)]; files=[]; ranked=["b.txt"]
+PROBE "needle line:20-30": lines=[]; files=["b.txt"]; ranked=["needle.md"]
+PROBE "ext:rs needle": lines=[]; files=[]; ranked=["needle.md"]
+COMPACTION 0: ["f0.txt", "f1.txt", "f2.txt"]
+PROBE "re:/[/": lines=[]; files=[]; ranked=[]
+PROBE "foo": lines=[("a.txt", 3, 0, 3), ("a.txt", 4, 2, 5)]; files=["a.txt"]; ranked=["a.txt", "a.txt"]
+PROBE stale cached: ["b.txt"]
+Merging 2 segments (4 docs, 0 tombstones)...
+  Remapped 4 valid docs (skipped 0 tombstones)
+  Merged 27 trigrams, 4 tokens, 4 tokens with positions
+  Computed 12 stop-grams
+  Wrote merged segment to seg_0001
+  Updated meta.json
+Merge complete: 4 docs in 1 segment (was 2 segments)
+COMPACTION 1: ["f0.txt", "f1.txt", "f2.txt"]
+Index is up to date, no changes detected.
+PROBE update same second: true
+PROBE new word: []
+PROBE reader deleted writer temp: true
+test audit_probe ... ok
+Detected 1 changes: 1 new, 0 modified, 0 deleted (25.0% of index)
+Performing incremental update...
+Wrote delta segment seg_0002: 1 files indexed, 0 tombstones
+Merging 2 segments (5 docs, 0 tombstones)...
+  Remapped 5 valid docs (skipped 0 tombstones)
+  Merged 27 trigrams, 6 tokens, 6 tokens with positions
+  Computed 0 stop-grams
+  Wrote merged segment to seg_0001
+  Updated meta.json
+Merge complete: 5 docs in 1 segment (was 2 segments)
+COMPACTION 2: []
+test repeated_compaction ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

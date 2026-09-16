@@ -1,0 +1,36 @@
+
+added 64 packages, and audited 65 packages in 1s
+
+16 packages are looking for funding
+  run `npm fund` for details
+
+8 vulnerabilities (1 moderate, 5 high, 2 critical)
+
+To address all issues, run:
+  npm audit fix
+
+Run `npm audit` for details.
+npm notice
+npm notice New major version of npm available! 10.9.2 -> 12.0.2
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.0.2
+npm notice To update run: npm install -g npm@12.0.2
+npm notice
+
+> fxi@0.1.0 test
+> vitest run
+
+
+ RUN  v4.0.18 /Users/cjpark/Desktop/Projects/fxi/vscode-extension
+
+ ✓ src/webview/messages.test.ts (10 tests) 3ms
+ ✓ src/webview/getWebviewContent.test.ts (29 tests) 4ms
+ ✓ src/daemon/protocol.test.ts (23 tests) 4ms
+ ✓ src/ui/workspace.test.ts (2 tests) 1ms
+ ✓ src/daemon/socket.test.ts (6 tests) 19ms
+ ✓ src/daemon/client.test.ts (17 tests) 954ms
+
+ Test Files  6 passed (6)
+      Tests  87 passed (87)
+   Start at  00:05:33
+   Duration  1.12s (transform 332ms, setup 0ms, import 379ms, tests 985ms, environment 0ms)
+
