@@ -1,0 +1,887 @@
+{
+  "fxi_binary_sha256": "c4db778006bf91f1e4755a46b07feda93fe1c81777acaa2617468fd4f2c2b2fc",
+  "manifest_sha256": "8faa938559ab442de119ea92b6a83975d5bca83aef2081066e2af45e90821f6c",
+  "suite": "redis",
+  "fxi_commit": "f649b6a6950ff39199270b92ada898ee777d969c",
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-bench-5ir0ktff",
+  "source_commit": "07a33b919581e2b0663e34731a490d768e553dfa",
+  "files": 1098,
+  "bytes": 18044223,
+  "builds": {
+    "fxi": {
+      "seconds": 0.15777866700000232,
+      "resource_output": "        0.15 real         0.60 user         0.16 sys\n           179421184  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               13805  page reclaims\n                 108  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  10  voluntary context switches\n                2854  involuntary context switches\n          6115539655  instructions retired\n          2369387328  cycles elapsed\n           173392472  peak memory footprint\n"
+    },
+    "tgrep": {
+      "seconds": 0.11418966700011879,
+      "resource_output": "Walking /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-bench-5ir0ktff/corpus...\nFound 1116 text files (0 binary skipped, 0 too large, 0 errors)\nExtracting trigrams...\nWriting index (117752 trigrams, 1116 files, 0 spill segment(s))...\nIndex built successfully at /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-bench-5ir0ktff/corpus/.tgrep\nIndexed in 0.1s using external strategy (peak memory 74.7 MiB)\n        0.11 real         0.25 user         0.10 sys\n            78331904  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                5071  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   2  voluntary context switches\n                 731  involuntary context switches\n          3677609635  instructions retired\n          1118814564  cycles elapsed\n            71729584  peak memory footprint\n"
+    }
+  },
+  "index_bytes": {
+    "fxi": 10857143,
+    "tgrep": 15503560
+  },
+  "rows": [
+    {
+      "mode": "direct",
+      "query": "selective",
+      "pattern": "raxFind",
+      "files": 10,
+      "tools": {
+        "fxi": {
+          "median_ms": 14.854083,
+          "samples_ms": [
+            15.010875,
+            14.99325,
+            15.00125,
+            14.921125,
+            14.449833,
+            14.239,
+            14.360833,
+            14.854083,
+            13.696333
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 5.899667,
+          "samples_ms": [
+            6.252083,
+            5.927625,
+            6.717541,
+            5.734208,
+            6.033167,
+            5.53575,
+            5.899667,
+            5.712292,
+            5.652625
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 22.074834,
+          "samples_ms": [
+            22.597708,
+            22.074834,
+            23.269791,
+            21.308041,
+            19.687709,
+            20.574917,
+            23.047875,
+            57.376209,
+            21.485833
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "absent",
+      "pattern": "auditNonexistentSymbol94283",
+      "files": 0,
+      "tools": {
+        "fxi": {
+          "median_ms": 13.815292,
+          "samples_ms": [
+            13.6,
+            13.664791,
+            14.614125,
+            13.835916,
+            13.7775,
+            13.985,
+            13.768167,
+            14.036875,
+            13.815292
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 4.651417,
+          "samples_ms": [
+            4.588958,
+            4.153458,
+            4.605208,
+            4.728625,
+            4.898334,
+            4.523958,
+            4.651417,
+            4.673583,
+            4.870375
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 21.885667,
+          "samples_ms": [
+            21.731458,
+            21.126084,
+            36.574875,
+            35.677375,
+            21.253583,
+            21.367042,
+            22.901125,
+            21.885667,
+            22.353417
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "phrase",
+      "pattern": "static void",
+      "files": 269,
+      "tools": {
+        "fxi": {
+          "median_ms": 17.571167,
+          "samples_ms": [
+            18.097958,
+            17.313125,
+            18.060209,
+            17.563083,
+            17.356208,
+            17.709458,
+            17.517375,
+            18.053958,
+            17.571167
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 17.089208,
+          "samples_ms": [
+            17.542167,
+            16.243167,
+            17.089208,
+            17.084125,
+            17.208291,
+            17.126958,
+            17.038875,
+            16.705083,
+            17.57675
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 24.873875,
+          "samples_ms": [
+            24.873875,
+            23.717,
+            26.294417,
+            25.845834,
+            22.648375,
+            25.835083,
+            24.683958,
+            24.642458,
+            25.682333
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "common",
+      "pattern": "return",
+      "files": 774,
+      "tools": {
+        "fxi": {
+          "median_ms": 25.165417,
+          "samples_ms": [
+            22.868875,
+            24.227917,
+            26.448583,
+            26.913959,
+            26.174167,
+            23.132958,
+            25.958125,
+            23.842875,
+            25.165417
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 36.648625,
+          "samples_ms": [
+            36.855,
+            35.041375,
+            35.172334,
+            36.066042,
+            36.770834,
+            36.380375,
+            36.648625,
+            36.787667,
+            37.1335
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 29.458041,
+          "samples_ms": [
+            31.421959,
+            28.470625,
+            29.131791,
+            31.6705,
+            31.646084,
+            30.431625,
+            29.458041,
+            28.866584,
+            29.020833
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "alternation",
+      "pattern": "raxFind|dictRehash",
+      "files": 13,
+      "tools": {
+        "fxi": {
+          "median_ms": 15.128292,
+          "samples_ms": [
+            15.532208,
+            14.803125,
+            15.370625,
+            15.251875,
+            14.662125,
+            14.977959,
+            14.841167,
+            15.366,
+            15.128292
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 6.382708,
+          "samples_ms": [
+            6.602166,
+            5.82,
+            6.174833,
+            6.269916,
+            6.569833,
+            6.170291,
+            6.461833,
+            6.458208,
+            6.382708
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 21.606708,
+          "samples_ms": [
+            21.057209,
+            22.76025,
+            22.090667,
+            21.599417,
+            21.606708,
+            22.506709,
+            22.242375,
+            21.294542,
+            20.548
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "internal_literal",
+      "pattern": ".*raxFind",
+      "files": 10,
+      "tools": {
+        "fxi": {
+          "median_ms": 14.600167,
+          "samples_ms": [
+            14.569583,
+            14.766917,
+            14.932209,
+            14.761292,
+            14.471334,
+            14.600167,
+            14.563833,
+            15.320417,
+            14.285333
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 6.121834,
+          "samples_ms": [
+            6.272791,
+            5.734417,
+            6.216125,
+            5.975875,
+            6.121834,
+            6.012541,
+            6.334834,
+            6.065917,
+            6.424875
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 21.973125,
+          "samples_ms": [
+            20.4425,
+            23.280209,
+            20.330417,
+            21.2755,
+            23.1255,
+            22.97725,
+            22.705417,
+            21.973125,
+            21.420083
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "insensitive",
+      "pattern": "serverassert",
+      "files": 60,
+      "tools": {
+        "fxi": {
+          "median_ms": 16.487917,
+          "samples_ms": [
+            16.415041,
+            16.316125,
+            16.783167,
+            16.487917,
+            16.15325,
+            16.556625,
+            16.349625,
+            16.973792,
+            16.656084
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 10.217542,
+          "samples_ms": [
+            10.301042,
+            9.861792,
+            10.051833,
+            10.373542,
+            10.277583,
+            10.217542,
+            10.061625,
+            9.975583,
+            10.232459
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 22.049916,
+          "samples_ms": [
+            23.107458,
+            20.294709,
+            22.538083,
+            21.761708,
+            23.804,
+            21.579334,
+            22.049916,
+            22.350042,
+            21.427625
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "server",
+      "query": "selective",
+      "pattern": "raxFind",
+      "files": 10,
+      "tools": {
+        "fxi": {
+          "median_ms": 4.442333,
+          "samples_ms": [
+            5.023208,
+            4.442333,
+            4.690791,
+            4.542333,
+            4.336625,
+            3.900208,
+            4.079292,
+            4.498667,
+            4.170625
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 5.510625,
+          "samples_ms": [
+            6.029541,
+            5.267917,
+            5.401417,
+            5.412083,
+            5.62825,
+            5.211042,
+            5.613875,
+            5.510625,
+            5.643083
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 21.971125,
+          "samples_ms": [
+            23.145583,
+            20.635625,
+            23.736542,
+            21.859208,
+            22.468042,
+            22.784708,
+            21.971125,
+            19.766542,
+            20.784084
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_result_cache_ms": [
+        4.206959,
+        4.08175,
+        4.176125,
+        3.865833,
+        3.756667,
+        3.973,
+        3.849541,
+        3.955875,
+        3.786958
+      ]
+    },
+    {
+      "mode": "server",
+      "query": "absent",
+      "pattern": "auditNonexistentSymbol94283",
+      "files": 0,
+      "tools": {
+        "fxi": {
+          "median_ms": 4.114583,
+          "samples_ms": [
+            3.959875,
+            4.460125,
+            4.280959,
+            4.12725,
+            4.114583,
+            3.786292,
+            3.831917,
+            4.149625,
+            3.877208
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 4.85425,
+          "samples_ms": [
+            5.116209,
+            4.627667,
+            4.70225,
+            4.693875,
+            4.949042,
+            4.772458,
+            5.288292,
+            4.85425,
+            5.218584
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 21.202375,
+          "samples_ms": [
+            20.235125,
+            21.882958,
+            20.502416,
+            18.204791,
+            22.002958,
+            21.202375,
+            23.871666,
+            20.931208,
+            23.657583
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_result_cache_ms": [
+        3.689167,
+        3.731416,
+        3.705375,
+        3.836667,
+        3.521375,
+        3.665375,
+        3.641,
+        3.609417,
+        4.049583
+      ]
+    },
+    {
+      "mode": "server",
+      "query": "phrase",
+      "pattern": "static void",
+      "files": 269,
+      "tools": {
+        "fxi": {
+          "median_ms": 5.075333,
+          "samples_ms": [
+            5.316291,
+            5.009708,
+            4.967625,
+            5.107916,
+            4.953708,
+            4.786333,
+            5.075333,
+            5.647,
+            5.836166
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 6.815,
+          "samples_ms": [
+            7.170459,
+            6.797459,
+            6.585042,
+            6.691209,
+            7.078083,
+            6.766708,
+            6.815,
+            6.877916,
+            6.875417
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 25.001416,
+          "samples_ms": [
+            22.329334,
+            24.469791,
+            24.656917,
+            23.905292,
+            25.305625,
+            25.532,
+            25.139208,
+            25.906083,
+            25.001416
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_result_cache_ms": [
+        4.834417,
+        4.9,
+        5.081458,
+        4.659667,
+        5.188,
+        4.609333,
+        4.694375,
+        4.670708,
+        4.609208
+      ]
+    },
+    {
+      "mode": "server",
+      "query": "common",
+      "pattern": "return",
+      "files": 774,
+      "tools": {
+        "fxi": {
+          "median_ms": 6.903333,
+          "samples_ms": [
+            7.150209,
+            6.90025,
+            7.017541,
+            7.028792,
+            6.504292,
+            6.538584,
+            6.583,
+            7.10325,
+            6.903333
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 8.75425,
+          "samples_ms": [
+            8.944667,
+            8.376708,
+            8.75425,
+            8.7335,
+            8.899,
+            8.461417,
+            9.005167,
+            8.626959,
+            8.815375
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 29.705292,
+          "samples_ms": [
+            30.007,
+            30.383542,
+            28.238625,
+            29.705292,
+            30.325708,
+            28.906542,
+            29.911083,
+            28.775417,
+            29.015208
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_result_cache_ms": [
+        6.436125,
+        6.02675,
+        6.250209,
+        6.173875,
+        6.354583,
+        6.199458,
+        6.094916,
+        6.004084,
+        6.237084
+      ]
+    },
+    {
+      "mode": "server",
+      "query": "alternation",
+      "pattern": "raxFind|dictRehash",
+      "files": 13,
+      "tools": {
+        "fxi": {
+          "median_ms": 4.463166,
+          "samples_ms": [
+            4.463166,
+            4.536333,
+            4.608292,
+            4.874125,
+            4.253542,
+            4.1115,
+            4.264458,
+            5.010083,
+            4.33925
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 5.571333,
+          "samples_ms": [
+            5.92225,
+            5.178459,
+            5.390041,
+            5.400625,
+            5.813083,
+            5.272417,
+            5.571333,
+            5.955125,
+            5.777625
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 21.954542,
+          "samples_ms": [
+            20.283333,
+            20.491959,
+            21.455083,
+            22.291916,
+            22.774375,
+            21.954542,
+            23.045,
+            22.252875,
+            18.837
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_result_cache_ms": [
+        4.314875,
+        3.963875,
+        3.927625,
+        3.803958,
+        4.153166,
+        4.021791,
+        3.854292,
+        3.955208,
+        4.428833
+      ]
+    },
+    {
+      "mode": "server",
+      "query": "internal_literal",
+      "pattern": ".*raxFind",
+      "files": 10,
+      "tools": {
+        "fxi": {
+          "median_ms": 4.380166,
+          "samples_ms": [
+            4.759291,
+            4.455917,
+            4.66425,
+            4.368333,
+            4.107541,
+            3.871166,
+            4.380166,
+            4.643458,
+            4.252458
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 5.711708,
+          "samples_ms": [
+            5.711708,
+            5.744583,
+            5.547792,
+            5.354667,
+            5.989917,
+            5.287083,
+            6.108,
+            5.52875,
+            5.992959
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 21.483375,
+          "samples_ms": [
+            19.573625,
+            22.317416,
+            20.196667,
+            21.360333,
+            23.348417,
+            21.483375,
+            20.594667,
+            22.851958,
+            21.625458
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_result_cache_ms": [
+        3.821167,
+        3.847375,
+        3.937417,
+        3.862042,
+        3.836792,
+        3.809833,
+        4.222959,
+        3.891333,
+        3.894
+      ]
+    },
+    {
+      "mode": "server",
+      "query": "insensitive",
+      "pattern": "serverassert",
+      "files": 60,
+      "tools": {
+        "fxi": {
+          "median_ms": 5.021125,
+          "samples_ms": [
+            4.997291,
+            5.027375,
+            5.123916,
+            5.204042,
+            4.925375,
+            4.463084,
+            5.021125,
+            5.144,
+            4.824792
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 6.186583,
+          "samples_ms": [
+            6.7925,
+            6.111667,
+            5.983333,
+            6.027583,
+            6.193583,
+            6.280167,
+            6.165375,
+            6.186583,
+            6.406875
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 21.9915,
+          "samples_ms": [
+            23.159458,
+            21.9915,
+            21.538584,
+            21.8715,
+            23.681833,
+            21.352167,
+            22.292875,
+            23.004166,
+            21.188167
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_result_cache_ms": [
+        4.550834,
+        4.493458,
+        4.32675,
+        4.473541,
+        4.36075,
+        4.330292,
+        4.306292,
+        4.603167,
+        4.460917
+      ]
+    }
+  ]
+}

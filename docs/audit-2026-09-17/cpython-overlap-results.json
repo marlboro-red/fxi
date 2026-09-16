@@ -1,0 +1,887 @@
+{
+  "fxi_binary_sha256": "bfe822cc855cd213a33653176befa33ad1db420a0e6aa0865f1db21bf0b4e448",
+  "manifest_sha256": "6558bad8b515cfbe4660d793cf6d7ad53689efecf71ef0f37ca76a2620ec68ab",
+  "suite": "python",
+  "fxi_commit": "344e91a6413a77c6ce2163f9e386eb11e3c286a3",
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-bench-r4qe8u1t",
+  "source_commit": "0a6c1ed34118b091230ee38fc047bcc2df8e5c5e",
+  "files": 3480,
+  "bytes": 78457530,
+  "builds": {
+    "fxi": {
+      "seconds": 0.45904366700005994,
+      "resource_output": "        0.45 real         2.31 user         0.47 sys\n           436994048  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               45352  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  11  voluntary context switches\n                7581  involuntary context switches\n         23863957992  instructions retired\n          8520358378  cycles elapsed\n           419840768  peak memory footprint\n"
+    },
+    "tgrep": {
+      "seconds": 0.44721004199982417,
+      "resource_output": "Walking /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-bench-r4qe8u1t/corpus...\nFound 3498 text files (0 binary skipped, 0 too large, 0 errors)\nExtracting trigrams...\nMerging 2 spill segment(s) into the index...\nWriting index (193160 trigrams, 3498 files, 2 spill segment(s))...\nIndex built successfully at /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-bench-r4qe8u1t/corpus/.tgrep\nIndexed in 0.4s using external strategy (peak memory 127.5 MiB)\n        0.44 real         1.06 user         0.28 sys\n           133726208  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                8618  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                   9  voluntary context switches\n                1843  involuntary context switches\n         15507262875  instructions retired\n          4240645181  cycles elapsed\n           127173112  peak memory footprint\n"
+    }
+  },
+  "index_bytes": {
+    "fxi": 40429942,
+    "tgrep": 50600887
+  },
+  "rows": [
+    {
+      "mode": "direct",
+      "query": "selective",
+      "pattern": "PyObject_GenericGetAttr",
+      "files": 79,
+      "tools": {
+        "fxi": {
+          "median_ms": 23.507292,
+          "samples_ms": [
+            23.906584,
+            23.881875,
+            27.189417,
+            23.507292,
+            23.268791,
+            23.459125,
+            23.41125,
+            24.306833,
+            23.464417
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 12.538167,
+          "samples_ms": [
+            12.893625,
+            11.67725,
+            12.540958,
+            13.131083,
+            12.53925,
+            12.358792,
+            12.442542,
+            12.406916,
+            12.538167
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 52.269125,
+          "samples_ms": [
+            50.547041,
+            55.109583,
+            51.967125,
+            52.269125,
+            53.538209,
+            54.860542,
+            50.707084,
+            54.40825,
+            51.228083
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "absent",
+      "pattern": "auditNonexistentSymbol94283",
+      "files": 0,
+      "tools": {
+        "fxi": {
+          "median_ms": 22.554375,
+          "samples_ms": [
+            22.370042,
+            22.325958,
+            22.712125,
+            22.671,
+            22.554375,
+            22.653541,
+            21.8675,
+            22.696041,
+            21.815167
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 5.649333,
+          "samples_ms": [
+            5.837708,
+            4.773833,
+            5.479541,
+            5.617041,
+            5.974959,
+            5.492416,
+            5.737084,
+            5.649333,
+            5.720583
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 51.281791,
+          "samples_ms": [
+            50.26,
+            51.281791,
+            50.748458,
+            50.729791,
+            51.959208,
+            51.31675,
+            54.682833,
+            50.957417,
+            53.418292
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "phrase",
+      "pattern": "static void",
+      "files": 295,
+      "tools": {
+        "fxi": {
+          "median_ms": 26.633041,
+          "samples_ms": [
+            26.954291,
+            28.675417,
+            26.633041,
+            26.336584,
+            26.446083,
+            26.948167,
+            27.671416,
+            26.600125,
+            25.936167
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 23.019083,
+          "samples_ms": [
+            23.019083,
+            21.992541,
+            23.13375,
+            22.852709,
+            23.346542,
+            22.67225,
+            22.979083,
+            23.235541,
+            23.1345
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 55.999708,
+          "samples_ms": [
+            56.085458,
+            57.156083,
+            55.999708,
+            56.915292,
+            55.7065,
+            55.188791,
+            56.284083,
+            54.417541,
+            54.154375
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "common",
+      "pattern": "return",
+      "files": 2575,
+      "tools": {
+        "fxi": {
+          "median_ms": 68.378917,
+          "samples_ms": [
+            68.838834,
+            68.494125,
+            67.651792,
+            66.24875,
+            69.5645,
+            67.182708,
+            68.378917,
+            66.195833,
+            68.783959
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 118.701458,
+          "samples_ms": [
+            117.677625,
+            114.619125,
+            118.86925,
+            119.07325,
+            118.117958,
+            118.95875,
+            118.090875,
+            118.701458,
+            118.844666
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 80.038167,
+          "samples_ms": [
+            81.1995,
+            80.4335,
+            78.740167,
+            77.271459,
+            80.434,
+            81.652709,
+            79.285416,
+            78.862459,
+            80.038167
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "alternation",
+      "pattern": "PyObject_GenericGetAttr|PyUnicode_DecodeUTF8",
+      "files": 101,
+      "tools": {
+        "fxi": {
+          "median_ms": 24.32425,
+          "samples_ms": [
+            25.235333,
+            24.169834,
+            24.32425,
+            24.707792,
+            24.298208,
+            24.04875,
+            23.973708,
+            24.44,
+            25.180583
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 17.303041,
+          "samples_ms": [
+            17.141167,
+            16.669083,
+            17.303041,
+            17.196833,
+            17.775583,
+            17.478125,
+            17.303667,
+            17.053333,
+            18.101292
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 52.995125,
+          "samples_ms": [
+            54.988708,
+            53.044333,
+            52.995125,
+            50.965291,
+            51.276917,
+            51.364542,
+            54.793167,
+            50.935416,
+            54.586416
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "internal_literal",
+      "pattern": ".*PyObject_GenericGetAttr",
+      "files": 79,
+      "tools": {
+        "fxi": {
+          "median_ms": 26.698291,
+          "samples_ms": [
+            26.815292,
+            25.360541,
+            27.394541,
+            27.901333,
+            26.588458,
+            25.193083,
+            26.232084,
+            26.698291,
+            27.353
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 12.708291,
+          "samples_ms": [
+            12.817209,
+            12.077666,
+            12.708291,
+            12.631166,
+            12.598958,
+            12.450084,
+            12.709375,
+            13.295125,
+            12.903083
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 52.979959,
+          "samples_ms": [
+            53.407209,
+            52.878542,
+            52.979959,
+            53.939583,
+            54.388833,
+            55.154833,
+            49.997625,
+            52.693,
+            50.992042
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "insensitive",
+      "pattern": "pyobject_genericgetattr",
+      "files": 79,
+      "tools": {
+        "fxi": {
+          "median_ms": 30.061125,
+          "samples_ms": [
+            30.713708,
+            30.132833,
+            30.061125,
+            30.010875,
+            30.99475,
+            30.010583,
+            28.423125,
+            29.984375,
+            30.082334
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 14.449,
+          "samples_ms": [
+            14.479,
+            13.886833,
+            14.675625,
+            14.347708,
+            14.6185,
+            14.497833,
+            14.25,
+            14.449,
+            14.118334
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 51.335292,
+          "samples_ms": [
+            48.579708,
+            53.362208,
+            51.79475,
+            51.335292,
+            50.582417,
+            52.1145,
+            49.890291,
+            50.569208,
+            53.498083
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "server",
+      "query": "selective",
+      "pattern": "PyObject_GenericGetAttr",
+      "files": 79,
+      "tools": {
+        "fxi": {
+          "median_ms": 5.928083,
+          "samples_ms": [
+            6.060166,
+            6.17775,
+            5.865584,
+            6.178958,
+            5.463458,
+            5.229208,
+            5.928083,
+            6.061459,
+            5.602375
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 6.796917,
+          "samples_ms": [
+            7.233,
+            6.497125,
+            6.796917,
+            6.930875,
+            6.993583,
+            6.297958,
+            6.826458,
+            6.65025,
+            6.76775
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 52.631625,
+          "samples_ms": [
+            52.631625,
+            51.469042,
+            54.032791,
+            53.25675,
+            53.18275,
+            50.797166,
+            51.389917,
+            51.083375,
+            52.908
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_result_cache_ms": [
+        5.350208,
+        5.288208,
+        5.126708,
+        5.597417,
+        5.209958,
+        5.045,
+        5.213042,
+        4.819042,
+        4.945416
+      ]
+    },
+    {
+      "mode": "server",
+      "query": "absent",
+      "pattern": "auditNonexistentSymbol94283",
+      "files": 0,
+      "tools": {
+        "fxi": {
+          "median_ms": 4.563917,
+          "samples_ms": [
+            4.563917,
+            5.159167,
+            4.946875,
+            4.730375,
+            3.937041,
+            3.760375,
+            3.992958,
+            4.931666,
+            3.925791
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 5.492667,
+          "samples_ms": [
+            5.657208,
+            4.653208,
+            5.068292,
+            4.953792,
+            5.492667,
+            5.497625,
+            5.954542,
+            5.188541,
+            5.570458
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 52.382,
+          "samples_ms": [
+            52.382,
+            50.098459,
+            49.16325,
+            52.431583,
+            53.556583,
+            51.267959,
+            54.109583,
+            52.472292,
+            50.92775
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_result_cache_ms": [
+        4.142584,
+        3.818667,
+        3.718333,
+        3.645541,
+        3.687125,
+        3.7265,
+        3.683292,
+        3.636541,
+        3.543208
+      ]
+    },
+    {
+      "mode": "server",
+      "query": "phrase",
+      "pattern": "static void",
+      "files": 295,
+      "tools": {
+        "fxi": {
+          "median_ms": 8.687375,
+          "samples_ms": [
+            8.687375,
+            8.856375,
+            9.124375,
+            9.230833,
+            8.301458,
+            8.055833,
+            8.293917,
+            9.114667,
+            8.287625
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 8.5095,
+          "samples_ms": [
+            8.715333,
+            7.909375,
+            8.5095,
+            8.188625,
+            8.727833,
+            7.854083,
+            8.630375,
+            7.889375,
+            8.549292
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 55.386042,
+          "samples_ms": [
+            57.5235,
+            56.302875,
+            57.64475,
+            55.397208,
+            54.189209,
+            54.071334,
+            55.386042,
+            53.808125,
+            54.593
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_result_cache_ms": [
+        7.88725,
+        7.849959,
+        7.850917,
+        7.95175,
+        7.093542,
+        7.774583,
+        8.031875,
+        9.123375,
+        7.590833
+      ]
+    },
+    {
+      "mode": "server",
+      "query": "common",
+      "pattern": "return",
+      "files": 2575,
+      "tools": {
+        "fxi": {
+          "median_ms": 51.487875,
+          "samples_ms": [
+            52.989708,
+            51.360875,
+            51.684208,
+            48.150917,
+            51.487875,
+            45.996,
+            51.78275,
+            53.643167,
+            51.173542
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 17.877417,
+          "samples_ms": [
+            17.976167,
+            17.545959,
+            17.877417,
+            17.996167,
+            17.763334,
+            17.802167,
+            17.85175,
+            18.005917,
+            18.051459
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 78.933792,
+          "samples_ms": [
+            78.933792,
+            78.839917,
+            81.870916,
+            75.798167,
+            77.927166,
+            78.923167,
+            79.576292,
+            79.529834,
+            81.413916
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_result_cache_ms": [
+        43.561416,
+        47.560667,
+        45.996708,
+        46.471291,
+        47.926458,
+        45.265458,
+        45.727083,
+        44.7005,
+        45.327666
+      ]
+    },
+    {
+      "mode": "server",
+      "query": "alternation",
+      "pattern": "PyObject_GenericGetAttr|PyUnicode_DecodeUTF8",
+      "files": 101,
+      "tools": {
+        "fxi": {
+          "median_ms": 6.376167,
+          "samples_ms": [
+            6.566875,
+            6.376167,
+            6.553167,
+            6.391417,
+            5.724125,
+            5.857584,
+            5.809708,
+            6.5005,
+            5.731834
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 7.479625,
+          "samples_ms": [
+            7.48125,
+            6.86575,
+            7.179208,
+            7.487709,
+            7.479625,
+            6.883417,
+            7.825917,
+            7.168125,
+            7.726167
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 51.400708,
+          "samples_ms": [
+            50.611625,
+            49.780333,
+            48.871666,
+            49.53825,
+            53.70525,
+            51.400708,
+            52.123792,
+            54.692791,
+            52.167916
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_result_cache_ms": [
+        5.622042,
+        5.715625,
+        5.728375,
+        5.58875,
+        5.429583,
+        5.400417,
+        5.579208,
+        5.406083,
+        5.529958
+      ]
+    },
+    {
+      "mode": "server",
+      "query": "internal_literal",
+      "pattern": ".*PyObject_GenericGetAttr",
+      "files": 79,
+      "tools": {
+        "fxi": {
+          "median_ms": 8.139875,
+          "samples_ms": [
+            8.139875,
+            8.159417,
+            8.803625,
+            8.417666,
+            7.530834,
+            7.364875,
+            7.839916,
+            8.1415,
+            7.445084
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 7.040584,
+          "samples_ms": [
+            7.040584,
+            6.387584,
+            6.903667,
+            7.00725,
+            7.321792,
+            6.29975,
+            7.429167,
+            7.160625,
+            7.169625
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 52.542542,
+          "samples_ms": [
+            50.623083,
+            50.5375,
+            53.148167,
+            52.542542,
+            52.633166,
+            53.4655,
+            50.990833,
+            54.068208,
+            50.315667
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_result_cache_ms": [
+        6.843875,
+        7.230834,
+        7.6285,
+        7.450417,
+        7.216125,
+        6.752667,
+        7.52725,
+        7.288291,
+        7.001916
+      ]
+    },
+    {
+      "mode": "server",
+      "query": "insensitive",
+      "pattern": "pyobject_genericgetattr",
+      "files": 79,
+      "tools": {
+        "fxi": {
+          "median_ms": 11.354125,
+          "samples_ms": [
+            11.548334,
+            11.946709,
+            11.573125,
+            11.345167,
+            11.354125,
+            10.900917,
+            11.309166,
+            11.370708,
+            10.966166
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 7.268166,
+          "samples_ms": [
+            7.922958,
+            6.597291,
+            7.268166,
+            6.983542,
+            7.635542,
+            6.820917,
+            7.4565,
+            7.013,
+            7.478125
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 51.49825,
+          "samples_ms": [
+            50.266541,
+            48.513709,
+            49.241417,
+            51.49825,
+            52.774333,
+            52.438291,
+            49.697667,
+            52.545583,
+            53.584459
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_result_cache_ms": [
+        10.67425,
+        10.283584,
+        10.352458,
+        10.361458,
+        10.591791,
+        10.665833,
+        10.022,
+        10.198084,
+        10.660875
+      ]
+    }
+  ]
+}

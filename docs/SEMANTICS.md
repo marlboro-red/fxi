@@ -32,18 +32,11 @@ equals `rg -i -F error` (parity: *"token equals rg -i"*, *"-i token"*).
 This is deliberate: code search wants `handleError`, `HandleError`, and
 `handle_error` to be one query.
 
-Recall: candidates come from the union of
-1. the token index (identifiers, lowercased, split on `_` and case
-   boundaries),
-2. trigram postings (byte-exact substrings),
-3. when a trigram is too common to narrow (a *stop-gram*, present in more
-   than half of all files): tokens *containing* the query as a substring,
-   plus the intersection of the query's sub-token postings.
-
-Known gap: a substring that spans punctuation (e.g. matching `r::st` inside
-`vector::start`) whose trigrams are **all** stop-grams cannot be narrowed and
-may be missed. This requires punctuation trigrams present in >50% of files —
-rare, but possible in large C++ trees.
+Candidates use conservative trigram constraints derived from the matching
+expression, including Unicode case alternatives. Short substrings and omitted
+stop-grams broaden the candidate set; neither whole-token equality nor token
+positions may exclude a valid substring. Punctuation-spanning substrings retain
+recall even when every relevant gram is omitted.
 
 ### Phrases — case-sensitive unless `-i`
 
@@ -55,10 +48,20 @@ boundaries.
 ### Regex
 
 `re:/pat/` uses Rust `regex` syntax — notably **no backreferences or
-lookaround**. `-i` prepends `(?i)` (parity: *"-i regex"*). Literal-prefix
-narrowing is only applied when the prefix is required by every match:
-alternations disable it entirely and quantifiers exclude the optional
-character (`test_extract_regex_prefix`).
+lookaround**. `-i` prepends `(?i)` (parity: *"-i regex"*). HIR-based planning
+can use required literals anywhere in the expression, conservatively combines
+alternatives, and respects optional repetitions. Patterns are verified per line;
+invalid regexes return an error even when the candidate set is empty.
+
+### Ranked output and boosts
+
+Ranked output scores the complete verified result set before applying `top:N`.
+A boost such as `^3:needle` applies to lines containing that term; an unmatched
+OR branch does not boost other lines. If multiple boosted positive terms match a
+line, the largest boost applies. `^3:"exact phrase"` retains phrase case semantics.
+Ranking otherwise combines file match count, filename relevance, depth, and recency;
+it is a heuristic relevance model, not BM25. Files-only/content output does not use
+ranked filename fallback.
 
 ### Flags
 
@@ -134,3 +137,21 @@ edit can race a query; results are not a transactional snapshot of the entire
 filesystem.
 
 New or newly matching files still require an index update to become candidates.
+
+
+## Candidate planning and verification
+
+Regexes are parsed into `regex-syntax` HIR. Mandatory literals, alternatives,
+small character classes, and required repetitions produce conservative byte-gram
+constraints. Expansion limits fall back to broader candidates. Unicode-insensitive
+literals expand their possible encodings; token boundaries do not restrict substring
+recall. Every candidate is verified against source content.
+
+Files-only searches can use whole-buffer matching when the regex provably cannot
+cross or inspect line boundaries. Anchored, empty, and other context-sensitive
+patterns retain per-line matching. Content output always preserves original UTF-8
+byte offsets.
+
+Content caches are sharded, limited by both retained text bytes (64 MiB per reader)
+and entry count (4096), and validated against file metadata before each reuse.
+Concurrent queries can keep additional snapshots alive beyond those cache bounds.

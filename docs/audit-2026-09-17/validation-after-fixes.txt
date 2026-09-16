@@ -1,0 +1,731 @@
+Validation for application revision 4ba30e9 (macOS Apple M2 Max).
+rustc 1.94.0 (4a4ef493e 2026-03-02)
+
+$ cargo test --all-targets
+   Compiling fxi v0.1.0 (/Users/cjpark/Desktop/Projects/fxi)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.51s
+     Running unittests src/lib.rs (target/debug/deps/fxi-390b9a09872fe823)
+
+running 246 tests
+test index::reader::tests::test_index_reader_open_nonexistent ... ok
+test index::compact::tests::test_merge_sorted_lists ... ok
+test index::build::encoding_tests::index_eligibility_matches_utf8_verification ... ok
+test index::compact::tests::test_compute_stop_grams ... ok
+test index::reader::cache_budget_tests::cache_accounts_for_replacement_and_byte_eviction ... ok
+test index::reader::tests::test_index_reader_open ... ok
+test index::reader::tests::test_get_document_invalid_id ... ok
+test index::reader::tests::test_token_lookup_nonexistent ... ok
+test index::reader::tests::test_trigram_lookup ... ok
+test index::reader::tests::test_get_document ... ok
+test index::reader::tests::test_token_lookup ... ok
+test index::reader::tests::test_path_traversal_protection ... ok
+test index::reader::tests::test_get_path ... ok
+test index::reader::tests::test_read_file_cached ... ok
+test index::reader::tests::test_get_full_path ... ok
+test query::executor::tests::source_snapshot_survives_in_place_rewrite_and_truncation ... ok
+test index::reader::tests::test_valid_doc_ids ... ok
+test index::writer::tests::test_chunked_writer_empty_chunk ... ok
+test index::writer::tests::test_chunked_writer_single_chunk ... ok
+test query::executor::tests::test_executor_file_filter ... ok
+test query::executor::tests::test_executor_boosted_search ... ok
+test query::executor::tests::test_executor_all_filters_combined_no_match ... ok
+test query::executor::tests::test_executor_file_glob_filter ... ok
+test query::executor::tests::test_executor_extension_filter ... ok
+test index::writer::tests::test_trigram_frequencies_accumulated ... ok
+test index::writer::tests::test_chunked_writer_multiple_chunks ... ok
+test query::executor::tests::test_executor_grouped_or_with_and ... ok
+test query::executor::tests::test_executor_language_filter ... ok
+test index::writer::tests::test_async_write_completes_before_finalize ... ok
+test query::executor::tests::test_executor_line_filter ... ok
+test query::executor::tests::test_executor_line_filter_out_of_range ... ok
+test query::executor::tests::test_executor_line_filter_range ... ok
+test query::executor::tests::test_executor_mtime_filter_future ... ok
+test query::executor::tests::test_executor_mtime_filter_past ... ok
+test query::executor::tests::test_executor_regex_no_match ... ok
+test query::executor::tests::test_executor_mtime_filter_max_excludes_recent ... ok
+test query::executor::tests::test_executor_no_results ... ok
+test query::executor::tests::test_executor_near_search ... ok
+test query::executor::tests::test_extract_context_lines ... ok
+test query::executor::tests::test_extract_context_lines_at_end ... ok
+test query::executor::tests::test_extract_context_lines_at_start ... ok
+test query::executor::tests::test_find_literal_matches_case_insensitive ... ok
+test query::executor::tests::test_find_literal_matches_case_sensitive ... ok
+test query::executor::tests::test_find_literal_matches_crlf ... ok
+test query::executor::tests::test_find_literal_matches_first_per_line_and_columns ... ok
+test query::executor::tests::test_find_literal_matches_no_trailing_newline ... ok
+test query::executor::tests::test_executor_phrase_search ... ok
+test query::executor::tests::test_executor_mtime_filter_with_real_timestamp ... ok
+test query::executor::tests::test_find_proximity_matches_missing_term ... ok
+test query::executor::tests::test_find_proximity_matches_case_insensitive ... ok
+test query::executor::tests::test_parse_language ... ok
+test query::executor::tests::test_verify_content_and ... ok
+test query::executor::tests::test_verify_content_and_with_not ... ok
+test query::executor::tests::test_verify_content_literal ... ok
+test query::executor::tests::test_find_proximity_matches_within_distance ... ok
+test query::executor::tests::test_verify_content_near_beyond_distance ... ok
+test query::executor::tests::test_verify_content_near_missing_term ... ok
+test query::executor::tests::test_verify_content_near_same_line ... ok
+test query::executor::tests::test_verify_content_not_excludes ... ok
+test query::executor::tests::test_verify_content_near_within_distance ... ok
+test query::executor::tests::test_verify_content_not_includes ... ok
+test query::executor::tests::test_verify_content_or_neither_match ... ok
+test query::executor::tests::test_verify_content_or ... ok
+test query::executor::tests::test_verify_content_phrase ... ok
+test query::executor::tests::test_find_literal_matches_unicode ... ok
+test query::parser::tests::test_and_query ... ok
+test query::executor::tests::test_verify_content_regex_no_match ... ok
+test query::executor::tests::test_verify_content_regex_digits ... ok
+test query::executor::tests::test_verify_content_regex ... ok
+test query::executor::tests::unicode_literal_and_proximity_spans_use_original_bytes ... ok
+test query::parser::tests::test_boost_float_value ... ok
+test query::parser::tests::test_boost_on_phrase ... ok
+test query::parser::tests::test_boost_simple ... ok
+test query::parser::tests::test_boost_with_value ... ok
+test query::parser::tests::test_boost_zero ... ok
+test query::parser::tests::test_combined_filters ... ok
+test query::parser::tests::test_complex_query_with_multiple_filters ... ok
+test query::parser::tests::test_field_filter ... ok
+test query::parser::tests::test_file_filter_exact ... ok
+test query::parser::tests::test_file_filter_glob ... ok
+test query::parser::tests::test_filters_has_any_empty ... ok
+test query::parser::tests::test_file_filter_with_search_term ... ok
+test query::parser::tests::test_filters_has_any_with_ext ... ok
+test query::parser::tests::test_filters_has_any_with_filename ... ok
+test query::parser::tests::test_filters_has_any_with_size ... ok
+test query::parser::tests::test_lang_filter ... ok
+test query::parser::tests::test_lang_filter_aliases ... ok
+test query::parser::tests::test_line_filter_range ... ok
+test query::parser::tests::test_line_filter_reversed_range ... ok
+test query::parser::tests::test_line_filter_single ... ok
+test query::parser::tests::test_line_filter_zero ... ok
+test query::parser::tests::test_mtime_filter_both ... ok
+test query::parser::tests::test_mtime_filter_date ... ok
+test query::parser::tests::test_mtime_filter_max ... ok
+test query::parser::tests::test_mtime_filter_min ... ok
+test query::parser::tests::test_name_filter_alias ... ok
+test query::parser::tests::test_near_single_term_becomes_empty ... ok
+test query::parser::tests::test_near_with_other_terms ... ok
+test query::parser::tests::test_near_query ... ok
+test query::parser::tests::test_not_multiple ... ok
+test query::parser::tests::test_near_two_terms_no_distance_becomes_literal ... ok
+test query::parser::tests::test_near_query_default_distance ... ok
+test query::parser::tests::test_not_query ... ok
+test query::parser::tests::test_not_with_and ... ok
+test query::parser::tests::test_only_filters_no_search_term ... ok
+test query::parser::tests::test_or_query ... ok
+test query::parser::tests::test_paren_multiple_groups ... ok
+test query::parser::tests::test_paren_nested ... ok
+test query::parser::tests::test_paren_unclosed ... ok
+test query::parser::tests::test_paren_with_not ... ok
+test query::parser::tests::test_path_filter_glob ... ok
+test query::parser::tests::test_path_filter_simple ... ok
+test query::parser::tests::test_query_is_empty_no_filters ... ok
+test query::parser::tests::test_paren_empty ... ok
+test query::parser::tests::test_paren_simple_or_group ... ok
+test query::parser::tests::test_paren_with_phrase_inside ... ok
+test query::parser::tests::test_phrase_query ... ok
+test query::parser::tests::test_query_is_empty_with_ext_filter_only ... ok
+test query::parser::tests::test_query_is_empty_with_filter_only ... ok
+test query::parser::tests::test_query_is_empty_with_path_filter_only ... ok
+test query::parser::tests::test_query_is_empty_with_search_term ... ok
+test query::parser::tests::test_regex ... ok
+test query::parser::tests::test_regex_with_filter ... ok
+test query::parser::tests::test_regex_empty ... ok
+test query::parser::tests::test_regex_with_special_chars ... ok
+test query::parser::tests::test_size_filter_min ... ok
+test query::parser::tests::test_simple_query ... ok
+test query::parser::tests::test_size_filter_both ... ok
+test query::parser::tests::test_size_filter_invalid ... ok
+test query::parser::tests::test_size_filter_max ... ok
+test query::parser::tests::test_size_filter_zero ... ok
+test query::parser::tests::test_sort_path ... ok
+test query::parser::tests::test_sort_recency ... ok
+test query::parser::tests::test_sort_score ... ok
+test query::parser::tests::test_top_limit ... ok
+test query::parser::tests::test_top_limit_zero ... ok
+test query::parser::tests::test_unknown_field_treated_as_literal ... ok
+test query::parser::tests::test_whitespace_only ... ok
+test query::scorer::tests::test_boost_scoring ... ok
+test query::planner::tests::insensitive_phrases_keep_unicode_verification ... ok
+test query::planner::tests::plans_non_prefix_and_insensitive_constraints ... ok
+test query::scorer::tests::test_default_weights ... ok
+test query::scorer::tests::test_depth_penalty ... ok
+test query::scorer::tests::test_filename_match_bonus ... ok
+test query::scorer::tests::test_match_count_scoring ... ok
+test query::scorer::tests::test_path_depth ... ok
+test server::client_unix::tests::test_connect_when_not_running ... ok
+test query::regex_plan::line_tests::whole_buffer_existence_has_the_same_answer_as_line_verification ... ok
+test query::regex_plan::existence_tests::nullable_literal_reduction_preserves_line_existence ... ok
+test server::daemon_core::tests::test_should_compact_at_threshold ... ok
+test server::daemon_core::tests::test_should_compact_after_merge ... ok
+test server::daemon_core::tests::test_should_compact_below_threshold ... ok
+test server::daemon_core::tests::test_should_compact_no_deltas ... ok
+test server::daemon_core::tests::test_should_compact_tombstone_ratio ... ok
+test server::daemon_core::tests::test_should_compact_with_baseline ... ok
+test server::daemon_core::tests::test_should_compact_zero_docs ... ok
+test server::debouncer::tests::test_debouncer_clear ... ok
+test query::executor::tests::test_executor_not_operator ... ok
+test query::executor::tests::test_executor_regex_search ... ok
+test server::debouncer::tests::test_debouncer_create_then_delete ... ok
+test query::executor::tests::test_executor_simple_search ... ok
+test server::debouncer::tests::test_debouncer_not_ready_immediately ... ok
+test server::debouncer::tests::test_debouncer_create_then_modify ... ok
+test server::protocol::tests::test_content_search_response_resolved_root_default ... ok
+test server::protocol::tests::test_non_string_request_id_ignored ... ok
+test server::protocol::tests::test_read_message_without_id_backward_compat ... ok
+test server::protocol::tests::test_reloaded_response_resolved_root ... ok
+test server::protocol::tests::test_resolved_root_omitted_when_none ... ok
+test server::protocol::tests::test_roundtrip_hello_request ... ok
+test server::protocol::tests::test_roundtrip_hello_response ... ok
+test server::protocol::tests::test_roundtrip_request ... ok
+test server::protocol::tests::test_roundtrip_response ... ok
+test server::protocol::tests::test_roundtrip_watch_status ... ok
+test server::protocol::tests::test_roundtrip_with_request_id ... ok
+test server::protocol::tests::test_search_request_with_root_path_backward_compat ... ok
+test server::protocol::tests::test_search_request_without_root_path ... ok
+test server::protocol::tests::test_search_response_with_doc_id_backward_compat ... ok
+test server::protocol::tests::test_search_response_with_request_id ... ok
+test query::executor::tests::test_executor_size_filter_min ... ok
+test server::protocol::tests::test_status_response_version_defaults ... ok
+test query::executor::tests::test_executor_size_filter_range ... ok
+test server::protocol::tests::test_write_message_with_id_read_by_old_reader ... ok
+test server::watcher::tests::test_change_batch_add_created ... ok
+test server::watcher::tests::test_change_batch_clear ... ok
+test server::debouncer::tests::test_debouncer_delete_then_create ... ok
+test server::watcher::tests::test_change_batch_create_then_delete ... ok
+test server::watcher::tests::test_change_batch_create_then_modify ... ok
+test server::watcher::tests::test_change_batch_delete_then_create ... ok
+test query::executor::tests::test_executor_size_filter_max ... ok
+test server::watcher::tests::test_change_batch_is_empty ... ok
+test server::watcher::tests::test_change_batch_merge_create_then_delete ... ok
+test server::watcher::tests::test_change_batch_merge ... ok
+test server::watcher::tests::test_change_batch_merge_overlapping ... ok
+test server::watcher::tests::test_change_batch_multiple_modifications ... ok
+test server::watcher::tests::test_change_batch_total_changes ... ok
+test query::executor::tests::test_executor_with_limit ... ok
+test server::watcher::tests::test_config_file_parse_empty ... ok
+test server::watcher::tests::test_config_file_parse_no_watcher_section ... ok
+test server::watcher::tests::test_config_file_parse_partial ... ok
+test server::watcher::tests::test_config_file_parse_full ... ok
+test server::watcher::tests::test_watcher_config_default ... ok
+test server::watcher::tests::test_watcher_config_durations ... ok
+test utils::bloom::tests::test_bloom_filter_merge ... ok
+test utils::bloom::tests::test_bloom_filter_basic ... ok
+test utils::bloom::tests::test_hash_pair_independence ... ok
+test utils::encoding::tests::test_decode_position_postings_filtered_early_exit_and_empty ... ok
+test utils::encoding::tests::test_decode_position_postings_filtered_matches_full ... ok
+test utils::encoding::tests::test_delta_decode_bitmap_empty ... ok
+test utils::encoding::tests::test_delta_decode_bitmap_matches_vec_decode ... ok
+test utils::encoding::tests::test_delta_decode_intersect_empty_filter ... ok
+test utils::bloom::tests::test_bloom_filter_trigrams ... ok
+test utils::encoding::tests::test_delta_decode_intersect_matches_full_intersection ... ok
+test utils::encoding::tests::test_delta_encoding ... ok
+test utils::encoding::tests::test_position_postings_consecutive_docs ... ok
+test utils::encoding::tests::test_position_postings_empty ... ok
+test utils::encoding::tests::test_position_postings_roundtrip ... ok
+test utils::encoding::tests::test_position_postings_single_doc ... ok
+test utils::encoding::tests::test_varint_multibyte_boundaries ... ok
+test utils::encoding::tests::test_varint_roundtrip ... ok
+test utils::tokenizer::tests::test_extract_identifiers ... ok
+test utils::tokenizer::tests::test_extract_tokens ... ok
+test utils::tokenizer::tests::test_extract_tokens_with_positions_basic ... ok
+test utils::index_lock::tests::test_lock_excludes_second_writer ... ok
+test utils::index_lock::tests::test_lock_released_on_drop ... ok
+test utils::tokenizer::tests::test_extract_tokens_with_positions_camel_case ... ok
+test utils::tokenizer::tests::test_extract_tokens_with_positions_snake_case ... ok
+test utils::tokenizer::tests::test_positions_with_short_tokens_gap ... ok
+test utils::tokenizer::tests::test_snake_case ... ok
+test utils::tokenizer::tests::test_tokenize_query_matches_index ... ok
+test utils::tokenizer::tests::test_tokenize_query_with_positions ... ok
+test utils::trigram::tests::test_extract_trigrams ... ok
+test utils::trigram::tests::test_extract_trigrams_large ... ok
+test utils::trigram::tests::test_extract_trigrams_returns_vec ... ok
+test utils::trigram::tests::test_extract_trigrams_small ... ok
+test utils::trigram::tests::test_is_binary ... ok
+test utils::trigram::tests::test_query_trigrams ... ok
+test utils::trigram::tests::test_trigram_sparse_bitset ... ok
+test utils::trigram::tests::test_extract_trigrams_large_bitset_path ... ok
+test server::daemon_core::tests::repeated_queries_reverify_changed_and_deleted_sources ... ok
+test server::debouncer::tests::test_debouncer_multiple_files ... ok
+test utils::bloom::tests::test_bloom_filter_false_positive_rate ... ok
+test server::debouncer::tests::test_debouncer_single_event ... ok
+test server::daemon_core::tests::delta_recovery_reuses_held_writer_lock ... ok
+test utils::app_data::tests::test_hash_path ... ok
+test server::daemon_core::tests::watcher_reconciliation_handles_subtrees_and_nested_ignore_changes ... ok
+test server::daemon_core::tests::native_watcher_reports_deleted_paths ... ok
+
+test result: ok. 246 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
+
+     Running unittests src/main.rs (target/debug/deps/fxi-32d708d003883c41)
+
+running 246 tests
+test index::reader::tests::test_index_reader_open_nonexistent ... ok
+test index::compact::tests::test_merge_sorted_lists ... ok
+test index::compact::tests::test_compute_stop_grams ... ok
+test index::build::encoding_tests::index_eligibility_matches_utf8_verification ... ok
+test index::reader::cache_budget_tests::cache_accounts_for_replacement_and_byte_eviction ... ok
+test index::reader::tests::test_valid_doc_ids ... ok
+test index::reader::tests::test_read_file_cached ... ok
+test index::reader::tests::test_trigram_lookup ... ok
+test index::reader::tests::test_get_full_path ... ok
+test index::reader::tests::test_get_path ... ok
+test index::reader::tests::test_get_document_invalid_id ... ok
+test index::reader::tests::test_token_lookup ... ok
+test index::reader::tests::test_token_lookup_nonexistent ... ok
+test index::reader::tests::test_index_reader_open ... ok
+test index::reader::tests::test_get_document ... ok
+test query::executor::tests::source_snapshot_survives_in_place_rewrite_and_truncation ... ok
+test index::reader::tests::test_path_traversal_protection ... ok
+test index::writer::tests::test_async_write_completes_before_finalize ... ok
+test index::writer::tests::test_chunked_writer_empty_chunk ... ok
+test index::writer::tests::test_chunked_writer_single_chunk ... ok
+test query::executor::tests::test_executor_extension_filter ... ok
+test index::writer::tests::test_trigram_frequencies_accumulated ... ok
+test query::executor::tests::test_executor_file_filter ... ok
+test query::executor::tests::test_executor_all_filters_combined_no_match ... ok
+test index::writer::tests::test_chunked_writer_multiple_chunks ... ok
+test query::executor::tests::test_executor_language_filter ... ok
+test query::executor::tests::test_executor_grouped_or_with_and ... ok
+test query::executor::tests::test_executor_file_glob_filter ... ok
+test query::executor::tests::test_executor_boosted_search ... ok
+test query::executor::tests::test_executor_line_filter ... ok
+test query::executor::tests::test_executor_line_filter_out_of_range ... ok
+test query::executor::tests::test_executor_line_filter_range ... ok
+test query::executor::tests::test_executor_mtime_filter_max_excludes_recent ... ok
+test query::executor::tests::test_executor_mtime_filter_past ... ok
+test query::executor::tests::test_executor_mtime_filter_future ... ok
+test query::executor::tests::test_executor_regex_search ... ok
+test query::executor::tests::test_extract_context_lines ... ok
+test query::executor::tests::test_extract_context_lines_at_end ... ok
+test query::executor::tests::test_executor_near_search ... ok
+test query::executor::tests::test_extract_context_lines_at_start ... ok
+test query::executor::tests::test_find_literal_matches_case_insensitive ... ok
+test query::executor::tests::test_find_literal_matches_case_sensitive ... ok
+test query::executor::tests::test_find_literal_matches_crlf ... ok
+test query::executor::tests::test_find_literal_matches_first_per_line_and_columns ... ok
+test query::executor::tests::test_find_literal_matches_no_trailing_newline ... ok
+test query::executor::tests::test_find_proximity_matches_case_insensitive ... ok
+test query::executor::tests::test_find_proximity_matches_missing_term ... ok
+test query::executor::tests::test_find_proximity_matches_within_distance ... ok
+test query::executor::tests::test_parse_language ... ok
+test query::executor::tests::test_verify_content_and ... ok
+test query::executor::tests::test_verify_content_and_with_not ... ok
+test query::executor::tests::test_verify_content_literal ... ok
+test query::executor::tests::test_executor_phrase_search ... ok
+test query::executor::tests::test_executor_mtime_filter_with_real_timestamp ... ok
+test query::executor::tests::test_executor_regex_no_match ... ok
+test query::executor::tests::test_verify_content_near_beyond_distance ... ok
+test query::executor::tests::test_verify_content_near_missing_term ... ok
+test query::executor::tests::test_verify_content_near_same_line ... ok
+test query::executor::tests::test_verify_content_near_within_distance ... ok
+test query::executor::tests::test_verify_content_not_excludes ... ok
+test query::executor::tests::test_verify_content_not_includes ... ok
+test query::executor::tests::test_verify_content_or ... ok
+test query::executor::tests::test_verify_content_or_neither_match ... ok
+test query::executor::tests::test_verify_content_phrase ... ok
+test query::executor::tests::test_find_literal_matches_unicode ... ok
+test query::executor::tests::test_verify_content_regex_no_match ... ok
+test query::executor::tests::test_verify_content_regex ... ok
+test query::executor::tests::test_verify_content_regex_digits ... ok
+test query::parser::tests::test_and_query ... ok
+test query::parser::tests::test_boost_float_value ... ok
+test query::parser::tests::test_boost_on_phrase ... ok
+test query::parser::tests::test_boost_simple ... ok
+test query::parser::tests::test_boost_with_value ... ok
+test query::parser::tests::test_combined_filters ... ok
+test query::parser::tests::test_boost_zero ... ok
+test query::parser::tests::test_complex_query_with_multiple_filters ... ok
+test query::parser::tests::test_field_filter ... ok
+test query::executor::tests::test_executor_no_results ... ok
+test query::parser::tests::test_file_filter_exact ... ok
+test query::parser::tests::test_file_filter_glob ... ok
+test query::parser::tests::test_file_filter_with_search_term ... ok
+test query::parser::tests::test_filters_has_any_empty ... ok
+test query::parser::tests::test_filters_has_any_with_ext ... ok
+test query::parser::tests::test_filters_has_any_with_filename ... ok
+test query::parser::tests::test_filters_has_any_with_size ... ok
+test query::parser::tests::test_lang_filter ... ok
+test query::executor::tests::unicode_literal_and_proximity_spans_use_original_bytes ... ok
+test query::parser::tests::test_lang_filter_aliases ... ok
+test query::parser::tests::test_line_filter_range ... ok
+test query::parser::tests::test_line_filter_reversed_range ... ok
+test query::parser::tests::test_line_filter_single ... ok
+test query::parser::tests::test_line_filter_zero ... ok
+test query::parser::tests::test_mtime_filter_both ... ok
+test query::parser::tests::test_mtime_filter_date ... ok
+test query::parser::tests::test_mtime_filter_max ... ok
+test query::parser::tests::test_mtime_filter_min ... ok
+test query::parser::tests::test_name_filter_alias ... ok
+test query::parser::tests::test_near_query ... ok
+test query::parser::tests::test_near_query_default_distance ... ok
+test query::parser::tests::test_near_single_term_becomes_empty ... ok
+test query::parser::tests::test_near_two_terms_no_distance_becomes_literal ... ok
+test query::parser::tests::test_not_multiple ... ok
+test query::parser::tests::test_not_query ... ok
+test query::parser::tests::test_near_with_other_terms ... ok
+test query::parser::tests::test_only_filters_no_search_term ... ok
+test query::parser::tests::test_not_with_and ... ok
+test query::parser::tests::test_or_query ... ok
+test query::parser::tests::test_paren_empty ... ok
+test query::parser::tests::test_paren_multiple_groups ... ok
+test query::parser::tests::test_paren_nested ... ok
+test query::parser::tests::test_paren_simple_or_group ... ok
+test query::parser::tests::test_paren_unclosed ... ok
+test query::parser::tests::test_paren_with_not ... ok
+test query::parser::tests::test_path_filter_glob ... ok
+test query::parser::tests::test_path_filter_simple ... ok
+test query::parser::tests::test_phrase_query ... ok
+test query::parser::tests::test_paren_with_phrase_inside ... ok
+test query::parser::tests::test_query_is_empty_with_ext_filter_only ... ok
+test query::parser::tests::test_query_is_empty_no_filters ... ok
+test query::parser::tests::test_query_is_empty_with_filter_only ... ok
+test query::parser::tests::test_query_is_empty_with_search_term ... ok
+test query::parser::tests::test_query_is_empty_with_path_filter_only ... ok
+test query::parser::tests::test_regex ... ok
+test query::parser::tests::test_regex_empty ... ok
+test query::parser::tests::test_regex_with_filter ... ok
+test query::parser::tests::test_simple_query ... ok
+test query::parser::tests::test_regex_with_special_chars ... ok
+test query::executor::tests::test_executor_not_operator ... ok
+test query::parser::tests::test_size_filter_both ... ok
+test query::parser::tests::test_size_filter_invalid ... ok
+test query::parser::tests::test_size_filter_max ... ok
+test query::parser::tests::test_size_filter_min ... ok
+test query::parser::tests::test_size_filter_zero ... ok
+test query::parser::tests::test_sort_path ... ok
+test query::parser::tests::test_sort_score ... ok
+test query::parser::tests::test_sort_recency ... ok
+test query::parser::tests::test_top_limit ... ok
+test query::parser::tests::test_top_limit_zero ... ok
+test query::parser::tests::test_unknown_field_treated_as_literal ... ok
+test query::parser::tests::test_whitespace_only ... ok
+test query::scorer::tests::test_boost_scoring ... ok
+test query::scorer::tests::test_default_weights ... ok
+test query::planner::tests::insensitive_phrases_keep_unicode_verification ... ok
+test query::scorer::tests::test_match_count_scoring ... ok
+test query::scorer::tests::test_depth_penalty ... ok
+test query::scorer::tests::test_filename_match_bonus ... ok
+test query::planner::tests::plans_non_prefix_and_insensitive_constraints ... ok
+test query::scorer::tests::test_path_depth ... ok
+test query::regex_plan::line_tests::whole_buffer_existence_has_the_same_answer_as_line_verification ... ok
+test server::client_unix::tests::test_connect_when_not_running ... ok
+test server::daemon_core::tests::test_should_compact_after_merge ... ok
+test server::daemon_core::tests::test_should_compact_at_threshold ... ok
+test server::daemon_core::tests::test_should_compact_below_threshold ... ok
+test server::daemon_core::tests::test_should_compact_no_deltas ... ok
+test server::daemon_core::tests::test_should_compact_tombstone_ratio ... ok
+test server::daemon_core::tests::test_should_compact_with_baseline ... ok
+test server::daemon_core::tests::test_should_compact_zero_docs ... ok
+test query::regex_plan::existence_tests::nullable_literal_reduction_preserves_line_existence ... ok
+test server::debouncer::tests::test_debouncer_clear ... ok
+test query::executor::tests::test_executor_simple_search ... ok
+test server::debouncer::tests::test_debouncer_create_then_delete ... ok
+test server::debouncer::tests::test_debouncer_create_then_modify ... ok
+test server::debouncer::tests::test_debouncer_delete_then_create ... ok
+test server::debouncer::tests::test_debouncer_not_ready_immediately ... ok
+test server::protocol::tests::test_non_string_request_id_ignored ... ok
+test server::protocol::tests::test_content_search_response_resolved_root_default ... ok
+test server::protocol::tests::test_read_message_without_id_backward_compat ... ok
+test server::protocol::tests::test_reloaded_response_resolved_root ... ok
+test server::protocol::tests::test_resolved_root_omitted_when_none ... ok
+test query::executor::tests::test_executor_size_filter_min ... ok
+test server::protocol::tests::test_roundtrip_hello_request ... ok
+test server::protocol::tests::test_roundtrip_hello_response ... ok
+test server::protocol::tests::test_roundtrip_request ... ok
+test query::executor::tests::test_executor_with_limit ... ok
+test query::executor::tests::test_executor_size_filter_range ... ok
+test server::protocol::tests::test_roundtrip_response ... ok
+test server::protocol::tests::test_roundtrip_watch_status ... ok
+test server::protocol::tests::test_roundtrip_with_request_id ... ok
+test server::protocol::tests::test_search_request_with_root_path_backward_compat ... ok
+test server::protocol::tests::test_search_request_without_root_path ... ok
+test server::protocol::tests::test_search_response_with_doc_id_backward_compat ... ok
+test server::protocol::tests::test_status_response_version_defaults ... ok
+test server::protocol::tests::test_search_response_with_request_id ... ok
+test server::protocol::tests::test_write_message_with_id_read_by_old_reader ... ok
+test server::watcher::tests::test_change_batch_add_created ... ok
+test server::watcher::tests::test_change_batch_clear ... ok
+test server::watcher::tests::test_change_batch_create_then_delete ... ok
+test query::executor::tests::test_executor_size_filter_max ... ok
+test server::watcher::tests::test_change_batch_create_then_modify ... ok
+test server::watcher::tests::test_change_batch_delete_then_create ... ok
+test server::watcher::tests::test_change_batch_is_empty ... ok
+test server::watcher::tests::test_change_batch_merge ... ok
+test server::watcher::tests::test_change_batch_merge_create_then_delete ... ok
+test server::watcher::tests::test_change_batch_merge_overlapping ... ok
+test server::watcher::tests::test_change_batch_multiple_modifications ... ok
+test server::watcher::tests::test_change_batch_total_changes ... ok
+test server::watcher::tests::test_config_file_parse_empty ... ok
+test server::watcher::tests::test_watcher_config_default ... ok
+test server::watcher::tests::test_config_file_parse_no_watcher_section ... ok
+test server::watcher::tests::test_config_file_parse_partial ... ok
+test server::watcher::tests::test_watcher_config_durations ... ok
+test server::watcher::tests::test_config_file_parse_full ... ok
+test utils::bloom::tests::test_bloom_filter_basic ... ok
+test utils::bloom::tests::test_bloom_filter_merge ... ok
+test utils::bloom::tests::test_hash_pair_independence ... ok
+test utils::encoding::tests::test_decode_position_postings_filtered_early_exit_and_empty ... ok
+test utils::bloom::tests::test_bloom_filter_trigrams ... ok
+test utils::encoding::tests::test_decode_position_postings_filtered_matches_full ... ok
+test utils::encoding::tests::test_delta_decode_bitmap_empty ... ok
+test utils::encoding::tests::test_delta_decode_bitmap_matches_vec_decode ... ok
+test utils::encoding::tests::test_delta_decode_intersect_empty_filter ... ok
+test utils::encoding::tests::test_delta_encoding ... ok
+test utils::encoding::tests::test_delta_decode_intersect_matches_full_intersection ... ok
+test utils::encoding::tests::test_position_postings_consecutive_docs ... ok
+test utils::encoding::tests::test_position_postings_empty ... ok
+test utils::encoding::tests::test_position_postings_roundtrip ... ok
+test utils::encoding::tests::test_position_postings_single_doc ... ok
+test utils::encoding::tests::test_varint_multibyte_boundaries ... ok
+test utils::encoding::tests::test_varint_roundtrip ... ok
+test utils::tokenizer::tests::test_extract_tokens ... ok
+test utils::tokenizer::tests::test_extract_identifiers ... ok
+test utils::tokenizer::tests::test_extract_tokens_with_positions_camel_case ... ok
+test utils::tokenizer::tests::test_extract_tokens_with_positions_basic ... ok
+test utils::index_lock::tests::test_lock_excludes_second_writer ... ok
+test utils::tokenizer::tests::test_extract_tokens_with_positions_snake_case ... ok
+test utils::tokenizer::tests::test_positions_with_short_tokens_gap ... ok
+test utils::index_lock::tests::test_lock_released_on_drop ... ok
+test utils::tokenizer::tests::test_snake_case ... ok
+test utils::tokenizer::tests::test_tokenize_query_matches_index ... ok
+test utils::trigram::tests::test_extract_trigrams ... ok
+test utils::tokenizer::tests::test_tokenize_query_with_positions ... ok
+test utils::trigram::tests::test_extract_trigrams_large ... ok
+test utils::trigram::tests::test_extract_trigrams_returns_vec ... ok
+test utils::trigram::tests::test_extract_trigrams_small ... ok
+test utils::trigram::tests::test_is_binary ... ok
+test utils::trigram::tests::test_query_trigrams ... ok
+test utils::trigram::tests::test_extract_trigrams_large_bitset_path ... ok
+test utils::trigram::tests::test_trigram_sparse_bitset ... ok
+test server::daemon_core::tests::repeated_queries_reverify_changed_and_deleted_sources ... ok
+test utils::bloom::tests::test_bloom_filter_false_positive_rate ... ok
+test server::debouncer::tests::test_debouncer_multiple_files ... ok
+test utils::app_data::tests::test_hash_path ... ok
+test server::daemon_core::tests::delta_recovery_reuses_held_writer_lock ... ok
+test server::debouncer::tests::test_debouncer_single_event ... ok
+test server::daemon_core::tests::watcher_reconciliation_handles_subtrees_and_nested_ignore_changes ... ok
+test server::daemon_core::tests::native_watcher_reports_deleted_paths ... ok
+
+test result: ok. 246 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
+
+     Running tests/index_correctness.rs (target/debug/deps/index_correctness-391adf95ec857bb0)
+
+running 12 tests
+test opening_reader_preserves_in_progress_writer_files ... ok
+test failed_rebuild_does_not_replace_published_index ... ok
+test empty_postings_are_valid_without_placeholder_files ... ok
+test deletion_only_delta_publishes_no_missing_segment ... ok
+test legacy_seconds_and_watcher_nanoseconds_normalize_on_read ... ok
+test truncated_postings_fail_open ... ok
+test published_readers_remain_valid_across_compaction_and_rebuild ... ok
+test impossible_record_counts_and_path_lengths_fail_before_allocation ... ok
+test incremental_scan_detects_subsecond_and_same_stamp_size_changes ... ok
+test incomplete_segments_fail_open_instead_of_losing_matches ... ok
+test concurrent_opens_observe_complete_rebuild_generations ... ok
+test repeated_compaction_preserves_omitted_gram_coverage ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+
+     Running tests/parity_grid.rs (target/debug/deps/parity_grid-19a86a3c24f82f5f)
+
+running 2 tests
+test parity_grid_direct ... ok
+test parity_grid_daemon ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.32s
+
+     Running tests/query_correctness.rs (target/debug/deps/query_correctness-0cdccebd6a51a844)
+
+running 9 tests
+test ranked_filename_hits_respect_filters_boolean_terms_and_unlimited ... ok
+test invalid_regex_is_an_error_even_with_no_candidates ... ok
+test boosts_preserve_phrase_case_and_only_affect_matching_lines ... ok
+test substring_candidates_are_a_superset_of_unicode_matches ... ok
+test ranked_limit_is_a_prefix_of_the_complete_ranking ... ok
+test parallel_cached_verification_observes_rewrites_and_deletions ... ok
+test or_includes_branches_without_index_constraints ... ok
+test files_only_obeys_line_regex_and_filter_semantics ... ok
+test hir_candidates_match_brute_force_regex_across_deltas_and_compaction ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+
+     Running tests/ripgrep_compat.rs (target/debug/deps/ripgrep_compat-aeaa4cf75401ebd4)
+
+running 70 tests
+test test_binary_files_excluded_by_extension ... ok
+test test_binary_content_excluded ... ok
+test test_chunk_size_default_no_flag ... ok
+test test_combined_flags ... ok
+test test_combined_file_and_line ... ok
+test test_empty_query_with_filters_only ... ok
+test test_filter_ext ... ok
+test test_filter_combined ... ok
+test test_combined_regex_and_ext ... ok
+test test_filter_ext_with_search ... ok
+test test_context_overrides ... ok
+test test_chunk_size_small_multiple_segments ... ok
+test test_chunk_size_zero_all_in_one ... ok
+test test_filter_file_exact ... ok
+test test_filter_file_glob ... ok
+test test_filter_file_only_single_result_per_file ... ok
+test test_case_sensitivity_difference ... ok
+test test_boost_search_returns_results ... ok
+test test_filter_file_no_substring_match ... ok
+test test_filter_lang_rust ... ok
+test test_filter_lang_no_match ... ok
+test test_filter_line_out_of_range ... ok
+test test_filter_file_with_search ... ok
+test test_filter_line_single ... ok
+test test_filter_line_range ... ok
+test test_filter_size_max_excludes_all ... ok
+test test_filter_size_min ... ok
+test test_filter_path_glob ... ok
+test test_filter_sort_path ... ok
+test test_filter_top_limit ... ok
+test test_flag_after_context ... ok
+test test_flag_color_always ... ok
+test test_flag_invert_match_unsupported ... ok
+test test_flag_before_context ... ok
+test test_flag_case_insensitive_regex ... ok
+test test_flag_color_never ... ok
+test test_flag_context_both ... ok
+test test_help_shows_ripgrep_flags ... ok
+test test_flag_case_insensitive_phrase ... ok
+test test_flag_max_count ... ok
+test test_json_file_search ... ok
+test test_flag_files_with_matches ... ok
+test test_flag_count ... ok
+test test_flag_case_insensitive ... ok
+test test_flag_multiple_patterns ... ok
+test test_near_search_within_distance ... ok
+test test_flag_word_regexp ... ok
+test test_hyphenated_terms ... ok
+test test_near_search_terms_too_far ... ok
+test test_not_operator_excludes_term ... ok
+test test_no_subcommand_does_search ... ok
+test test_not_operator_multiple_exclusions ... ok
+test test_multiple_flags_order ... ok
+test test_or_operator_pipe ... ok
+test test_output_line_numbers ... ok
+test test_output_format_basic ... ok
+test test_paren_or_with_and ... ok
+test test_paren_or_group ... ok
+test test_regex_digit_pattern ... ok
+test test_regex_with_filter ... ok
+test test_regex_search ... ok
+test test_sort_recency ... ok
+test test_regex_no_match ... ok
+test test_phrase_search_syntax ... ok
+test test_special_characters_in_pattern ... ok
+test test_phrase_vs_and_search ... ok
+test test_search_no_results ... ok
+test test_search_parity_phrase ... ok
+test test_search_parity_simple ... ok
+test test_symlinks_not_indexed ... ok
+
+test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running benches/benchmarks.rs (target/debug/deps/benchmarks-43e799512aa8782e)
+Gnuplot not found, using plotters backend
+Testing query_parsing/simple
+Success
+Testing query_parsing/two words
+Success
+Testing query_parsing/"exact phrase"
+Success
+Testing query_parsing/ext:rs fn
+Success
+Testing query_parsing/lang:rust struct
+Success
+Testing query_parsing/path:src/*.rs impl
+Success
+Testing query_parsing/re:/\d+/
+Success
+Testing query_parsing/complex AND (query OR search) -exclude
+Success
+
+Testing trigram_extraction/small_32b
+Success
+Testing trigram_extraction/medium_3kb
+Success
+Testing trigram_extraction/large_32kb
+Success
+
+Testing token_extraction
+Success
+
+Indexing: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/.tmpIRfuwV
+Index complete
+Index stored at: /Users/cjpark/Library/Application Support/fxi/indexes/tmpIRfuwV-c44c561c10a2a295/generations/gen-27975-1789571512999234000-0
+Testing search/simple_word
+Success
+Testing search/phrase
+Success
+Testing search/ext_filter
+Success
+Testing search/regex
+Success
+
+Indexing: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/.tmpCNGj6P
+Index complete
+Index stored at: /Users/cjpark/Library/Application Support/fxi/indexes/tmpCNGj6P-0792ce8cc3565404/generations/gen-27975-1789571513041054000-1
+Testing index_open
+Success
+
+Testing protocol/write_5k_matches
+Success
+Testing protocol/read_5k_matches
+Success
+
+     Running unittests examples/gram_lab.rs (target/debug/examples/gram_lab-a9490b704eca8144)
+
+running 1 test
+test tests::signatures_never_reject_a_real_substring_including_file_end ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running unittests examples/query_profile.rs (target/debug/examples/query_profile-418874e571b32384)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+
+$ cargo clippy --all-targets -- -D warnings
+    Checking fxi v0.1.0 (/Users/cjpark/Desktop/Projects/fxi)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.20s
+
+
+$ cargo +1.88.0 check --locked --all-targets
+    Checking fxi v0.1.0 (/Users/cjpark/Desktop/Projects/fxi)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.59s
+
+
+$ npm test && npx tsc --noEmit (vscode-extension)
+
+> fxi@0.1.0 test
+> vitest run
+
+
+ RUN  v4.0.18 /Users/cjpark/Desktop/Projects/fxi/vscode-extension
+
+ ✓ src/webview/messages.test.ts (10 tests) 3ms
+ ✓ src/daemon/protocol.test.ts (23 tests) 4ms
+ ✓ src/webview/getWebviewContent.test.ts (29 tests) 4ms
+ ✓ src/ui/workspace.test.ts (2 tests) 1ms
+ ✓ src/daemon/socket.test.ts (6 tests) 21ms
+ ✓ src/webview/SearchPanelProvider.test.ts (4 tests) 160ms
+ ✓ src/daemon/client.test.ts (17 tests) 981ms
+
+ Test Files  7 passed (7)
+      Tests  91 passed (91)
+   Start at  01:17:12
+   Duration  1.15s (transform 420ms, setup 0ms, import 487ms, tests 1.17s, environment 0ms)
+
+
+
+$ cargo fmt --check
+Passed with no output.
+$ git diff --check
+Passed with no output.

@@ -4,10 +4,10 @@ A terminal-first, ultra-fast code search engine built in Rust.
 
 ## Features
 
-- **Up to ~400x faster than ripgrep** on selective queries against large codebases (verified on Linux kernel and Chromium)
+- **Indexed code search** with conservative regex planning and verified candidate matches
 - **Ripgrep-like CLI**: Familiar flags (`-i`, `-A`, `-B`, `-C`, `-l`, `-c`)
 - **Persistent daemon**: Keeps indexes warm for instant searches
-- **Hybrid indexing**: Trigram + token index for fast narrowing
+- **Regex-aware indexing**: Conservative trigram plans, with token and position data available for structured queries
 - **Rich query syntax**: Boolean operators, proximity search, field filters, regex
 - **Interactive TUI**: Real-time search with vim-style keybindings
 - **Instant preview**: File preview with matched line highlighting
@@ -171,13 +171,13 @@ src/server/daemon.rs
 
 #### Performance
 
-When the daemon is running (`fxi daemon start`), selective searches complete in **tens of milliseconds** even on massive codebases like Chromium (449k files), and repeated queries are served from the daemon's result cache in single-digit milliseconds. Without the daemon, add ~50ms-1s for cold index loading.
+The daemon keeps immutable index readers loaded and reuses bounded, metadata-validated content snapshots. Every query is verified; full-result memoization is disabled. Latency depends on candidate volume, file sizes, and output mode. See the reproducible benchmarks below.
 
 ```bash
 # Start daemon for instant searches
 fxi daemon start
 
-# Now searches are up to ~400x faster than ripgrep
+# Searches now reuse the loaded index
 fxi '"class Browser"'  # ~111ms vs ripgrep's ~9.9 seconds on Chromium
 ```
 
@@ -201,7 +201,7 @@ fxi daemon foreground      # Run in foreground (for debugging)
 fxi daemon foreground --watch  # Foreground with file watching
 ```
 
-The daemon keeps indexes loaded in memory. When running, searches are **up to ~400x faster** on large codebases. Searches automatically use the daemon if available, falling back to direct index loading if not.
+The daemon keeps indexes loaded in memory. Searches automatically use it when available, falling back to direct index loading otherwise.
 
 #### File Watching
 
@@ -389,67 +389,22 @@ Press `F1` or `?` to show help in the TUI.
 +------------------+
 ```
 
-## Performance Targets
+## Performance and validation
 
-| Operation | Target | Achieved |
-|-----------|--------|----------|
-| Warm query (selective) | <50ms | **8-110ms** novel query, **4-26ms** repeated (Chromium) |
-| Cold startup | <2s | ~50ms-1s (query-dependent) |
-| Full build (1M files) | <5 min | ~31s for 449k files (extrapolates to ~70s) |
-| Delta update (100 files) | <1s | 0.4s (Linux, 93k files); 3.2s (Chromium, 449k files — scan-bound) |
-| RAM usage | <500MB | 1.6-2.5GB peak during indexing; streaming segment writes are the known path to the target |
+Current measurements, correctness fixes, research experiments, and remaining gaps
+are documented in [the engineering report](docs/audit-2026-09-17/PROGRESS.md).
+The [benchmark harness](docs/audit-2026-09-17/benchmark.py) compares full matching
+file sets against ripgrep on every run, with pinned Redis and CPython corpora,
+interleaved samples, and separate direct/server measurements.
 
-## Benchmarks
+Earlier Linux/Chromium “up to 400x” claims and million-file extrapolations are
+not accepted as current evidence. The [audit](docs/audit-2026-09-17/AUDIT.md)
+explains the scope, cache, and correctness problems in the old methodology.
 
-Measured 2026-06-12 on Apple M2 Max (12 cores, 64GB) against ripgrep 15.1.0.
-
-**Methodology:** fxi daemon running with the index loaded. The **fxi** column is novel-query latency: the daemon's query-result cache is cleared (`fxi daemon reload`) before each timed run, mean of 3 runs. The **fxi repeated** column is the same query again, served from the daemon result cache. **rg** is the mean of 3 runs with warm OS file cache. Matching-file counts from both tools are shown for validation; small deltas (<0.3%) come from fxi skipping symlinked files and differences in binary/encoding detection.
-
-### Searching — Linux Kernel (93,407 files, 1.5GB source)
-
-| Query | fxi | fxi repeated | rg | Speedup (novel) | fxi files | rg files |
-|-------|-----|--------------|-----|------------------|-----------|----------|
-| `"static void"` | 1251ms | 197ms | 3211ms | **2.6x** | 24,217 | 24,273 |
-| `"unsigned long"` | 1053ms | 164ms | 3385ms | **3.2x** | 20,642 | 20,695 |
-| `"struct file_operations"` | 58ms | 8ms | 3378ms | **58x** | 1,259 | 1,260 |
-| `"unlikely(!page)"` | 11ms | 5ms | 3386ms | **313x** | 52 | 52 |
-| `-i deadlock` | 57ms | 8ms | 3277ms | **58x** | 986 | 1,005 |
-| `re:/spin_lock_irqsave\(&\w+/` | 165ms | 21ms | 3375ms | **20x** | 3,207 | 3,217 |
-| `-l "kmalloc"` | 74ms | 9ms | 3506ms | **47x** | 3,651 | 3,671 |
-| `-C 3 "module_init("` | 197ms | 14ms | 3500ms | **18x** | 3,134 | 3,155 |
-| `file:*.dts` | 22ms | 7ms | 88ms | **4.0x** | 3,580 | 3,580 |
-| `static void init` (all-of-file AND) | 800ms | — | n/a | — | 29,573 | n/a |
-
-### Searching — Chromium (449,092 files, 6.7GB source)
-
-| Query | fxi | fxi repeated | rg | Speedup (novel) | fxi files | rg files |
-|-------|-----|--------------|-----|------------------|-----------|----------|
-| `"class Browser"` | 113ms | 9ms | 8840ms | **78x** | 2,964 | 2,970 |
-| `"void OnError"` | 24ms | 5ms | 8917ms | **373x** | 466 | 466 |
-| `"namespace content"` | 357ms | 24ms | 8952ms | **25x** | 9,329 | 9,331 |
-| `"std::unique_ptr"` | 2215ms | 215ms | 9377ms | **4.2x** | 43,918 | 43,918 |
-| `-i deprecated` | 427ms | 60ms | 9757ms | **23x** | 7,119 | 7,149 |
-| `re:/scoped_refptr<\w+>/` | 632ms | 43ms | 9011ms | **14x** | 7,895 | 7,895 |
-| `-l "WeakPtr"` | 428ms | 27ms | 9248ms | **22x** | 18,407 | 18,436 |
-| `-C 3 "RunUntilIdle()"` | 318ms | 94ms | 9033ms | **28x** | 3,677 | 3,677 |
-| `file:*.mojom` | 75ms | 6ms | 898ms | **12x** | 1,880 | 1,880 |
-
-Note on `-i`: case-insensitive queries narrow through the lowercased token index, so they can miss mixed-case occurrences that only appear as substrings spanning token boundaries (the file counts above show the gap vs ripgrep: ~2% on these queries).
-
-### Indexing
-
-| Metric | Linux Kernel | Chromium |
-|--------|--------------|----------|
-| Files indexed | 93,407 | 449,092 |
-| Full build | 8.6s | 27.7s |
-| Throughput | ~10,820 files/sec | ~16,240 files/sec |
-| Incremental update (50 changed files) | 0.44s | 3.2s |
-| No-op scan (nothing changed) | 0.6s | 2.9s |
-| Peak RSS during build | ~1.8GB | ~2.5GB |
-
-Peak RSS scales with `--chunk-size` (default 2000 files per segment). More segments are not a query-time cost: the reader searches segments in parallel, and a ~250-segment Chromium index measurably answers queries faster than the same index compacted to one segment.
-
-Incremental updates write delta segments for changed files only; the change-detection scan walks the tree with parallel walker threads.
+Search worker concurrency can be explored with `FXI_SEARCH_PARALLELISM` (positive
+integer). The default bounds source-file read tasks independently of index build
+workers. Each reader retains at most 64 MiB of cached text and 4096 cache entries;
+metadata is checked before reuse. These are cache bounds, not a total RSS limit.
 
 ## License
 
