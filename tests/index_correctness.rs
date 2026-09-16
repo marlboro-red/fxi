@@ -396,3 +396,42 @@ fn token_dictionary_order_and_overflowed_ranges_fail_open() {
         );
     }
 }
+
+#[test]
+fn legacy_token_dictionaries_without_positions_remain_readable() {
+    let fixture = Fixture::new();
+    let index = fixture.index();
+    let dict_path = index.join("segments/seg_0001/tokens.dict");
+    let bytes = fs::read(&dict_path).unwrap();
+    let count = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+    let mut legacy = bytes[..4].to_vec();
+    let mut cursor = 4;
+    for _ in 0..count {
+        let len = u16::from_le_bytes(bytes[cursor..cursor + 2].try_into().unwrap()) as usize;
+        legacy.extend_from_slice(&bytes[cursor..cursor + 18 + len]);
+        cursor += 30 + len;
+    }
+    fs::write(dict_path, legacy).unwrap();
+    fs::remove_file(index.join("segments/seg_0001/tokens.positions")).unwrap();
+    let meta_path = index.join("meta.json");
+    let mut meta: serde_json::Value =
+        serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+    meta["has_positions"] = serde_json::json!(false);
+    fs::write(meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    let reader = IndexReader::open(fixture.0.path()).unwrap();
+    assert_eq!(
+        reader.get_token_docs("vector").iter().collect::<Vec<_>>(),
+        vec![1]
+    );
+}
+
+#[test]
+fn index_payload_directories_are_rejected() {
+    for name in ["grams.postings", "tokens.postings", "tokens.positions"] {
+        let fixture = Fixture::new();
+        let path = fixture.index().join("segments/seg_0001").join(name);
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(path).unwrap();
+        assert!(IndexReader::open(fixture.0.path()).is_err(), "{name}");
+    }
+}
