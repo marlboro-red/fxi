@@ -39,7 +39,7 @@ for name in sp.check_output(['rg','--files'],cwd=source,text=True).splitlines():
 sp.run(['git','init','-q',str(root)],check=True)
 def run(cmd):
  start=time.perf_counter_ns(); p=sp.run(cmd,cwd=root,env=env,stdout=sp.PIPE,stderr=sp.PIPE); elapsed=(time.perf_counter_ns()-start)/1e6
- if p.returncode not in (0,1): raise RuntimeError((cmd,p.returncode,p.stderr.decode()))
+ if p.returncode not in ((0,) if cmd[0] == fxi else (0,1)): raise RuntimeError((cmd,p.returncode,p.stderr.decode()))
  if b'Daemon search failed' in p.stderr: raise RuntimeError(('Daemon fallback invalidates server measurement', cmd, p.stderr.decode()))
  records=[]
  for line in p.stdout.decode().splitlines():

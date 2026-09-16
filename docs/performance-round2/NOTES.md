@@ -318,3 +318,102 @@ one-shot plain `return` count samples (`linux-plain-counts.json`) measured
 and ripgrep use case-insensitive fixed-string matching to match FXI's plain
 literal semantics. Every per-file count was verified. Do not compare these
 numbers directly with the earlier case-sensitive regex workload.
+
+
+## Source-read safety and further startup work
+
+`b10b058` rejects incremental segment-ID exhaustion before starting a writer,
+considering both base and delta IDs. Its regression test verifies that the
+previous generation and search results survive the rejected update.
+`68109c6` reads source metadata and bounded content from the same opened file,
+preventing path replacement between metadata collection and opening a different
+file. Reads stop at the size limit plus one byte, reject growth beyond the limit,
+and retain owned snapshots. Tests cover replacement, growth, shrinkage and bounds.
+This does not make concurrent in-place edits transactional.
+
+Five isolated interleaved Linux builds (`linux-source-handle-builds.json`) gave
+4.448 → 4.421 s and 343.5 → 340.6 MiB peak RSS at default concurrency: no
+substantial speed claim. Eight build threads measured 3.941 s / 320.8 MiB.
+An earlier 4/8/12-thread sweep gave 5.777/4.093/4.433 s. This is machine- and
+workload-specific: a separate strict-reader startup experiment got slower with
+8 and then 4 threads. The global Rayon default remains unchanged.
+
+A parallel token/gram inversion prototype measured 4.343 → 4.207 s while peak
+RSS increased 336.6 → 386.6 MiB. Rejected: a roughly 3% build speed improvement
+does not justify 15% more memory here. The patch and all five raw samples are
+retained in `parallel-inversion-experiment.patch` and `linux-parallel-inversion.json`.
+The same run measured tgrep at 7.954 s / 266.1 MiB.
+
+`20862e5` maps immutable document/path metadata, decodes bounded records and avoids
+an intermediate path allocation. Truncation and legacy-format tests cover the
+change. In 31 interleaved one-shot samples, absent search improved 23.213 →
+22.557 ms and selective search 24.981 → 24.453 ms. `ea7f1dc` then fused token
+UTF-8/order/range validation into dictionary offset construction, retaining
+validation while removing a second pass: absent 22.592 → 18.687 ms and selective
+24.495 → 20.528 ms. tgrep measured 16.698/18.008 ms in the latter comparison.
+Each comparison uses its own paired baseline; do not subtract numbers across runs.
+
+A further file-handle/stat reuse prototype was neutral: absent 19.019 → 18.993 ms,
+selective 20.705 → 20.800 ms. It was reverted; patch and samples remain in
+`map-handle-experiment.patch` and `linux-map-handles-startup.json`. Its additional
+legacy token-record and non-file payload rejection tests were retained in `02cf961`.
+All adopted Rust changes passed full tests, strict Clippy and Rust 1.88 checking.
+
+
+## Load only the indexes a direct query needs
+
+`d6298ca` gives one-shot CLI readers dependency-aware token loading. Gram and
+content searches avoid mapping and validating unused token dictionaries and
+positions. Public library constructors still eagerly validate the full reader;
+any token-dependent query loads and validates token data through a fallible
+barrier. Errors propagate through nested query plans. Tests cover concurrent
+initialization, complete token/position results, corrupt auxiliary data, nested
+plans and required gram-data rejection. Immutable generation leases preserve
+files until deferred loading finishes. This deliberately changes when unused
+auxiliary corruption is detected; see `docs/SEMANTICS.md`.
+
+31 isolated interleaved samples (`linux-lazy-tokens-startup.json`):
+
+| One-shot query | Before ms | After ms | tgrep ms |
+|---|---:|---:|---:|
+| Absent | 18.671 | 10.492 | 16.510 |
+| Selective | 20.534 | 12.364 | 17.811 |
+
+Every answer was checked against ripgrep. This resolves the sampled Linux
+startup disadvantage, not every startup workload or machine. Full Rust tests,
+strict Clippy, release compilation and Rust 1.88 checks passed.
+
+The benchmark now distinguishes FXI's exit convention (0 for a successful empty
+search; 1 for an error) from grep-style tools (1 for no matches). Earlier
+harnesses allowed 1 for all tools, which could mistake an FXI error for an absent
+answer. Positive queries and parity checks substantially constrain that risk,
+but it was still an inadequate check and is corrected for subsequent runs.
+
+
+## Refreshed Linux files-only comparison
+
+Five isolated samples per query and mode, current `d6298ca` binary, every sample
+checked against ripgrep (`linux-lazy-files-validation.json`). All 14 workload
+medians favor FXI. These are warm-storage source-code measurements on one M2 Max,
+not evidence that every tool, feature, machine or workload is beaten.
+
+| Mode | Query | FXI ms | tgrep ms |
+|---|---|---:|---:|
+| direct | selective | 13.80 | 18.42 |
+| direct | absent | 12.08 | 16.97 |
+| direct | phrase | 49.09 | 95.09 |
+| direct | common | 402.96 | 1901.48 |
+| direct | alternation | 15.31 | 25.76 |
+| direct | internal_literal | 14.21 | 18.64 |
+| direct | insensitive | 16.25 | 19.92 |
+| server | selective | 6.36 | 7.93 |
+| server | absent | 5.54 | 7.65 |
+| server | phrase | 14.21 | 20.77 |
+| server | common | 97.35 | 186.41 |
+| server | alternation | 6.60 | 13.62 |
+| server | internal_literal | 6.20 | 7.91 |
+| server | insensitive | 7.63 | 8.78 |
+
+FXI index: 657,068,414 bytes; tgrep: 872,213,156 bytes. No daemon fallback was
+reported. This run started before the FXI-specific exit-code hardening; subsequent
+corpus runs use that additional check. This limitation is retained with the data.

@@ -21,6 +21,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--corpus', required=True, type=P.Path)
 parser.add_argument('--variant', action='append', required=True, help='NAME=BINARY')
 parser.add_argument('--tgrep', type=P.Path)
+parser.add_argument('--variant-chunk-size', action='append', default=[], help='NAME=FILES per segment (0 means one segment)')
+parser.add_argument('--variant-threads', action='append', default=[], help='NAME=RAYON_THREADS override')
 parser.add_argument('--repetitions', type=int, default=5)
 parser.add_argument('--output', required=True, type=P.Path)
 args = parser.parse_args()
@@ -36,6 +38,16 @@ if args.tgrep:
     if 'tgrep' in variants:
         parser.error('tgrep is reserved for --tgrep')
     variants['tgrep'] = {'binary': str(args.tgrep.resolve()), 'kind': 'tgrep'}
+for spec in args.variant_threads:
+    name, sep, threads = spec.partition('=')
+    if not sep or name not in variants or not threads.isdigit() or int(threads) < 1:
+        parser.error('Thread overrides require an existing NAME and positive count')
+    variants[name]['rayon_threads'] = int(threads)
+for spec in args.variant_chunk_size:
+    name, sep, chunk_size = spec.partition('=')
+    if not sep or name not in variants or variants[name]['kind'] != 'fxi' or not chunk_size.isdigit():
+        parser.error('Chunk sizes require an existing FXI NAME and nonnegative count')
+    variants[name]['chunk_size'] = int(chunk_size)
 if args.repetitions < 1:
     parser.error('repetitions must be positive')
 names = sp.check_output(['rg', '--files', '-0'], cwd=root).decode().split('\0')
@@ -46,6 +58,8 @@ for name, variant in variants.items():
     runtime.mkdir()
     variant['env'] = {**os.environ, 'FXI_INDEXES': str(runtime / 'indexes'),
                       'FXI_SOCKET': str(runtime / 'fxi.sock'), 'XDG_RUNTIME_DIR': str(runtime)}
+    if 'rayon_threads' in variant:
+        variant['env']['RAYON_NUM_THREADS'] = str(variant['rayon_threads'])
     variant['binary_sha256'] = hashlib.sha256(P.Path(variant['binary']).read_bytes()).hexdigest()
     variant['samples'] = []
 for rep in range(args.repetitions):
@@ -54,6 +68,8 @@ for rep in range(args.repetitions):
     for name in order:
         variant = variants[name]
         command = [variant['binary'], 'index', '--force', str(root)]
+        if 'chunk_size' in variant:
+            command.extend(['--chunk-size', str(variant['chunk_size'])])
         start = time.perf_counter()
         proc = sp.run(['/usr/bin/time', '-l', *command], cwd=root, env=variant['env'],
                       capture_output=True, text=True, check=True, timeout=600)

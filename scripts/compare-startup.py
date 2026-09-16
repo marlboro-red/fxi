@@ -25,9 +25,14 @@ parser.add_argument('--output', required=True, type=P.Path)
 parser.add_argument('--count', action='store_true')
 parser.add_argument('--literal', action='store_true', help='Compare plain FXI identifier queries with case-insensitive fixed strings')
 parser.add_argument('--patterns', nargs='+')
+parser.add_argument('--before-threads', type=int)
+parser.add_argument('--after-threads', type=int)
 args = parser.parse_args()
 if args.repetitions < 1:
     parser.error('repetitions must be positive')
+if any(value is not None and value < 1 for value in [args.before_threads, args.after_threads]):
+    parser.error('Thread counts must be positive')
+threads = {'before': args.before_threads, 'after': args.after_threads}
 root = args.corpus.resolve()
 runtime = P.Path(tempfile.mkdtemp(prefix='fxi-startup-comparison-'))
 env = {**os.environ, 'FXI_INDEXES': str(args.indexes.resolve()),
@@ -36,11 +41,12 @@ binaries = {'before': args.baseline.resolve(), 'after': args.candidate.resolve()
 if args.tgrep:
     binaries['tgrep'] = args.tgrep.resolve()
 
-def run(command):
+def run(command, thread_count=None):
     start = time.perf_counter_ns()
-    result = sp.run(command, cwd=root, env=env, capture_output=True, timeout=120)
+    result = sp.run(command, cwd=root, env=({**env, 'RAYON_NUM_THREADS': str(thread_count)} if thread_count is not None else env), capture_output=True, timeout=120)
     elapsed = (time.perf_counter_ns() - start) / 1e6
-    if result.returncode not in (0, 1) or b'Daemon search failed' in result.stderr:
+    valid_codes = (0,) if command[0] in {str(binaries['before']), str(binaries['after'])} else (0, 1)
+    if result.returncode not in valid_codes or b'Daemon search failed' in result.stderr:
         raise RuntimeError((command, result.returncode, result.stderr.decode()))
     paths = []
     for line in result.stdout.decode().splitlines():
@@ -60,14 +66,14 @@ for label, pattern in queries:
     commands = {name: ([str(binary), *other_flags, output_flag, '--color=never', pattern, str(root)] if name == 'tgrep' else
                       [str(binary), output_flag, '--color=never', fxi_pattern, '-p', str(root)])
                 for name, binary in binaries.items()}
-    for command in commands.values():
-        assert run(command)[1] == expected
+    for name, command in commands.items():
+        assert run(command, threads.get(name))[1] == expected
     samples = {name: [] for name in commands}
     for rep in range(args.repetitions):
         order = list(commands)
         random.Random(1729 + rep).shuffle(order)
         for name in order:
-            elapsed, paths = run(commands[name])
+            elapsed, paths = run(commands[name], threads.get(name))
             assert paths == expected, (label, name, paths ^ expected)
             samples[name].append(elapsed)
     row = {'query': label, 'pattern': pattern, 'files': len(expected),
@@ -75,7 +81,7 @@ for label, pattern in queries:
                      for name, values in samples.items()}}
     rows.append(row)
     print(label, {name: data['median_ms'] for name, data in row['tools'].items()}, flush=True)
-result = {'corpus': str(root), 'indexes': str(args.indexes.resolve()), 'mode': 'direct', 'output_mode': 'count' if args.count else 'files', 'query_syntax': 'plain' if args.literal else 'regex',
+result = {'rayon_threads': threads, 'corpus': str(root), 'indexes': str(args.indexes.resolve()), 'mode': 'direct', 'output_mode': 'count' if args.count else 'files', 'query_syntax': 'plain' if args.literal else 'regex',
           'binaries': {name: {'path': str(binary), 'sha256': hashlib.sha256(binary.read_bytes()).hexdigest()}
                        for name, binary in binaries.items()}, 'rows': rows}
 args.output.write_text(json.dumps(result, indent=2))

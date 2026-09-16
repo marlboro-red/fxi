@@ -1,0 +1,89 @@
+diff --git a/src/index/reader.rs b/src/index/reader.rs
+index 46165de..1f9a6ac 100644
+--- a/src/index/reader.rs
++++ b/src/index/reader.rs
+@@ -3,7 +3,7 @@ use crate::utils::{BloomFilter, delta_decode, delta_decode_bitmap, delta_decode_
+ use ahash::AHashSet;
+ use anyhow::{Context, Result};
+ use lru::LruCache;
+-use memmap2::Mmap;
++use memmap2::{Mmap, MmapOptions};
+ use rayon::prelude::*;
+ use roaring::RoaringBitmap;
+ use std::collections::HashMap;
+@@ -16,11 +16,19 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
+ struct MappedBytes(Option<Mmap>);
+ impl MappedBytes {
+     fn open(path: &Path) -> Result<Self> {
+-        let file = File::open(path)?;
+-        Ok(Self(if file.metadata()?.len() == 0 {
++        Self::from_file(File::open(path)?)
++    }
++
++    fn from_file(file: File) -> Result<Self> {
++        let metadata = file.metadata()?;
++        anyhow::ensure!(metadata.is_file(), "Index data is not a regular file");
++        let len = usize::try_from(metadata.len()).context("Index file too large to map")?;
++        Ok(Self(if len == 0 {
+             None
+         } else {
+-            Some(unsafe { Mmap::map(&file)? })
++            // Generations are immutable and pinned by their reader. Supplying
++            // the validated length avoids memmap2 issuing another fstat.
++            Some(unsafe { MmapOptions::new().len(len).map(&file)? })
+         }))
+     }
+ }
+@@ -248,22 +256,27 @@ impl SegmentReader {
+     }
+ 
+     /// Open a segment from disk (lazy loading for line maps)
+-    fn open(segment_path: &Path, segment_id: SegmentId, _index_path: &Path) -> Result<Self> {
++    fn open(segment_path: &Path, segment_id: SegmentId, required_positions: bool) -> Result<Self> {
+         // Read trigram dictionary (already sorted from BTreeMap write)
+         let trigram_dict = read_trigram_dict(segment_path)?;
+ 
+         let trigram_postings = MappedBytes::open(&segment_path.join("grams.postings"))?;
+ 
+-        // Check if positions file exists (determines dict format)
++        // Opening once both detects legacy absence and supplies the mapping
++        // handle, avoiding separate exists/is_file probes followed by reopening.
+         let positions_path = segment_path.join("tokens.positions");
+-        let has_positions = positions_path.exists();
+-
+-        let token_postings = MappedBytes::open(&segment_path.join("tokens.postings"))?;
+-        let token_positions = if has_positions {
+-            Some(MappedBytes::open(&positions_path)?)
+-        } else {
+-            None
++        let token_positions = match File::open(&positions_path) {
++            Ok(file) => Some(MappedBytes::from_file(file)?),
++            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required_positions => {
++                None
++            }
++            Err(error) => {
++                return Err(error).with_context(|| {
++                    format!("Cannot open position index in segment {segment_id}; rebuild the index")
++                });
++            }
+         };
++        let token_postings = MappedBytes::open(&segment_path.join("tokens.postings"))?;
+ 
+         let token_dict = read_token_dict(
+             segment_path,
+@@ -668,11 +681,10 @@ impl IndexReader {
+                                 let segment_path = index_path_ref
+                                     .join("segments")
+                                     .join(format!("seg_{:04}", seg_id));
+-                                if meta.has_positions && !segment_path.join("tokens.positions").is_file() {
+-                                    anyhow::bail!("Missing position index in segment {seg_id}; rebuild the index");
+-                                }
+-                                SegmentReader::open(&segment_path, seg_id, index_path_ref)
+-                                    .with_context(|| format!("Cannot open segment {seg_id}; rebuild the index"))
++                                SegmentReader::open(&segment_path, seg_id, meta.has_positions)
++                                    .with_context(|| {
++                                        format!("Cannot open segment {seg_id}; rebuild the index")
++                                    })
+                             })
+                             .collect::<Result<Vec<_>>>()
+                     },

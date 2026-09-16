@@ -1,0 +1,99 @@
+diff --git a/src/index/writer.rs b/src/index/writer.rs
+index fd7db35..f8f81fd 100644
+--- a/src/index/writer.rs
++++ b/src/index/writer.rs
+@@ -154,7 +154,12 @@ struct CompressedTrigrams {
+     bytes: Vec<u8>,
+ }
+ 
+-fn compress_trigram_postings(files: &mut [AssignedFile]) -> Option<CompressedTrigrams> {
++struct GramFile {
++    doc_id: DocId,
++    trigrams: Vec<u32>,
++}
++
++fn compress_trigram_postings(files: &mut [GramFile]) -> Option<CompressedTrigrams> {
+     const WORDS: usize = (1 << 24) / 64;
+     let mut bits = vec![0u64; WORDS];
+     for file in files.iter() {
+@@ -482,23 +487,39 @@ impl ChunkedIndexWriter {
+         let file_count = job.files.len();
+         let t_start = std::time::Instant::now();
+ 
+-        let InvertedTokens {
+-            postings: token_pairs,
+-            positions: encoded_positions,
+-            symbols: symbols_sorted,
+-        } = invert_token_postings(&mut job.files);
+         let trigram_count: usize = job.files.iter().map(|f| f.trigrams.len()).sum();
+-        let compressed_grams = compress_trigram_postings(&mut job.files);
++        let mut gram_files: Vec<_> = job
++            .files
++            .iter_mut()
++            .map(|file| GramFile {
++                doc_id: file.doc_id,
++                trigrams: std::mem::take(&mut file.trigrams),
++            })
++            .collect();
++        let (
++            InvertedTokens {
++                postings: token_pairs,
++                positions: encoded_positions,
++                symbols: symbols_sorted,
++            },
++            compressed_grams,
++        ) = rayon::join(
++            || invert_token_postings(&mut job.files),
++            || compress_trigram_postings(&mut gram_files),
++        );
+         let mut trigram_pairs = Vec::with_capacity(if compressed_grams.is_some() {
+             0
+         } else {
+             trigram_count
+         });
+-        let mut line_maps = Vec::with_capacity(file_count);
+-        for file in job.files {
++        for file in gram_files {
+             trigram_pairs.extend(file.trigrams.into_iter().map(|gram| (gram, file.doc_id)));
+-            line_maps.push((file.doc_id, file.line_offsets));
+         }
++        let line_maps: Vec<_> = job
++            .files
++            .into_iter()
++            .map(|file| (file.doc_id, file.line_offsets))
++            .collect();
+ 
+         let t_collect = std::time::Instant::now();
+ 
+@@ -1354,16 +1375,13 @@ mod tests {
+     fn rank_compressed_grams_match_sorted_reference() {
+         for file_count in [0, 1, 17] {
+             let mut files: Vec<_> = (0..file_count)
+-                .map(|i| AssignedFile {
++                .map(|i| GramFile {
+                     doc_id: if i == 16 { u32::MAX } else { i * 65536 },
+                     trigrams: (0..30)
+                         .map(|j| (j * 8191 + i * 33) % 0xffffff)
+                         .chain([0, 0xffffff, 0, 64, 63, 127, 128, 0xffffff])
+                         .rev()
+                         .collect(),
+-                    tokens: Vec::new().into(),
+-                    line_offsets: vec![],
+-                    token_positions: vec![],
+                 })
+                 .collect();
+             let mut pairs: Vec<_> = files
+@@ -1384,12 +1402,9 @@ mod tests {
+                 );
+             }
+         }
+-        let mut files = vec![AssignedFile {
++        let mut files = vec![GramFile {
+             doc_id: 0,
+             trigrams: vec![0, u32::MAX],
+-            tokens: Vec::new().into(),
+-            line_offsets: vec![],
+-            token_positions: vec![],
+         }];
+         assert!(compress_trigram_postings(&mut files).is_none());
+         assert_eq!(files[0].trigrams, vec![0, u32::MAX]);
