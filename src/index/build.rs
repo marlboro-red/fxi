@@ -600,6 +600,8 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
     Ok(true)
 }
 
+type ScannedFile = (PathBuf, PathBuf, u64, u64);
+
 /// Compute the difference between indexed files and filesystem
 fn compute_index_diff(
     root: &Path,
@@ -611,17 +613,17 @@ fn compute_index_diff(
 
     // Walk the filesystem in parallel: the per-file metadata() stat dominates
     // the scan on large trees, so it runs on the walker threads
-    let scanned: Vec<(PathBuf, PathBuf, u64, u64)> = {
-        let entries: Arc<Mutex<Vec<(PathBuf, PathBuf, u64, u64)>>> =
+    let scanned: Vec<ScannedFile> = {
+        let entries: Arc<Mutex<Vec<ScannedFile>>> =
             Arc::new(Mutex::new(Vec::with_capacity(indexed_files.len())));
 
         struct ScanVisitor {
             root: PathBuf,
             max_file_size: u64,
-            shared: Arc<Mutex<Vec<(PathBuf, PathBuf, u64, u64)>>>,
+            shared: Arc<Mutex<Vec<ScannedFile>>>,
             // Batch into a thread-local vec; take the shared lock once per
             // walker thread instead of once per file
-            local: Vec<(PathBuf, PathBuf, u64, u64)>,
+            local: Vec<ScannedFile>,
         }
 
         impl ScanVisitor {
@@ -683,7 +685,7 @@ fn compute_index_diff(
         struct ScanBuilder {
             root: PathBuf,
             max_file_size: u64,
-            shared: Arc<Mutex<Vec<(PathBuf, PathBuf, u64, u64)>>>,
+            shared: Arc<Mutex<Vec<ScannedFile>>>,
         }
 
         impl<'s> ignore::ParallelVisitorBuilder<'s> for ScanBuilder {
