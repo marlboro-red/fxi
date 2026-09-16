@@ -424,21 +424,16 @@ impl IndexServer {
         root_path: &PathBuf,
         _lock: &crate::utils::IndexLock,
     ) -> Result<()> {
-        // Stop the watcher during rebuild
-        {
-            let indexes = self.indexes.read().unwrap();
-            if let Some(cached) = indexes.get(root_path) {
-                cached.stop_watcher();
-            }
-        }
-
+        // Generations are built outside the source root and published
+        // atomically. Keep the watcher registered so edits during a rebuild
+        // remain queued and queries do not try to restart it under this lock.
         // Rebuild
         if let Err(e) = build_index_with_progress(root_path, true, true) {
             eprintln!("fxid: failed to rebuild index: {}", e);
             return Err(e);
         }
 
-        // Reload and restart watcher
+        // Reload and ensure a watcher exists
         match IndexReader::open(root_path) {
             Ok(reader) => {
                 let doc_count = reader.meta.doc_count;
@@ -450,7 +445,7 @@ impl IndexServer {
                 }
                 eprintln!("fxid: rebuilt index with {} files", doc_count);
 
-                // Restart watching only for a watching server.
+                // The existing watcher stays registered; spawn is idempotent.
                 if self.watch_enabled {
                     self.spawn_watcher(root_path);
                 }
@@ -465,6 +460,18 @@ impl IndexServer {
 
     /// Spawn a file watcher for the given root path
     fn spawn_watcher(&self, root_path: &PathBuf) {
+        let Some(cached) = self.indexes.read().unwrap().get(root_path).cloned() else {
+            return;
+        };
+        let Ok(mut watcher_handle) = cached.watcher_handle.lock() else {
+            return;
+        };
+        if watcher_handle
+            .as_ref()
+            .is_some_and(WatcherHandle::is_running)
+        {
+            return;
+        }
         let root = root_path.clone();
         let tx = self.watcher_tx.clone();
         let config = self.watcher_config.clone();
@@ -482,13 +489,7 @@ impl IndexServer {
 
         let handle = WatcherHandle::new(shutdown, thread, root_path.clone());
 
-        // Store the handle
-        let indexes = self.indexes.read().unwrap();
-        if let Some(cached) = indexes.get(root_path)
-            && let Ok(mut watcher_handle) = cached.watcher_handle.lock()
-        {
-            *watcher_handle = Some(handle);
-        }
+        *watcher_handle = Some(handle);
     }
 
     /// Stop all active watchers
@@ -1171,6 +1172,42 @@ mod tests {
             .collect();
         paths.sort();
         paths
+    }
+
+    #[test]
+    fn rebuild_and_duplicate_registration_keep_the_existing_watcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("file.rs"), "content\n").unwrap();
+        build_index_with_progress(&root, true, true).unwrap();
+        let mut server = IndexServer::new(false);
+        server.ensure_index_loaded(&root).unwrap();
+        Arc::get_mut(&mut server).unwrap().watch_enabled = true;
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker_stopped = stopped.clone();
+        let thread = std::thread::spawn(move || {
+            while !worker_stopped.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        let cached = server.indexes.read().unwrap().get(&root).unwrap().clone();
+        *cached.watcher_handle.lock().unwrap() =
+            Some(WatcherHandle::new(stopped.clone(), thread, root.clone()));
+        server.spawn_watcher(&root);
+        assert!(!stopped.load(Ordering::SeqCst));
+        {
+            let lock = crate::utils::IndexLock::acquire(&root).unwrap();
+            server.rebuild_with_lock(&root, &lock).unwrap();
+        }
+        assert!(
+            !stopped.load(Ordering::SeqCst),
+            "rebuild interrupted the watcher"
+        );
+        assert!(cached.is_watching());
+        server.stop_all_watchers();
+        assert!(stopped.load(Ordering::SeqCst));
+        drop((cached, server));
+        crate::utils::remove_index(&root).unwrap();
     }
 
     #[test]
