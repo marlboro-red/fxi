@@ -1,17 +1,24 @@
-"""Fresh small-corpus audit benchmark. Requires shallow Redis and tgrep clones in /tmp.
+"""Controlled-corpus audit benchmark. Requires shallow Redis and tgrep clones in /tmp.
 Run from fxi root after release builds. Uses isolated indexes and daemons.
 """
-import subprocess as sp, pathlib as P, os, time, json, statistics, random, shutil, tempfile, argparse, hashlib
+import subprocess as sp, pathlib as P, os, time, json, statistics, random, shutil, tempfile, argparse, hashlib, re
 parser = argparse.ArgumentParser()
 parser.add_argument("--output", default="docs/audit-2026-09-17/benchmark-results.json")
 parser.add_argument("--source", default="/tmp/fxi-audit-redis")
 parser.add_argument("--fxi", default="target/release/fxi")
 parser.add_argument("--fxi-revision", help="Revision of an alternate --fxi binary")
-parser.add_argument("--suite", choices=["redis", "python"], default="redis")
+parser.add_argument("--suite", choices=["redis", "python", "linux"], default="redis")
 parser.add_argument("--repetitions", type=int, default=9)
+parser.add_argument("--prepared-corpus", action="store_true", help="Use --source as an already-controlled corpus")
+parser.add_argument("--source-revision", help="Original commit for a prepared corpus")
+parser.add_argument("--build-repetitions", type=int, default=1)
+parser.add_argument("--build-only", action="store_true")
+parser.add_argument("--modes", nargs="+", choices=["direct", "server"], default=["direct", "server"])
 args = parser.parse_args()
 fxi=str(P.Path(args.fxi).resolve()); tg='/tmp/fxi-audit-tgrep/target/release/tgrep'
-base=P.Path(tempfile.mkdtemp(prefix='fxi-audit-bench-')); root=base/'corpus'; root.mkdir(); runtime=base/'runtime'; runtime.mkdir()
+base=P.Path(tempfile.mkdtemp(prefix='fxi-audit-bench-')); root=P.Path(args.source).resolve() if args.prepared_corpus else base/'corpus'
+if not args.prepared_corpus: root.mkdir()
+runtime=base/'runtime'; runtime.mkdir()
 env={**os.environ,'FXI_INDEXES':str(base/'indexes'),'FXI_SOCKET':str(runtime/'fxi.sock'),'XDG_RUNTIME_DIR':str(runtime)}
 source=P.Path(args.source); count=0; size=0; manifest=[]
 for name in sp.check_output(['rg','--files'],cwd=source,text=True).splitlines():
@@ -22,22 +29,34 @@ for name in sp.check_output(['rg','--files'],cwd=source,text=True).splitlines():
  if not data or len(data)>10_000_000 or b'\0' in data: continue
  try: data.decode('utf8')
  except UnicodeDecodeError: continue
- dest=root/name; dest.parent.mkdir(parents=True,exist_ok=True); dest.write_bytes(data); count+=1; size+=len(data); manifest.append((name,hashlib.sha256(data).hexdigest()))
+ if not args.prepared_corpus:
+  dest=root/name; dest.parent.mkdir(parents=True,exist_ok=True); dest.write_bytes(data)
+ count+=1; size+=len(data); manifest.append((name,hashlib.sha256(data).hexdigest()))
 sp.run(['git','init','-q',str(root)],check=True)
 def run(cmd):
  start=time.perf_counter_ns(); p=sp.run(cmd,cwd=root,env=env,stdout=sp.PIPE,stderr=sp.PIPE); elapsed=(time.perf_counter_ns()-start)/1e6
  if p.returncode not in (0,1): raise RuntimeError((cmd,p.returncode,p.stderr.decode()))
  paths={str(P.Path(x).relative_to(root)) if P.Path(x).is_absolute() else x.removeprefix('./') for x in p.stdout.decode().splitlines()}
  return elapsed,paths
-builds={}
-for tool,cmd in [('fxi',[fxi,'index',str(root)]),('tgrep',[tg,'index',str(root)])]:
- start=time.perf_counter(); p=sp.run(['/usr/bin/time','-l',*cmd],cwd=root,env=env,capture_output=True,text=True,check=True); builds[tool]={'seconds':time.perf_counter()-start,'resource_output':p.stderr}
+builds={tool: {'samples': []} for tool in ['fxi','tgrep']}
+for rep in range(args.build_repetitions):
+ order=[('fxi',[fxi,'index','--force',str(root)]),('tgrep',[tg,'index','--force',str(root)])]
+ random.Random(rep).shuffle(order)
+ for tool,cmd in order:
+  start=time.perf_counter(); p=sp.run(['/usr/bin/time','-l',*cmd],cwd=root,env=env,capture_output=True,text=True,check=True)
+  builds[tool]['samples'].append({'seconds':time.perf_counter()-start,'resource_output':p.stderr,'max_rss_bytes':int(re.search(r'(\d+)\s+maximum resident set size',p.stderr).group(1))})
+for tool,build in builds.items():
+ build['seconds']=statistics.median(x['seconds'] for x in build['samples'])
+ build['max_rss_bytes']=statistics.median(x['max_rss_bytes'] for x in build['samples'])
+ build['resource_output']=build['samples'][-1]['resource_output']
 queries=[('selective','raxFind'),('absent','auditNonexistentSymbol94283'),('phrase','static void'),('common','return'),('alternation','raxFind|dictRehash'),('internal_literal','.*raxFind'),('insensitive','serverassert')]
 if args.suite == 'python':
  queries=[('selective','PyObject_GenericGetAttr'),('absent','auditNonexistentSymbol94283'),('phrase','static void'),('common','return'),('alternation','PyObject_GenericGetAttr|PyUnicode_DecodeUTF8'),('internal_literal','.*PyObject_GenericGetAttr'),('insensitive','pyobject_genericgetattr')]
+if args.suite == 'linux':
+ queries=[('selective','folio_wait_bit_common'),('absent','auditNonexistentSymbol94283'),('phrase','struct file_operations'),('common','return'),('alternation','folio_wait_bit_common|bpf_prog_select_runtime'),('internal_literal','.*folio_wait_bit_common'),('insensitive','blk_mq_alloc_request')]
 rows=[]; processes=[]
 try:
- for mode in ['direct','server']:
+ for mode in ([] if args.build_only else args.modes):
   if mode=='server':
    for name,cmd in [('fxi',[fxi,'daemon','foreground']),('tgrep',[tg,'serve','--no-watch',str(root)])]:
     log=open(base/(name+'-server.log'),'w'); processes.append(sp.Popen(cmd,cwd=root,env=env,stdout=log,stderr=log))
@@ -65,7 +84,7 @@ finally:
  for p in processes:
   try:p.wait(timeout=5)
   except sp.TimeoutExpired:p.kill();p.wait()
-result={'fxi_binary_sha256':hashlib.sha256(P.Path(fxi).read_bytes()).hexdigest(),'manifest_sha256':hashlib.sha256(json.dumps(sorted(manifest)).encode()).hexdigest(),'suite':args.suite,'fxi_commit':args.fxi_revision or (sp.check_output(['git','rev-parse','HEAD'],text=True).strip() if args.fxi=='target/release/fxi' else 'external-binary'),'base':str(base),'tgrep_commit':sp.check_output(['git','rev-parse','HEAD'],cwd='/tmp/fxi-audit-tgrep',text=True).strip(),'source_commit':sp.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip(),'files':count,'bytes':size,'builds':builds,'index_bytes':{'fxi':sum(p.stat().st_size for p in (base/'indexes').rglob('*') if p.is_file()),'tgrep':sum(p.stat().st_size for p in (root/'.tgrep').rglob('*') if p.is_file())},'rows':rows}
+result={'fxi_binary_sha256':hashlib.sha256(P.Path(fxi).read_bytes()).hexdigest(),'manifest_sha256':hashlib.sha256(json.dumps(sorted(manifest)).encode()).hexdigest(),'suite':args.suite,'fxi_commit':args.fxi_revision or (sp.check_output(['git','rev-parse','HEAD'],text=True).strip() if args.fxi=='target/release/fxi' else 'external-binary'),'base':str(base),'corpus':str(root),'tgrep_commit':sp.check_output(['git','rev-parse','HEAD'],cwd='/tmp/fxi-audit-tgrep',text=True).strip(),'source_commit':args.source_revision or sp.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip(),'files':count,'bytes':size,'builds':builds,'index_bytes':{'fxi':sum(p.stat().st_size for p in (base/'indexes').rglob('*') if p.is_file()),'tgrep':sum(p.stat().st_size for p in (root/'.tgrep').rglob('*') if p.is_file())},'rows':rows}
 P.Path(args.output).write_text(json.dumps(result,indent=2))
 print(json.dumps({k:v for k,v in result.items() if k not in ['rows','builds']},indent=2))
 for row in rows:print(row['mode'],row['query'],row['files'],{k:(round(v['median_ms'],2),len(v['missing']),len(v['extra'])) for k,v in row['tools'].items()})
