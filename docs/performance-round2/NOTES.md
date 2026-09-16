@@ -1,11 +1,18 @@
 # Second optimization round (in progress)
 
-These measurements do **not** establish FXI as a clear winner. Linux exposes
-large construction-memory and initially warm broad-search disadvantages hidden
-by the smaller corpora. Later changes reverse the sampled warm-query losses,
-but selective one-shot startup and builder memory remain weaknesses. Matching-file sets were checked against ripgrep, including each
-measured sample. These are UTF-8 source fixtures and files-only regex workloads;
-they do not establish feature parity, cold-cache performance or update latency.
+The latest accepted implementation is `d6298ca`. Fresh Linux, CPython and Redis
+runs show substantial gains in construction and broad searches, with every
+measured result checked against ripgrep. Linux's selective one-shot startup gap
+is resolved in these samples. Small-corpus absent queries still lose, some warm
+query leads are modest, and freshness/feature gaps remain. This does **not**
+establish FXI as the user's requested overwhelming winner.
+
+The chronological experiments below include rejected changes and superseded
+measurements. Latest full files-only results are in `*-lazy-files-validation.json`.
+They cover controlled UTF-8 fixtures with warm OS caches, not cold storage,
+every grep feature, every indexing tool, or update latency. The default Linux
+builder still uses more peak RSS than tgrep; a measured 1,000-file-segment
+configuration reverses that comparison at the cost of a larger index.
 
 ## Corpus and protocol
 
@@ -417,3 +424,92 @@ not evidence that every tool, feature, machine or workload is beaten.
 FXI index: 657,068,414 bytes; tgrep: 872,213,156 bytes. No daemon fallback was
 reported. This run started before the FXI-specific exit-code hardening; subsequent
 corpus runs use that additional check. This limitation is retained with the data.
+
+
+## Segment sizing and codec space experiments
+
+Five isolated interleaved builds with the same `d6298ca` binary and corpus
+(`linux-segment-size-sweep.json`), complete file enumeration verified after each:
+
+| Files per segment | Build seconds | Peak MiB | Index bytes |
+|---|---:|---:|---:|
+| 1,000 | 4.366 | 225.6 | 736,314,771 |
+| 2,000 (default) | 4.394 | 342.8 | 657,068,414 |
+| 4,000 | 4.369 | 529.6 | 601,582,148 |
+| tgrep | 7.923 | 266.9 | 872,213,174 |
+
+Smaller segments reduce peak memory substantially with similar build times,
+but increase index size by 12%. Larger segments reduce index size and increase
+memory. This is a tradeoff, not a universal optimum; query costs also need checking.
+
+`examples/posting_lab.rs` evaluates actual lists from the immutable Linux index.
+A minimum-document-ID plus span bitmap is chosen only when smaller than VByte;
+both candidate hybrids conservatively add one codec byte per list. Of 4,217,535
+lists, 130,968 would use bitmaps, covering 67,394,907 of 122,496,564 postings.
+Payload estimates: current VByte 134,779,665 bytes; bitmap/VByte hybrid
+102,302,191 bytes; serialized-Roaring/VByte hybrid 138,997,200 bytes. Raw results
+are in `linux-posting-codec-space.json`. Dense, short segment-local sets explain
+why small raw bitmaps differ from general Roaring serialization here. No format
+change or end-to-end speedup is claimed. Boundary tests, strict Clippy and Rust
+1.88 checks pass for the experiment.
+
+This follows established density-adaptive representation ideas. SIMD byte-code
+and intersection work remains another candidate, including
+[Stream VByte](https://arxiv.org/abs/1709.08990) and
+[SIMD compression and intersection](https://arxiv.org/abs/1401.6399).
+A faster decoder alone does not establish a faster query: candidate verification,
+process startup, metadata checks and output often dominate. We have not reached
+the limits of existing literature and should not claim novelty prematurely.
+
+## Cross-corpus validation after lazy loading
+
+Fresh CPython and Redis controlled fixtures, five samples per query/mode and
+three builds per tool, use the stricter FXI exit-code check and assert daemon
+liveness before and after every timed sample. All matching-file multisets agree
+with ripgrep. Raw data: `python-lazy-files-validation.json` and
+`redis-lazy-files-validation.json`.
+
+CPython: direct selective 7.27 vs tgrep 12.16 ms; direct common 27.69 vs 119.87 ms;
+warm common 9.55 vs 17.50 ms. Direct absent still loses: 5.97 vs 5.10 ms.
+Redis: direct selective 5.68 vs 5.67 ms is effectively tied; direct common
+13.36 vs 36.04 ms; warm common 5.68 vs 8.74 ms. Direct absent loses:
+5.05 vs 4.38 ms. Small warm-query leads are often modest. These counterexamples
+rule out the user's requested broad, overwhelming victory at this point.
+
+
+## Reject sequential small-reader loading; retain the segment-size choice
+
+A prototype avoided Rayon initialization when a gram-only reader had at most
+four segments. Full Rust tests, strict Clippy and Rust 1.88 checks passed, but
+31 interleaved samples rejected the performance hypothesis. CPython absent
+4.983 → 5.288 ms; selective 6.479 → 7.029 ms. Redis absent 4.715 → 4.512 ms;
+selective 5.191 → 4.941 ms; common 13.045 → 13.122 ms. A small Redis benefit
+is insufficient for the CPython regression. The source was reverted and its
+patch/data preserved (`sequential-small-open-experiment.patch`, applying to
+`d6298ca`; `python-small-open-startup.json`, `redis-small-open-startup.json`).
+
+Using the same experimental binary for both Linux layouts (both exceed four
+segments, so the prototype branch is inactive), 31 interleaved samples found
+no material startup difference between 2,000 and 1,000 files per segment:
+absent 10.274 → 10.385 ms, selective 11.941 → 11.915 ms. tgrep measured
+16.286 and 17.423 ms. `linux-small-segments-startup.json` records both index
+roots and identical binary hashes. The default remains 2,000; users prioritizing
+build memory can reproduce the alternative with `fxi index --force --chunk-size
+1000 ROOT`. The 1,000-file configuration has not received the full seven-query,
+both-mode validation used for the default, and a file-count cap is not a hard
+memory bound for arbitrary file sizes.
+
+## Remaining work against the requested standard
+
+- Freshness: newly created or newly matching files await reconciliation/flush;
+  no immediately searchable live overlay. Measure update visibility, ignore-rule
+  changes and rename/delete storms before claiming parity with tgrep's live index.
+- Peak memory and latency under concurrency, compaction and mixed updates remain
+  separate from full-build measurements. Segment sizing is a configurable tradeoff.
+- Cold-storage tests, additional machines and other competing indexes are still
+  needed. The M2 Max measurements cannot establish universal leadership.
+- Query/output capabilities still differ: PCRE2, multiline, encodings, invert
+  matching and very large full-content responses need explicit treatment.
+- Validate any bitmap codec in the real pipeline, including versioning, corruption
+  handling, incremental updates, compaction, construction cost and verification.
+  A 24% gram-payload estimate saves only about 5% of the whole Linux index.

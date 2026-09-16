@@ -86,7 +86,9 @@ try:
      if mode=='server':
       variant=pat+'(?:)'*(rep+1)
       cmd[cmd.index('re:/'+pat+'/') if k=='fxi' else cmd.index(pat)]='re:/'+variant+'/' if k=='fxi' else variant
+     if mode=='server': assert all(p.poll() is None for p in processes), 'Benchmark server exited before sample'
      ms,paths=run(cmd); assert paths==outputs[k]; timings[k].append(ms)
+     if mode=='server': assert all(p.poll() is None for p in processes), 'Benchmark server exited during sample'
    row={'mode':mode,'query':label,'pattern':pat,'files':len(expected),'tools':{k:{'median_ms':statistics.median(v),'samples_ms':v,'missing':sorted(expected-outputs[k]),'extra':sorted(outputs[k]-expected)} for k,v in timings.items()}}
    if mode=='server':
     row['fxi_repeated_query_ms']=[run(cmds['fxi'])[0] for _ in range(args.repetitions)]

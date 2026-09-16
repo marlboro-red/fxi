@@ -17,6 +17,7 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument('--corpus', required=True, type=P.Path)
 parser.add_argument('--indexes', required=True, type=P.Path)
+parser.add_argument('--candidate-indexes', type=P.Path, help='Compare another segment layout with the same corpus')
 parser.add_argument('--baseline', required=True, type=P.Path)
 parser.add_argument('--candidate', required=True, type=P.Path)
 parser.add_argument('--tgrep', type=P.Path)
@@ -41,9 +42,14 @@ binaries = {'before': args.baseline.resolve(), 'after': args.candidate.resolve()
 if args.tgrep:
     binaries['tgrep'] = args.tgrep.resolve()
 
-def run(command, thread_count=None):
+def run(command, thread_count=None, indexes=None):
     start = time.perf_counter_ns()
-    result = sp.run(command, cwd=root, env=({**env, 'RAYON_NUM_THREADS': str(thread_count)} if thread_count is not None else env), capture_output=True, timeout=120)
+    child_env = dict(env)
+    if thread_count is not None:
+        child_env['RAYON_NUM_THREADS'] = str(thread_count)
+    if indexes is not None:
+        child_env['FXI_INDEXES'] = str(indexes.resolve())
+    result = sp.run(command, cwd=root, env=child_env, capture_output=True, timeout=120)
     elapsed = (time.perf_counter_ns() - start) / 1e6
     valid_codes = (0,) if command[0] in {str(binaries['before']), str(binaries['after'])} else (0, 1)
     if result.returncode not in valid_codes or b'Daemon search failed' in result.stderr:
@@ -67,7 +73,7 @@ for label, pattern in queries:
                       [str(binary), output_flag, '--color=never', fxi_pattern, '-p', str(root)])
                 for name, binary in binaries.items()}
     for name, command in commands.items():
-        assert run(command, threads.get(name))[1] == expected
+        assert run(command, threads.get(name), args.candidate_indexes if name == 'after' else None)[1] == expected
     samples = {name: [] for name in commands}
     for rep in range(args.repetitions):
         order = list(commands)
@@ -81,7 +87,7 @@ for label, pattern in queries:
                      for name, values in samples.items()}}
     rows.append(row)
     print(label, {name: data['median_ms'] for name, data in row['tools'].items()}, flush=True)
-result = {'rayon_threads': threads, 'corpus': str(root), 'indexes': str(args.indexes.resolve()), 'mode': 'direct', 'output_mode': 'count' if args.count else 'files', 'query_syntax': 'plain' if args.literal else 'regex',
+result = {'candidate_indexes': str(args.candidate_indexes.resolve()) if args.candidate_indexes else None, 'rayon_threads': threads, 'corpus': str(root), 'indexes': str(args.indexes.resolve()), 'mode': 'direct', 'output_mode': 'count' if args.count else 'files', 'query_syntax': 'plain' if args.literal else 'regex',
           'binaries': {name: {'path': str(binary), 'sha256': hashlib.sha256(binary.read_bytes()).hexdigest()}
                        for name, binary in binaries.items()}, 'rows': rows}
 args.output.write_text(json.dumps(result, indent=2))

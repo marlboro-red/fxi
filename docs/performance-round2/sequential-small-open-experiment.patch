@@ -1,0 +1,82 @@
+diff --git a/src/index/reader.rs b/src/index/reader.rs
+index e34c07a..395f8e4 100644
+--- a/src/index/reader.rs
++++ b/src/index/reader.rs
+@@ -718,42 +718,41 @@ impl IndexReader {
+         }
+         segment_ids.extend(&meta.delta_segments);
+ 
+-        // PARALLEL LOADING: Load documents, paths, and all segments concurrently
+-        // Uses parallel tuple collection for true 3-way parallelism
+-        // This can reduce startup time by 50-70% on multi-core systems
+-        let index_path_ref = &index_path;
+-
+-        // Use rayon's join for 3-way parallelism: (docs, (paths, segments))
+-        // The inner join runs paths and segments loading in parallel
+-        // The outer join runs docs loading in parallel with the inner join
+-        let (documents_result, (paths_result, segments)) = rayon::join(
+-            || read_documents_version(index_path_ref, meta.version),
+-            || {
+-                rayon::join(
+-                    || read_paths(index_path_ref),
+-                    || {
+-                        // Load all segments in parallel using par_iter
+-                        segment_ids
+-                            .par_iter()
+-                            .map(|&seg_id| {
+-                                let segment_path = index_path_ref
+-                                    .join("segments")
+-                                    .join(format!("seg_{:04}", seg_id));
+-                                SegmentReader::open(
+-                                    &segment_path,
+-                                    seg_id,
+-                                    meta.has_positions,
+-                                    load_tokens,
+-                                )
+-                                .with_context(|| {
+-                                    format!("Cannot open segment {seg_id}; rebuild the index")
+-                                })
+-                            })
+-                            .collect::<Result<Vec<_>>>()
+-                    },
+-                )
+-            },
+-        );
++        let load_segment = |&seg_id: &SegmentId| {
++            let segment_path = index_path.join("segments").join(format!("seg_{seg_id:04}"));
++            SegmentReader::open(&segment_path, seg_id, meta.has_positions, load_tokens)
++                .with_context(|| format!("Cannot open segment {seg_id}; rebuild the index"))
++        };
++        // Small gram-only readers have less work than the cost of starting a
++        // Rayon pool. Full readers still parallelize their token validation.
++        let (documents_result, (paths_result, segments)) = if !load_tokens && segment_ids.len() <= 4
++        {
++            (
++                read_documents_version(&index_path, meta.version),
++                (
++                    read_paths(&index_path),
++                    segment_ids
++                        .iter()
++                        .map(load_segment)
++                        .collect::<Result<Vec<_>>>(),
++                ),
++            )
++        } else {
++            rayon::join(
++                || read_documents_version(&index_path, meta.version),
++                || {
++                    rayon::join(
++                        || read_paths(&index_path),
++                        || {
++                            segment_ids
++                                .par_iter()
++                                .map(load_segment)
++                                .collect::<Result<Vec<_>>>()
++                        },
++                    )
++                },
++            )
++        };
+ 
+         let segments = segments?;
+         let documents = documents_result?;

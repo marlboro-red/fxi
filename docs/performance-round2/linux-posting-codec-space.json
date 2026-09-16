@@ -1,0 +1,11 @@
+{
+  "bitmap_lists": 130968,
+  "bitmap_postings": 67394907,
+  "current_vbyte_bytes": 134779665,
+  "generation": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-4rmtodjl/after/indexes/fxi-linux-corpus-e68ac6df66b0560a/generations/gen-52969-1789580177335707000-0",
+  "hybrid_bitmap_bytes": 102302191,
+  "hybrid_roaring_bytes": 138997200,
+  "lists": 4217535,
+  "note": "Offline space estimate only. Bitmap stores minimum doc ID (4 bytes) plus span bits; list length already resides in dictionary. Both hybrids add a one-byte codec tag to every list. No production format changes, construction cost, or end-to-end latency claims.",
+  "postings": 122496564
+}
