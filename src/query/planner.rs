@@ -1,6 +1,6 @@
 use crate::index::types::Trigram;
 use crate::query::parser::{Query, QueryNode};
-use crate::utils::{query_trigrams, tokenize_query, tokenize_query_with_positions};
+use crate::utils::query_trigrams;
 
 /// Query execution plan
 #[derive(Debug)]
@@ -15,6 +15,7 @@ pub enum PlanStep {
     /// Fetch postings for trigrams and intersect
     TrigramIntersect(Vec<Trigram>),
     /// Fetch postings for a token
+    #[allow(dead_code)] // Reserved for explicit whole-token semantics.
     TokenLookup(String),
     /// Union results from sub-plans
     Union(Vec<QueryPlan>),
@@ -23,6 +24,7 @@ pub enum PlanStep {
     /// its trigrams are all stop-grams, the intersection of the word's
     /// sub-token postings (e.g. `foo_bar` -> foo ∩ bar) is used instead of
     /// degrading the candidate set to the whole corpus.
+    #[allow(dead_code)] // Not safe for arbitrary insensitive substrings.
     TokenOrTrigram {
         token: String,
         sub_tokens: Vec<String>,
@@ -36,6 +38,7 @@ pub enum PlanStep {
     /// Apply document filters
     Filter(FilterStep),
     /// Positional phrase resolution: check token adjacency from position index
+    #[allow(dead_code)] // Requires explicit token-boundary semantics.
     PositionalPhrase(Vec<(String, u32)>),
 }
 
@@ -152,207 +155,38 @@ impl QueryPlanner {
         match node {
             QueryNode::Empty => (Vec::new(), None),
 
-            QueryNode::Literal(text) => {
-                // For single-word queries, use BOTH token lookup (fast exact match)
-                // AND trigram search (substring match like ripgrep).
-                // This ensures we find both exact tokens AND substrings.
-                let is_single_word = !text.contains(char::is_whitespace) && text.len() >= 2;
-
-                if is_single_word {
-                    let trigrams = query_trigrams(text);
-
-                    let steps = if !trigrams.is_empty() {
-                        // Token lookup for fast exact match, trigrams for
-                        // substring recall (best-effort under stop-grams)
-                        vec![PlanStep::TokenOrTrigram {
-                            token: text.to_lowercase(),
-                            sub_tokens: tokenize_query(text),
-                            trigrams,
-                        }]
-                    } else {
-                        vec![PlanStep::TokenLookup(text.to_lowercase())]
-                    };
-
-                    (steps, Some(VerificationStep::Literal(text.clone())))
-                } else {
-                    // Under -i, skip case-sensitive trigram narrowing and use
-                    // the lowercased token index instead
-                    let trigrams = if self.case_insensitive {
-                        Vec::new()
-                    } else {
-                        query_trigrams(text)
-                    };
-
-                    if trigrams.is_empty() {
-                        // Short query or multiple short words, use token index
-                        let tokens: Vec<_> = text
-                            .split_whitespace()
-                            .filter(|t| t.len() >= 2)
-                            .map(|t| t.to_lowercase())
-                            .collect();
-
-                        if tokens.is_empty() {
-                            return (Vec::new(), Some(VerificationStep::Literal(text.clone())));
-                        }
-
-                        let steps: Vec<_> = tokens.into_iter().map(PlanStep::TokenLookup).collect();
-
-                        (steps, Some(VerificationStep::Literal(text.clone())))
-                    } else {
-                        // Multi-word query: use trigram narrowing
-                        (
-                            vec![PlanStep::TrigramIntersect(trigrams)],
-                            Some(VerificationStep::Literal(text.clone())),
-                        )
-                    }
-                }
-            }
-
-            QueryNode::BoostedLiteral { text, boost } => {
-                // For single-word queries, use BOTH token lookup (fast exact match)
-                // AND trigram search (substring match), same strategy as Literal
-                let is_single_word = !text.contains(char::is_whitespace) && text.len() >= 2;
-
-                if is_single_word {
-                    let trigrams = query_trigrams(text);
-
-                    let steps = if !trigrams.is_empty() {
-                        // Token lookup for fast exact match, trigrams for
-                        // substring recall (best-effort under stop-grams)
-                        vec![PlanStep::TokenOrTrigram {
-                            token: text.to_lowercase(),
-                            sub_tokens: tokenize_query(text),
-                            trigrams,
-                        }]
-                    } else {
-                        vec![PlanStep::TokenLookup(text.to_lowercase())]
-                    };
-
-                    (
-                        steps,
-                        Some(VerificationStep::BoostedLiteral {
-                            text: text.clone(),
-                            boost: *boost,
-                        }),
-                    )
-                } else {
-                    // Under -i, skip case-sensitive trigram narrowing and use
-                    // the lowercased token index instead
-                    let trigrams = if self.case_insensitive {
-                        Vec::new()
-                    } else {
-                        query_trigrams(text)
-                    };
-
-                    if trigrams.is_empty() {
-                        let tokens: Vec<_> = text
-                            .split_whitespace()
-                            .filter(|t| t.len() >= 2)
-                            .map(|t| t.to_lowercase())
-                            .collect();
-
-                        if tokens.is_empty() {
-                            return (
-                                Vec::new(),
-                                Some(VerificationStep::BoostedLiteral {
-                                    text: text.clone(),
-                                    boost: *boost,
-                                }),
-                            );
-                        }
-
-                        let steps: Vec<_> = tokens.into_iter().map(PlanStep::TokenLookup).collect();
-
-                        (
-                            steps,
-                            Some(VerificationStep::BoostedLiteral {
-                                text: text.clone(),
-                                boost: *boost,
-                            }),
-                        )
-                    } else {
-                        (
-                            vec![PlanStep::TrigramIntersect(trigrams)],
-                            Some(VerificationStep::BoostedLiteral {
-                                text: text.clone(),
-                                boost: *boost,
-                            }),
-                        )
-                    }
-                }
-            }
-
-            QueryNode::Near { terms, distance } => {
-                // For proximity search, narrow using trigrams from all terms.
-                // Under -i, trigrams (case-sensitive) would miss other-case
-                // docs, so fall through to token lookups (stored lowercased).
-                let mut all_trigrams = Vec::new();
-                if !self.case_insensitive {
-                    for term in terms {
-                        all_trigrams.extend(query_trigrams(term));
-                    }
-                    all_trigrams.sort_unstable();
-                    all_trigrams.dedup();
-                }
-
-                let steps = if all_trigrams.is_empty() {
-                    // Use token lookups for short terms
-                    terms
-                        .iter()
-                        .filter(|t| t.len() >= 2)
-                        .map(|t| PlanStep::TokenLookup(t.to_lowercase()))
-                        .collect()
-                } else {
-                    vec![PlanStep::TrigramIntersect(all_trigrams)]
-                };
-
-                (
-                    steps,
-                    Some(VerificationStep::Near {
-                        terms: terms.clone(),
-                        distance: *distance,
-                    }),
-                )
-            }
-
+            // Bare literals and proximity terms use Unicode-insensitive
+            // substring semantics. Exact-token and byte-exact gram postings
+            // are not sound restrictions for that language. Until a matching
+            // case-folded candidate plan exists, verify the full candidate set.
+            QueryNode::Literal(text) => (Vec::new(), Some(VerificationStep::Literal(text.clone()))),
+            QueryNode::BoostedLiteral { text, boost } => (
+                Vec::new(),
+                Some(VerificationStep::BoostedLiteral {
+                    text: text.clone(),
+                    boost: *boost,
+                }),
+            ),
+            QueryNode::Near { terms, distance } => (
+                Vec::new(),
+                Some(VerificationStep::Near {
+                    terms: terms.clone(),
+                    distance: *distance,
+                }),
+            ),
             QueryNode::Phrase(text) => {
-                let phrase_tokens = tokenize_query_with_positions(text);
-
-                let mut steps = Vec::new();
-
-                if self.case_insensitive {
-                    // Trigrams are case-sensitive, so narrow through the
-                    // lowercased token/positional indexes instead
-                    if phrase_tokens.len() >= 2 {
-                        steps.push(PlanStep::PositionalPhrase(phrase_tokens));
-                    } else if let Some((token, _)) = phrase_tokens.first() {
-                        // Union with exact-case trigrams: they can't see
-                        // other-case docs but still add substring matches the
-                        // token index misses (e.g. the phrase inside a larger
-                        // identifier), same as single-word Literal narrowing
-                        let trigrams = query_trigrams(text);
-                        if trigrams.is_empty() {
-                            steps.push(PlanStep::TokenLookup(token.clone()));
-                        } else {
-                            steps.push(PlanStep::TokenOrTrigram {
-                                token: token.clone(),
-                                sub_tokens: tokenize_query(text),
-                                trigrams,
-                            });
-                        }
-                    }
+                // A substring phrase need not start/end on token boundaries.
+                // Positional token adjacency would reject valid partial words.
+                let trigrams = if self.case_insensitive {
+                    Vec::new()
                 } else {
-                    let trigrams = query_trigrams(text);
-                    if !trigrams.is_empty() {
-                        steps.push(PlanStep::TrigramIntersect(trigrams));
-                    }
-
-                    // Add positional phrase step if we have at least 2 tokens
-                    if phrase_tokens.len() >= 2 {
-                        steps.push(PlanStep::PositionalPhrase(phrase_tokens));
-                    }
-                }
-
+                    query_trigrams(text)
+                };
+                let steps = if trigrams.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![PlanStep::TrigramIntersect(trigrams)]
+                };
                 (
                     steps,
                     Some(VerificationStep::Phrase {
@@ -562,21 +396,10 @@ mod tests {
 
     #[test]
     fn test_ci_phrase_skips_trigram_narrowing() {
-        // Trigrams are case-sensitive; a CI phrase must narrow through the
-        // lowercased positional index instead
         let plan = plan_ci("\"static void\"");
         assert!(
-            !plan
-                .steps
-                .iter()
-                .any(|s| matches!(s, PlanStep::TrigramIntersect(_))),
-            "CI phrase must not use case-sensitive trigram narrowing"
-        );
-        assert!(
-            plan.steps
-                .iter()
-                .any(|s| matches!(s, PlanStep::PositionalPhrase(_))),
-            "CI phrase should narrow via positional index"
+            plan.steps.is_empty(),
+            "CI substring phrases need a sound folded index"
         );
         match plan.verification {
             Some(VerificationStep::Phrase {
@@ -587,20 +410,8 @@ mod tests {
     }
 
     #[test]
-    fn test_ci_single_token_phrase_uses_token_lookup() {
-        // Narrowing is a union of the lowercased token index and exact-case
-        // trigrams (the latter for substring recall inside identifiers)
-        let plan = plan_ci("\"deadlock\"");
-        let has_token_lookup = plan.steps.iter().any(|s| match s {
-            PlanStep::TokenLookup(t) => t == "deadlock",
-            PlanStep::TokenOrTrigram { token, .. } => token == "deadlock",
-            _ => false,
-        });
-        assert!(
-            has_token_lookup,
-            "single-token CI phrase should narrow via token index, got {:?}",
-            plan.steps
-        );
+    fn test_ci_single_token_phrase_does_not_require_whole_tokens() {
+        assert!(plan_ci("\"deadlock\"").steps.is_empty());
     }
 
     #[test]

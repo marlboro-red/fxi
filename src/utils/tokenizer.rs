@@ -293,6 +293,7 @@ fn extract_tokens_with_positions_simple(content: &str) -> Vec<(String, u32)> {
 /// Tokenize a query phrase with positions.
 /// Uses the same tokenization logic as extract_tokens_with_positions
 /// to ensure positions match between index-time and query-time.
+#[allow(dead_code)]
 pub fn tokenize_query_with_positions(query: &str) -> Vec<(String, u32)> {
     extract_tokens_with_positions_simple(query)
 }

@@ -79,3 +79,68 @@ fn invalid_regex_is_an_error_even_with_no_candidates() {
     drop(reader);
     fxi::utils::remove_index(dir.path()).unwrap();
 }
+
+#[test]
+fn substring_candidates_are_a_superset_of_unicode_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = [
+        "PREFIXNEEDLESUFFIX",
+        "foobar bazqux",
+        "K foo Σ ς σ",
+        "vector::start",
+        "needle",
+        "unrelated",
+    ];
+    for (i, text) in corpus.iter().enumerate() {
+        fs::write(dir.path().join(format!("f{i}.txt")), text).unwrap();
+    }
+    build_index_with_progress(dir.path(), true, true).unwrap();
+    let reader = IndexReader::open(dir.path()).unwrap();
+    let executor = QueryExecutor::new(&reader);
+    for literal in ["need", "oo", "k", "σ", "bar baz", "r::st", "foo", "absent"] {
+        for phrase in [false, true] {
+            // Bare terms with spaces are file-level AND, so test those only as phrases.
+            if !phrase && literal.contains(' ') {
+                continue;
+            }
+            for insensitive in [false, true] {
+                let pattern = if insensitive || !phrase {
+                    format!("(?i:{})", regex::escape(literal))
+                } else {
+                    regex::escape(literal)
+                };
+                let oracle = regex::Regex::new(&pattern).unwrap();
+                let expected: BTreeSet<_> = corpus
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, text)| oracle.is_match(text))
+                    .map(|(i, _)| std::path::PathBuf::from(format!("f{i}.txt")))
+                    .collect();
+                let mut query = parse_query(&if phrase {
+                    format!("\"{literal}\"")
+                } else {
+                    literal.into()
+                });
+                query.options.case_insensitive = insensitive;
+                let actual: BTreeSet<_> = executor
+                    .execute_files_only(&query, 0)
+                    .unwrap()
+                    .into_iter()
+                    .collect();
+                assert_eq!(
+                    actual, expected,
+                    "{literal}, phrase={phrase}, insensitive={insensitive}"
+                );
+                let actual: BTreeSet<_> = executor
+                    .execute_with_content(&query, 0, 0)
+                    .unwrap()
+                    .into_iter()
+                    .map(|hit| hit.path)
+                    .collect();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+    drop(reader);
+    fxi::utils::remove_index(dir.path()).unwrap();
+}
