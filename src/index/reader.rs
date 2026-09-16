@@ -196,40 +196,38 @@ impl SegmentReader {
                 .checked_add(u64::from(length))
                 .is_some_and(|end| end <= size as u64)
         };
-        anyhow::ensure!(
-            trigram_dict
-                .iter()
-                .all(|e| fits(e.offset, e.length, trigram_postings.len())),
-            "Truncated trigram postings"
-        );
-        anyhow::ensure!(
-            token_dict
-                .iter()
-                .all(|e| fits(e.offset, e.length, token_postings.len())),
-            "Truncated token postings"
-        );
-        if let Some(positions) = &token_positions {
+        // Decode each entry once for all structural checks. In particular,
+        // repeating token iterators repeats UTF-8 validation of every token.
+        let mut previous_gram = None;
+        for entry in trigram_dict.iter() {
             anyhow::ensure!(
-                token_dict
-                    .iter()
-                    .all(|e| fits(e.pos_offset, e.pos_length, positions.len())),
-                "Truncated token positions"
+                fits(entry.offset, entry.length, trigram_postings.len()),
+                "Truncated trigram postings"
             );
+            anyhow::ensure!(
+                previous_gram.is_none_or(|gram| gram < entry.trigram),
+                "Unsorted trigram dictionary"
+            );
+            previous_gram = Some(entry.trigram);
         }
-        anyhow::ensure!(
-            trigram_dict
-                .iter()
-                .zip(trigram_dict.iter().skip(1))
-                .all(|(a, b)| a.trigram < b.trigram),
-            "Unsorted trigram dictionary"
-        );
-        anyhow::ensure!(
-            token_dict
-                .iter()
-                .zip(token_dict.iter().skip(1))
-                .all(|(a, b)| a.token < b.token),
-            "Unsorted token dictionary"
-        );
+        let mut previous_token = None;
+        for entry in token_dict.iter() {
+            anyhow::ensure!(
+                fits(entry.offset, entry.length, token_postings.len()),
+                "Truncated token postings"
+            );
+            if let Some(positions) = &token_positions {
+                anyhow::ensure!(
+                    fits(entry.pos_offset, entry.pos_length, positions.len()),
+                    "Truncated token positions"
+                );
+            }
+            anyhow::ensure!(
+                previous_token.is_none_or(|token| token < entry.token),
+                "Unsorted token dictionary"
+            );
+            previous_token = Some(entry.token);
+        }
 
         // Line maps are NOT loaded here - loaded lazily on first access
 
