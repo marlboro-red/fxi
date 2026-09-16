@@ -103,6 +103,40 @@ impl std::ops::Deref for CachedRegex {
 }
 
 impl CachedRegex {
+    /// Count one match per line, jumping over unmatched regions and the rest
+    /// of each matching line when the HIR proves line-local existence.
+    fn count_matching_lines(&self, content: &str) -> usize {
+        let mut count = 0;
+        if let Some(literal) = &self.existence_literal {
+            let finder = memchr::memmem::Finder::new(literal);
+            let mut remaining = content.as_bytes();
+            while let Some(start) = finder.find(remaining) {
+                count += 1;
+                let tail = &remaining[start + literal.len()..];
+                let Some(newline) = memchr::memchr(b'\n', tail) else {
+                    break;
+                };
+                remaining = &tail[newline + 1..];
+            }
+        } else if self.line_local {
+            let mut cursor = 0;
+            while let Some(found) = self.regex.find_at(content, cursor) {
+                count += 1;
+                let Some(newline) = memchr::memchr(b'\n', &content.as_bytes()[found.end()..])
+                else {
+                    break;
+                };
+                cursor = found.end() + newline + 1;
+            }
+        } else {
+            count = content
+                .lines()
+                .filter(|line| self.regex.is_match(line))
+                .count();
+        }
+        count
+    }
+
     fn is_match_in_lines(&self, content: &str) -> bool {
         if let Some(literal) = &self.existence_literal {
             memchr::memmem::find(content.as_bytes(), literal).is_some()
@@ -399,13 +433,17 @@ impl<'a> QueryExecutor<'a> {
                 let full_path = self.reader.get_full_path(doc)?;
                 let content = self.reader.read_file_for_scan(&full_path, cache_scan)?;
                 if let Some(regex) = &regex {
-                    content
-                        .lines()
-                        .enumerate()
-                        .filter(|(number, line)| {
-                            accepts_line((*number + 1) as u32) && regex.is_match(line)
-                        })
-                        .count()
+                    if line_start.is_none() && line_end.is_none() {
+                        regex.count_matching_lines(&content)
+                    } else {
+                        content
+                            .lines()
+                            .enumerate()
+                            .filter(|(number, line)| {
+                                accepts_line((*number + 1) as u32) && regex.is_match(line)
+                            })
+                            .count()
+                    }
                 } else {
                     Self::verify_content_static(&content, verification, id)
                         .iter()
@@ -1787,6 +1825,60 @@ def format_warning(msg: str) -> str:
         let reader = IndexReader::open(&root_path).expect("Failed to open index");
 
         (temp_dir, root_path, reader)
+    }
+
+    #[test]
+    fn line_jump_counts_match_line_by_line_regex() {
+        let mut contents = vec![String::new()];
+        let mut level = vec![String::new()];
+        for _ in 0..5 {
+            level = level
+                .iter()
+                .flat_map(|prefix| {
+                    ["a", "b", "\n", "\r", "K"].map(|suffix| format!("{prefix}{suffix}"))
+                })
+                .collect();
+            contents.extend(level.iter().cloned());
+        }
+        for pattern in [
+            "a",
+            "ab",
+            "K",
+            ".*a",
+            "(?s).*a.*",
+            "(?:b)?a(?:b)*",
+            "(?i)k",
+            "a|b",
+            "[ab]+",
+            "[^\r\n]+",
+            "",
+            "a*",
+            "^a$",
+            r"\Aa",
+            r"a\z",
+            r"\ba\b",
+            "a.b",
+            "(?s)a.b",
+            "a\nb",
+            "a\r",
+            r"[\s]",
+            "[^a]",
+            "a(?:)",
+            "(?:^)?a",
+        ] {
+            let cached = get_regex_cache().get_or_compile(pattern).unwrap();
+            for content in &contents {
+                let expected = content
+                    .lines()
+                    .filter(|line| cached.regex.is_match(line))
+                    .count();
+                assert_eq!(
+                    cached.count_matching_lines(content),
+                    expected,
+                    "{pattern:?}, {content:?}"
+                );
+            }
+        }
     }
 
     #[test]
