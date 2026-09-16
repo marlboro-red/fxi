@@ -1474,14 +1474,14 @@ fn test_filter_line_single() {
         if line.contains(':') && !line.starts_with("--") {
             // Format is "file:line:content"
             let parts: Vec<&str> = line.splitn(3, ':').collect();
-            if parts.len() >= 2 {
-                if let Ok(line_num) = parts[1].parse::<u32>() {
-                    assert_eq!(
-                        line_num, 1,
-                        "line:1 filter should only return line 1, got line {}",
-                        line_num
-                    );
-                }
+            if parts.len() >= 2
+                && let Ok(line_num) = parts[1].parse::<u32>()
+            {
+                assert_eq!(
+                    line_num, 1,
+                    "line:1 filter should only return line 1, got line {}",
+                    line_num
+                );
             }
         }
     }
@@ -1498,14 +1498,14 @@ fn test_filter_line_range() {
     for line in fxi_out.lines() {
         if line.contains(':') && !line.starts_with("--") {
             let parts: Vec<&str> = line.splitn(3, ':').collect();
-            if parts.len() >= 2 {
-                if let Ok(line_num) = parts[1].parse::<u32>() {
-                    assert!(
-                        (1..=3).contains(&line_num),
-                        "line:1-3 should only return lines 1-3, got line {}",
-                        line_num
-                    );
-                }
+            if parts.len() >= 2
+                && let Ok(line_num) = parts[1].parse::<u32>()
+            {
+                assert!(
+                    (1..=3).contains(&line_num),
+                    "line:1-3 should only return lines 1-3, got line {}",
+                    line_num
+                );
             }
         }
     }
@@ -1527,14 +1527,14 @@ fn test_filter_line_out_of_range() {
     // Verify no content matches on line 10000
     for line in &content_lines {
         let parts: Vec<&str> = line.splitn(3, ':').collect();
-        if parts.len() >= 2 {
-            if let Ok(line_num) = parts[1].parse::<u32>() {
-                assert!(
-                    line_num <= 20,
-                    "No file has 10000+ lines, but got line {}",
-                    line_num
-                );
-            }
+        if parts.len() >= 2
+            && let Ok(line_num) = parts[1].parse::<u32>()
+        {
+            assert!(
+                line_num <= 20,
+                "No file has 10000+ lines, but got line {}",
+                line_num
+            );
         }
     }
 }
