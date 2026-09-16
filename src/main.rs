@@ -595,7 +595,7 @@ fn do_direct_content_search(
     use crate::query::{QueryExecutor, parse_query};
 
     // Load index
-    let reader = IndexReader::open(root)?;
+    let reader = IndexReader::open_uncached(root)?;
     warn_if_stale(&reader, root);
 
     // Case-insensitivity is applied at the plan level: the planner narrows

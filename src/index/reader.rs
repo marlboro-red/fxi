@@ -9,9 +9,8 @@ use roaring::RoaringBitmap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 /// Empty posting files are valid, but cannot be memory mapped on every OS.
 struct MappedBytes(Option<Mmap>);
@@ -479,22 +478,27 @@ impl FileStamp {
     }
 }
 
-/// Sharded cache: at most 64 MiB retained text and 4096 entries per reader.
+/// A shared process budget, allocated on demand rather than per reader.
 const FILE_CACHE_SHARDS: usize = 16;
-const FILE_CACHE_SHARD_ENTRIES: usize = 256;
-const FILE_CACHE_SHARD_BYTES: usize = 4 * 1024 * 1024;
+const FILE_CACHE_SHARD_ENTRIES: usize = 8192;
+const FILE_CACHE_SHARD_BYTES: usize = 64 * 1024 * 1024;
 
 /// Byte and entry limits both apply, including replacement accounting.
 struct ContentCache {
     entries: LruCache<PathBuf, (FileStamp, Arc<str>)>,
     bytes: usize,
+    max_bytes: usize,
+    max_entries: usize,
 }
 
 impl ContentCache {
     fn new() -> Self {
         Self {
-            entries: LruCache::new(NonZeroUsize::new(FILE_CACHE_SHARD_ENTRIES).unwrap()),
+            // No eager allocation proportional to the maximum entry budget.
+            entries: LruCache::unbounded(),
             bytes: 0,
+            max_bytes: FILE_CACHE_SHARD_BYTES,
+            max_entries: FILE_CACHE_SHARD_ENTRIES,
         }
     }
 
@@ -504,7 +508,7 @@ impl ContentCache {
             self.bytes -= old.len();
         }
         self.bytes += size;
-        while self.bytes > FILE_CACHE_SHARD_BYTES {
+        while self.bytes > self.max_bytes || self.entries.len() > self.max_entries {
             if let Some((_, (_, old))) = self.entries.pop_lru() {
                 self.bytes -= old.len();
             }
@@ -512,8 +516,47 @@ impl ContentCache {
     }
 }
 
-/// Maximum file size to cache (files larger than this are not cached)
-const MAX_CACHEABLE_FILE_SIZE: usize = 128 * 1024; // 128 KiB; avoid large entries displacing many small source files.
+/// Limit each entry to one eighth of the default shard budget.
+const MAX_CACHEABLE_FILE_SIZE: usize = 8 * 1024 * 1024;
+
+struct SharedContentCache {
+    shards: [Mutex<ContentCache>; FILE_CACHE_SHARDS],
+    hasher: ahash::RandomState,
+    max_bytes: usize,
+    max_entry_bytes: usize,
+}
+impl SharedContentCache {
+    fn acquire() -> Arc<Self> {
+        // Release retained text when the last reader closes; while readers
+        // coexist (including generation replacement), they share one budget.
+        static SHARED: OnceLock<Mutex<Weak<SharedContentCache>>> = OnceLock::new();
+        let mut shared = SHARED
+            .get_or_init(|| Mutex::new(Weak::new()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(cache) = shared.upgrade() {
+            return cache;
+        }
+        let max_bytes = std::env::var("FXI_CACHE_MIB")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&mib| mib <= 4096)
+            .and_then(|mib| mib.checked_mul(1024 * 1024))
+            .unwrap_or(FILE_CACHE_SHARDS * FILE_CACHE_SHARD_BYTES);
+        let cache = Arc::new(Self {
+            shards: std::array::from_fn(|_| {
+                let mut shard = ContentCache::new();
+                shard.max_bytes = max_bytes / FILE_CACHE_SHARDS;
+                Mutex::new(shard)
+            }),
+            hasher: ahash::RandomState::new(),
+            max_bytes,
+            max_entry_bytes: MAX_CACHEABLE_FILE_SIZE.min(max_bytes / FILE_CACHE_SHARDS),
+        });
+        *shared = Arc::downgrade(&cache);
+        cache
+    }
+}
 
 /// An owned source snapshot or a shared, immutable copy of one.
 pub enum FileContent {
@@ -546,8 +589,8 @@ pub struct IndexReader {
     /// O(1) stop-gram lookup (converted from Vec on load)
     stop_grams: AHashSet<Trigram>,
     /// LRU cache for file contents (speeds up repeated queries on same files)
-    file_cache: [Mutex<ContentCache>; FILE_CACHE_SHARDS],
-    file_cache_hasher: ahash::RandomState,
+    file_cache: Arc<SharedContentCache>,
+    content_cache_enabled: bool,
     /// Lazily-built bitmap of valid doc IDs. Safe to cache: documents are
     /// immutable after open (index updates swap in a whole new reader).
     valid_docs_cache: OnceLock<RoaringBitmap>,
@@ -555,6 +598,13 @@ pub struct IndexReader {
 
 impl IndexReader {
     /// Open an existing index with parallel loading for maximum startup speed
+    /// One-shot callers cannot reuse content admitted during their search.
+    pub fn open_uncached(root: &Path) -> Result<Self> {
+        let mut reader = Self::open(root)?;
+        reader.content_cache_enabled = false;
+        Ok(reader)
+    }
+
     pub fn open(root_path: &Path) -> Result<Self> {
         let root_path = root_path.canonicalize()?;
         let (index_path, generation_lease) = crate::index::generation::pin(&root_path)?;
@@ -628,7 +678,7 @@ impl IndexReader {
         let stop_grams: AHashSet<Trigram> = meta.stop_grams.iter().copied().collect();
 
         // Initialize file content cache
-        let file_cache = std::array::from_fn(|_| Mutex::new(ContentCache::new()));
+        let file_cache = SharedContentCache::acquire();
 
         Ok(Self {
             _generation_lease: generation_lease,
@@ -641,7 +691,7 @@ impl IndexReader {
             segments,
             stop_grams,
             file_cache,
-            file_cache_hasher: ahash::RandomState::new(),
+            content_cache_enabled: true,
             valid_docs_cache: OnceLock::new(),
         })
     }
@@ -992,6 +1042,9 @@ impl IndexReader {
     /// admission for it instead of evicting useful entries and repeatedly
     /// paying snapshot metadata checks for content that will not survive.
     pub(crate) fn should_cache_scan(&self, candidates: &RoaringBitmap) -> bool {
+        if !self.content_cache_enabled || self.file_cache.max_bytes == 0 {
+            return false;
+        }
         if candidates.len() > (FILE_CACHE_SHARDS * FILE_CACHE_SHARD_ENTRIES) as u64 {
             return false;
         }
@@ -1000,11 +1053,11 @@ impl IndexReader {
             if let Some(doc) = self.get_document(id) {
                 // Oversized files are never admitted; they must not evict the
                 // small-file scan from the policy's estimated cache budget.
-                if doc.size > MAX_CACHEABLE_FILE_SIZE as u64 {
+                if doc.size > self.file_cache.max_entry_bytes as u64 {
                     continue;
                 }
                 bytes = bytes.saturating_add(doc.size);
-                if bytes > (FILE_CACHE_SHARDS * FILE_CACHE_SHARD_BYTES) as u64 {
+                if bytes > self.file_cache.max_bytes as u64 {
                     return false;
                 }
             }
@@ -1027,8 +1080,11 @@ impl IndexReader {
     /// plain Strings without the Arc conversion copy.
     /// Returns None if the file cannot be read.
     pub fn read_file_cached(&self, path: &Path) -> Option<FileContent> {
-        let shard =
-            &self.file_cache[self.file_cache_hasher.hash_one(path) as usize % FILE_CACHE_SHARDS];
+        if !self.content_cache_enabled || self.file_cache.max_bytes == 0 {
+            return Self::read_file_uncached(path).map(FileContent::Owned);
+        }
+        let shard = &self.file_cache.shards
+            [self.file_cache.hasher.hash_one(path) as usize % FILE_CACHE_SHARDS];
         let stamp = FileStamp::from_metadata(&std::fs::metadata(path).ok()?);
         if let Ok(mut cache) = shard.lock()
             && let Some((cached_stamp, content)) = cache.entries.get(path)
@@ -1042,7 +1098,7 @@ impl IndexReader {
         let mut content = String::new();
         file.read_to_string(&mut content).ok()?;
         let after = FileStamp::from_metadata(&file.metadata().ok()?);
-        if content.len() <= MAX_CACHEABLE_FILE_SIZE && before == after {
+        if content.len() <= self.file_cache.max_entry_bytes && before == after {
             let content: Arc<str> = content.into();
             if let Ok(mut cache) = shard.lock() {
                 cache.put(path.to_path_buf(), after, Arc::clone(&content));
@@ -1061,11 +1117,11 @@ impl IndexReader {
         std::fs::read_to_string(path).ok()
     }
 
-    /// Clear the file content cache.
+    /// Clear the shared process content cache.
     /// Call this after index updates to ensure stale content isn't served.
     #[allow(dead_code)]
     pub fn clear_file_cache(&self) {
-        for shard in &self.file_cache {
+        for shard in &self.file_cache.shards {
             if let Ok(mut cache) = shard.lock() {
                 cache.entries.clear();
                 cache.bytes = 0;
@@ -1478,10 +1534,11 @@ mod tests {
         let first = reader.read_file_for_scan(&path, false).unwrap();
         assert!(matches!(first, FileContent::Owned(_)));
         assert!(
-            reader
-                .file_cache
-                .iter()
-                .all(|shard| shard.lock().unwrap().entries.is_empty())
+            reader.file_cache.shards.iter().all(|shard| !shard
+                .lock()
+                .unwrap()
+                .entries
+                .contains(&path))
         );
         let cached = reader.read_file_for_scan(&path, true).unwrap();
         assert_eq!(&*first, &*cached);
@@ -1501,6 +1558,36 @@ mod tests {
         for use_cache in [false, true] {
             assert!(reader.read_file_for_scan(&path, use_cache).is_none());
         }
+    }
+
+    #[test]
+    fn readers_share_one_budget_but_single_queries_do_not_admit_content() {
+        let (_temp_a, root_a) = create_test_index();
+        let (_temp_b, root_b) = create_test_index();
+        let a = IndexReader::open(&root_a).unwrap();
+        let b = IndexReader::open(&root_b).unwrap();
+        assert!(Arc::ptr_eq(&a.file_cache, &b.file_cache));
+        let path = root_a.join("test.rs");
+        let once = IndexReader::open_uncached(&root_a).unwrap();
+        assert!(!once.should_cache_scan(once.valid_doc_ids()));
+        assert!(matches!(
+            once.read_file_cached(&path),
+            Some(FileContent::Owned(_))
+        ));
+        assert!(
+            a.file_cache
+                .shards
+                .iter()
+                .all(|shard| !shard.lock().unwrap().entries.contains(&path))
+        );
+        assert!(matches!(
+            a.read_file_cached(&path),
+            Some(FileContent::Cached(_))
+        ));
+        assert!(matches!(
+            b.read_file_cached(&path),
+            Some(FileContent::Cached(_))
+        ));
     }
 
     #[test]
@@ -1563,13 +1650,15 @@ mod cache_budget_tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let stamp = FileStamp::from_metadata(&file.as_file().metadata().unwrap());
         let mut cache = ContentCache::new();
+        cache.max_bytes = 4 * 1024 * 1024;
+        cache.max_entries = 256;
         for i in 0..64 {
             cache.put(
                 format!("f{i}").into(),
                 stamp.clone(),
-                Arc::from("x".repeat(MAX_CACHEABLE_FILE_SIZE)),
+                Arc::from("x".repeat(128 * 1024)),
             );
-            assert!(cache.bytes <= FILE_CACHE_SHARD_BYTES);
+            assert!(cache.bytes <= cache.max_bytes);
         }
         assert!(!cache.entries.contains(Path::new("f0")));
         cache.put("f63".into(), stamp.clone(), Arc::from("small"));
@@ -1581,10 +1670,10 @@ mod cache_budget_tests {
                 .map(|(_, (_, text))| text.len())
                 .sum::<usize>()
         );
-        for i in 0..FILE_CACHE_SHARD_ENTRIES + 1 {
+        for i in 0..cache.max_entries + 1 {
             cache.put(format!("small{i}").into(), stamp.clone(), Arc::from("x"));
         }
-        assert_eq!(cache.entries.len(), FILE_CACHE_SHARD_ENTRIES);
-        assert_eq!(cache.bytes, FILE_CACHE_SHARD_ENTRIES);
+        assert_eq!(cache.entries.len(), cache.max_entries);
+        assert_eq!(cache.bytes, cache.max_entries);
     }
 }
