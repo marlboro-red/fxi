@@ -573,7 +573,30 @@ impl<'a> QueryExecutor<'a> {
     }
 
     /// Execute the narrowing phase using RoaringBitmap for efficient set operations
+    fn validate_verification(verification: &VerificationStep) -> Result<()> {
+        match verification {
+            VerificationStep::Regex(pattern) => {
+                if get_regex_cache().get_or_compile(pattern).is_none() {
+                    // Preserve the regex compiler's diagnostic instead of
+                    // reporting a successful empty search.
+                    Regex::new(pattern)?;
+                }
+            }
+            VerificationStep::And(steps) | VerificationStep::Or(steps) => {
+                for step in steps {
+                    Self::validate_verification(step)?;
+                }
+            }
+            VerificationStep::Not(inner) => Self::validate_verification(inner)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn execute_plan(&self, plan: &QueryPlan) -> Result<RoaringBitmap> {
+        if let Some(verification) = &plan.verification {
+            Self::validate_verification(verification)?;
+        }
         let mut candidates: Option<RoaringBitmap> = None;
         let mut exclude_plans: Vec<&QueryPlan> = Vec::new();
 

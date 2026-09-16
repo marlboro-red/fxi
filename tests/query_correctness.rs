@@ -59,3 +59,23 @@ fn files_only_obeys_line_regex_and_filter_semantics() {
     check_files("needle line:1-1", &["a.txt", "d.txt"]);
     check_files("needle -re:/^x$/", &["a.txt", "d.txt"]);
 }
+
+#[test]
+fn invalid_regex_is_an_error_even_with_no_candidates() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "unrelated").unwrap();
+    build_index_with_progress(dir.path(), true, true).unwrap();
+    let reader = IndexReader::open(dir.path()).unwrap();
+    let executor = QueryExecutor::new(&reader);
+    for input in ["re:/[/", "absent re:/[/", "absent | re:/[/", "-re:/[/"] {
+        let query = parse_query(input);
+        assert!(executor.execute(&query).is_err(), "{input}");
+        assert!(executor.execute_files_only(&query, 0).is_err(), "{input}");
+        assert!(
+            executor.execute_with_content(&query, 0, 0).is_err(),
+            "{input}"
+        );
+    }
+    drop(reader);
+    fxi::utils::remove_index(dir.path()).unwrap();
+}
