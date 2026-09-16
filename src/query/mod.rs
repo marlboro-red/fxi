@@ -41,6 +41,7 @@
 pub mod executor;
 pub mod parser;
 pub mod planner;
+mod regex_plan;
 pub mod scorer;
 
 #[allow(unused_imports)]

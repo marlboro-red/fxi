@@ -215,3 +215,120 @@ fn ranked_limit_is_a_prefix_of_the_complete_ranking() {
     drop(reader);
     fxi::utils::remove_index(dir.path()).unwrap();
 }
+
+#[test]
+fn hir_candidates_match_brute_force_regex_before_and_after_compaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut corpus: Vec<String> = [
+        "needle",
+        "NEEDLE",
+        "fooBAR",
+        "aBc",
+        "xyz",
+        "x",
+        "",
+        "Kelvin",
+        "kelvin",
+        "Σigma",
+        "ςIGMA",
+        "σigma",
+        "İstanbul",
+        "long_identifier_ABC_xyz",
+        "aabcc",
+        "foo\nbar",
+        "needle suffix",
+        "prefix other",
+        "static VOID",
+        "abcdabcd",
+    ]
+    .iter()
+    .map(|s| (*s).into())
+    .collect();
+    for a in ["a", "A", "K", "k", "σ", "ς", "foo", "needle"] {
+        for b in ["bc", "BC", "foo", "bar", "xyz", "other"] {
+            corpus.push(format!("prefix {a}{b} suffix\n{b}{a}"));
+        }
+    }
+    for (i, text) in corpus.iter().enumerate() {
+        fs::write(dir.path().join(format!("f{i}.txt")), text).unwrap();
+    }
+    build_index_with_progress(dir.path(), true, true).unwrap();
+    let mut patterns: Vec<String> = [
+        "needle|other",
+        "x|needle",
+        ".*needle",
+        "needle.*suffix",
+        "^foo$",
+        "foo$|^bar",
+        "(?:needle)?",
+        "(?:ab){2}",
+        "(?:ab){0,2}c",
+        "(?:abc)+",
+        "(?:ab|xy)c",
+        "[aA]bc",
+        "a[bB][cC]",
+        "(?i)kelvin",
+        "(?i)σigma",
+        "(?i)static void",
+        "(?i)long_identifier_abc_xyz",
+        "(?i)needle(?-i:XYZ)?",
+        "\\bneedle\\b",
+        "[a-z]+foo",
+        "[^x]*bar",
+        "(?:foo|bar){2}",
+        "(?x) n e e d l e #comment",
+        "[[:alpha:]]+",
+        "a{1000}",
+        "(?i:ab){12}",
+        "(?:abc|)",
+        "a?bc",
+        "food*",
+        "(?i)kbc",
+        "(?i)σbc",
+        "(?:a|b|c|d|e|f){10}",
+        "\\x{212a}elvin",
+    ]
+    .iter()
+    .map(|s| (*s).into())
+    .collect();
+    for atom in ["abc", "[aA]bc", "(?i:foo)", "(?:needle|x)", "[a-z]"] {
+        for suffix in ["", "?", "+", "*", "{0,2}", "{2}"] {
+            patterns.push(format!("(?:{atom}){suffix}"));
+            patterns.push(format!("prefix.*(?:{atom}){suffix}.*suffix"));
+        }
+    }
+    for compact in [false, true] {
+        if compact {
+            fxi::index::compact::compact_segments(dir.path()).unwrap();
+        }
+        let reader = IndexReader::open(dir.path()).unwrap();
+        let executor = QueryExecutor::new(&reader);
+        for pattern in &patterns {
+            let oracle = regex::Regex::new(pattern).unwrap();
+            let expected: BTreeSet<_> = corpus
+                .iter()
+                .enumerate()
+                .filter(|(_, text)| text.lines().any(|line| oracle.is_match(line)))
+                .map(|(i, _)| std::path::PathBuf::from(format!("f{i}.txt")))
+                .collect();
+            let query = fxi::query::Query {
+                root: fxi::query::QueryNode::Regex(pattern.clone()),
+                ..parse_query("")
+            };
+            let actual: BTreeSet<_> = executor
+                .execute_files_only(&query, 0)
+                .unwrap()
+                .into_iter()
+                .collect();
+            assert_eq!(actual, expected, "{pattern}, compact={compact}");
+            let actual: BTreeSet<_> = executor
+                .execute_with_content(&query, 0, 0)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.path)
+                .collect();
+            assert_eq!(actual, expected, "content {pattern}, compact={compact}");
+        }
+    }
+    fxi::utils::remove_index(dir.path()).unwrap();
+}

@@ -31,6 +31,7 @@ globset = "0.4.18"
 
 # Regex
 regex = "1.11"
+regex-syntax = "0.8"
 
 # Performance optimizations
 roaring = "0.11"

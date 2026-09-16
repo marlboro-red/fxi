@@ -1,6 +1,6 @@
+use super::regex_plan::regex_steps;
 use crate::index::types::Trigram;
 use crate::query::parser::{Query, QueryNode};
-use crate::utils::query_trigrams;
 
 /// Query execution plan
 #[derive(Debug)]
@@ -96,8 +96,7 @@ impl QueryPlan {
 /// Query planner
 struct QueryPlanner {
     steps: Vec<PlanStep>,
-    /// -i: trigram narrowing is case-sensitive, so case-insensitive queries
-    /// must narrow through the token/positional indexes (stored lowercased)
+    /// Apply Unicode-insensitive regex semantics to explicit phrases/regexes.
     case_insensitive: bool,
 }
 
@@ -155,74 +154,44 @@ impl QueryPlanner {
         match node {
             QueryNode::Empty => (Vec::new(), None),
 
-            // Bare literals and proximity terms use Unicode-insensitive
-            // substring semantics. Exact-token and byte-exact gram postings
-            // are not sound restrictions for that language. Until a matching
-            // case-folded candidate plan exists, verify the full candidate set.
-            QueryNode::Literal(text) => (Vec::new(), Some(VerificationStep::Literal(text.clone()))),
+            QueryNode::Literal(text) => (
+                literal_steps(text, true),
+                Some(VerificationStep::Literal(text.clone())),
+            ),
             QueryNode::BoostedLiteral { text, boost } => (
-                Vec::new(),
+                literal_steps(text, true),
                 Some(VerificationStep::BoostedLiteral {
                     text: text.clone(),
                     boost: *boost,
                 }),
             ),
             QueryNode::Near { terms, distance } => (
-                Vec::new(),
+                terms
+                    .iter()
+                    .flat_map(|term| literal_steps(term, true))
+                    .collect(),
                 Some(VerificationStep::Near {
                     terms: terms.clone(),
                     distance: *distance,
                 }),
             ),
-            QueryNode::Phrase(text) => {
-                // A substring phrase need not start/end on token boundaries.
-                // Positional token adjacency would reject valid partial words.
-                let trigrams = if self.case_insensitive {
-                    Vec::new()
+            QueryNode::Phrase(text) => (
+                literal_steps(text, self.case_insensitive),
+                Some(VerificationStep::Phrase {
+                    text: text.clone(),
+                    case_insensitive: self.case_insensitive,
+                }),
+            ),
+            QueryNode::Regex(pattern) => {
+                let pattern = if self.case_insensitive {
+                    format!("(?i){pattern}")
                 } else {
-                    query_trigrams(text)
-                };
-                let steps = if trigrams.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![PlanStep::TrigramIntersect(trigrams)]
+                    pattern.clone()
                 };
                 (
-                    steps,
-                    Some(VerificationStep::Phrase {
-                        text: text.clone(),
-                        case_insensitive: self.case_insensitive,
-                    }),
+                    regex_steps(&pattern),
+                    Some(VerificationStep::Regex(pattern)),
                 )
-            }
-
-            QueryNode::Regex(pattern) => {
-                if self.case_insensitive {
-                    // Case-sensitive trigram narrowing would miss other-case
-                    // matches, so verify across all docs with (?i) applied
-                    let ci_pattern = if pattern.starts_with("(?i)") {
-                        pattern.clone()
-                    } else {
-                        format!("(?i){}", pattern)
-                    };
-                    return (Vec::new(), Some(VerificationStep::Regex(ci_pattern)));
-                }
-
-                // Try to extract literal prefix for narrowing
-                let literal_prefix = extract_regex_prefix(pattern);
-
-                let steps = if let Some(prefix) = literal_prefix {
-                    let trigrams = query_trigrams(&prefix);
-                    if !trigrams.is_empty() {
-                        vec![PlanStep::TrigramIntersect(trigrams)]
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    Vec::new()
-                };
-
-                (steps, Some(VerificationStep::Regex(pattern.clone())))
             }
 
             QueryNode::And(nodes) => {
@@ -296,67 +265,13 @@ impl QueryPlanner {
     }
 }
 
-/// Extract literal prefix from regex for narrowing
-fn extract_regex_prefix(pattern: &str) -> Option<String> {
-    // An unescaped alternation anywhere means no literal prefix is required
-    // by every match ("gamma|other" must not narrow to docs containing
-    // "gamma"), so narrowing must be skipped entirely
-    let mut escaped = false;
-    for ch in pattern.chars() {
-        if escaped {
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == '|' {
-            return None;
-        }
-    }
-
-    let mut prefix = String::new();
-    let mut chars = pattern.chars().peekable();
-
-    // Skip leading ^
-    if chars.peek() == Some(&'^') {
-        chars.next();
-    }
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            // Escape sequences
-            '\\' => {
-                if let Some(escaped) = chars.next() {
-                    match escaped {
-                        'n' => prefix.push('\n'),
-                        't' => prefix.push('\t'),
-                        'r' => prefix.push('\r'),
-                        c if c.is_ascii_alphanumeric() => {
-                            // Special regex escape, stop
-                            break;
-                        }
-                        c => prefix.push(c),
-                    }
-                } else {
-                    break;
-                }
-            }
-            // Quantifiers that make the PREVIOUS char optional: it is not
-            // part of the required prefix ("foo*" only requires "fo")
-            '*' | '?' | '{' => {
-                prefix.pop();
-                break;
-            }
-            // Other regex metacharacters - stop here
-            '.' | '+' | '[' | ']' | '(' | ')' | '}' | '$' => break,
-            // Regular character
-            c => prefix.push(c),
-        }
-    }
-
-    if prefix.len() >= 3 {
-        Some(prefix)
+fn literal_steps(text: &str, insensitive: bool) -> Vec<PlanStep> {
+    let escaped = regex::escape(text);
+    regex_steps(&if insensitive {
+        format!("(?i:{escaped})")
     } else {
-        None
-    }
+        escaped
+    })
 }
 
 #[cfg(test)]
@@ -364,85 +279,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_regex_prefix() {
-        assert_eq!(
-            extract_regex_prefix("hello.*world"),
-            Some("hello".to_string())
-        );
-        assert_eq!(extract_regex_prefix("^foo"), Some("foo".to_string()));
-        assert_eq!(extract_regex_prefix("ab"), None); // Too short
-
-        // Alternation: no prefix is required by every match
-        assert_eq!(extract_regex_prefix("gamma|other"), None);
-        assert_eq!(extract_regex_prefix("foo(a)|b"), None);
-        assert_eq!(
-            extract_regex_prefix("foo\\|bar"),
-            Some("foo|bar".to_string())
-        ); // escaped pipe is literal
-
-        // Quantifiers make the preceding char optional
-        assert_eq!(extract_regex_prefix("food*"), Some("foo".to_string()));
-        assert_eq!(extract_regex_prefix("food?s"), Some("foo".to_string()));
-        assert_eq!(extract_regex_prefix("food{2}"), Some("foo".to_string()));
-        // "+" requires at least one occurrence, so the char stays
-        assert_eq!(extract_regex_prefix("food+"), Some("food".to_string()));
+    fn plans_non_prefix_and_insensitive_constraints() {
+        for pattern in [
+            ".*needle",
+            "needle|other",
+            "(?i)serverassert",
+            "[aA]bc",
+            "foo.*bar",
+        ] {
+            assert!(!regex_steps(pattern).is_empty(), "{pattern}");
+        }
+        for pattern in ["x|needle", "(?:needle)?", ".*", "[a-z]", "a?"] {
+            assert!(regex_steps(pattern).is_empty(), "{pattern}");
+        }
     }
 
-    fn plan_ci(input: &str) -> QueryPlan {
-        let mut query = crate::query::parser::parse_query(input);
+    #[test]
+    fn insensitive_phrases_keep_unicode_verification() {
+        let mut query = crate::query::parser::parse_query("\"static void\"");
         query.options.case_insensitive = true;
-        QueryPlan::from_query(&query)
-    }
-
-    #[test]
-    fn test_ci_phrase_skips_trigram_narrowing() {
-        let plan = plan_ci("\"static void\"");
-        assert!(
-            plan.steps.is_empty(),
-            "CI substring phrases need a sound folded index"
-        );
-        match plan.verification {
-            Some(VerificationStep::Phrase {
-                case_insensitive, ..
-            }) => assert!(case_insensitive),
-            other => panic!("expected CI phrase verification, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_ci_single_token_phrase_does_not_require_whole_tokens() {
-        assert!(plan_ci("\"deadlock\"").steps.is_empty());
-    }
-
-    #[test]
-    fn test_cs_phrase_keeps_trigram_narrowing() {
-        let query = crate::query::parser::parse_query("\"static void\"");
         let plan = QueryPlan::from_query(&query);
-        assert!(
-            plan.steps
-                .iter()
-                .any(|s| matches!(s, PlanStep::TrigramIntersect(_)))
-        );
-        match plan.verification {
+        assert!(!plan.steps.is_empty());
+        assert!(matches!(
+            plan.verification,
             Some(VerificationStep::Phrase {
-                case_insensitive, ..
-            }) => assert!(!case_insensitive),
-            other => panic!("expected CS phrase verification, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_ci_regex_gets_case_flag() {
-        let plan = plan_ci("re:/spin_lock\\(&\\w+/");
-        match plan.verification {
-            Some(VerificationStep::Regex(p)) => {
-                assert!(p.starts_with("(?i)"), "CI regex should carry (?i): {p}")
-            }
-            other => panic!("expected regex verification, got {:?}", other),
-        }
-        assert!(
-            plan.steps.is_empty(),
-            "CI regex must not narrow with case-sensitive trigrams"
-        );
+                case_insensitive: true,
+                ..
+            })
+        ));
     }
 }

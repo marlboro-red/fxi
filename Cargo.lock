@@ -696,6 +696,7 @@ dependencies = [
  "ratatui",
  "rayon",
  "regex",
+ "regex-syntax",
  "roaring",
  "serde",
  "serde_json",
