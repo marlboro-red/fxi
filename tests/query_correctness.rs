@@ -369,3 +369,44 @@ fn parallel_cached_verification_observes_rewrites_and_deletions() {
     drop(reader);
     fxi::utils::remove_index(dir.path()).unwrap();
 }
+
+#[test]
+fn boosts_preserve_phrase_case_and_only_affect_matching_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "needle\nother\nNEEDLE\n").unwrap();
+    build_index_with_progress(dir.path(), true, true).unwrap();
+    let reader = IndexReader::open(dir.path()).unwrap();
+    let executor = QueryExecutor::new(&reader);
+    let phrase = parse_query("^3:\"needle\" top:0");
+    let hits = executor.execute_with_content(&phrase, 0, 0).unwrap();
+    assert_eq!(
+        hits.iter().map(|h| h.line_number).collect::<Vec<_>>(),
+        vec![1]
+    );
+    let baseline = executor
+        .execute(&parse_query("needle | other top:0"))
+        .unwrap();
+    let boosted = executor
+        .execute(&parse_query("^3:needle | other top:0"))
+        .unwrap();
+    let score = |results: &[fxi::index::types::SearchMatch], line| {
+        results
+            .iter()
+            .find(|m| m.line_number == line)
+            .unwrap()
+            .score
+    };
+    assert_eq!(score(&baseline, 2), score(&boosted, 2));
+    assert!((score(&boosted, 1) / score(&baseline, 1) - 3.0).abs() < 0.001);
+    let mut insensitive = phrase;
+    insensitive.options.case_insensitive = true;
+    assert_eq!(
+        executor
+            .execute_with_content(&insensitive, 0, 0)
+            .unwrap()
+            .len(),
+        2
+    );
+    drop(reader);
+    fxi::utils::remove_index(dir.path()).unwrap();
+}

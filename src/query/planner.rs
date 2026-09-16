@@ -67,6 +67,11 @@ pub enum VerificationStep {
         text: String,
         boost: f32,
     },
+    BoostedPhrase {
+        text: String,
+        boost: f32,
+        case_insensitive: bool,
+    },
     /// Exact phrase match (case-insensitive when -i is set)
     Phrase {
         text: String,
@@ -163,6 +168,14 @@ impl QueryPlanner {
                 Some(VerificationStep::BoostedLiteral {
                     text: text.clone(),
                     boost: *boost,
+                }),
+            ),
+            QueryNode::BoostedPhrase { text, boost } => (
+                literal_steps(text, self.case_insensitive),
+                Some(VerificationStep::BoostedPhrase {
+                    text: text.clone(),
+                    boost: *boost,
+                    case_insensitive: self.case_insensitive,
                 }),
             ),
             QueryNode::Near { terms, distance } => (

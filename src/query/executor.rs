@@ -227,7 +227,6 @@ impl<'a> QueryExecutor<'a> {
         let search_terms_lower = verification
             .map(Self::extract_search_terms)
             .unwrap_or_default();
-        let boost = verification.map(Self::extract_boost).unwrap_or(1.0);
 
         let estimated_total = all_matches.len() * 2;
         let mut results = Vec::with_capacity(estimated_total.min(if limit > 0 {
@@ -249,16 +248,18 @@ impl<'a> QueryExecutor<'a> {
             }
 
             let filename_match = Self::filename_matches_terms(path, &search_terms_lower);
-            let score_ctx = ScoreContext {
+            let mut score_ctx = ScoreContext {
                 match_count: file_matches.len(),
                 filename_match,
                 depth: Scorer::path_depth(path),
                 mtime: *mtime,
-                boost,
+                boost: 1.0,
             };
-            let score = self.scorer.calculate_score(&score_ctx);
-
-            for (line_num, _line_content, _start, _end) in file_matches {
+            for (line_num, line_content, _start, _end) in file_matches {
+                score_ctx.boost = verification
+                    .and_then(|v| Self::matching_boost(v, line_content))
+                    .unwrap_or(1.0);
+                let score = self.scorer.calculate_score(&score_ctx);
                 results.push(SearchMatch {
                     doc_id: *doc_id,
                     path: path.clone(),
@@ -504,6 +505,11 @@ impl<'a> QueryExecutor<'a> {
             VerificationStep::Phrase {
                 text,
                 case_insensitive,
+            }
+            | VerificationStep::BoostedPhrase {
+                text,
+                case_insensitive,
+                ..
             } => {
                 if *case_insensitive {
                     Self::has_literal_match(content, text)
@@ -1194,18 +1200,19 @@ impl<'a> QueryExecutor<'a> {
         Ok(all_matches)
     }
 
-    /// Extract boost factor from verification steps
-    fn extract_boost(verification: &VerificationStep) -> f32 {
+    /// A boost affects only lines that contain its positive term. Unmatched
+    /// OR branches and negations must not inflate unrelated results.
+    fn matching_boost(verification: &VerificationStep, line: &str) -> Option<f32> {
         match verification {
-            VerificationStep::BoostedLiteral { boost, .. } => *boost,
-            VerificationStep::And(steps) | VerificationStep::Or(steps) => {
-                // Return the maximum boost from all steps
-                steps
-                    .iter()
-                    .map(Self::extract_boost)
-                    .fold(1.0_f32, |a, b| a.max(b))
+            VerificationStep::BoostedLiteral { boost, .. }
+            | VerificationStep::BoostedPhrase { boost, .. } => {
+                Self::has_match(line, verification).then_some(*boost)
             }
-            _ => 1.0,
+            VerificationStep::And(steps) | VerificationStep::Or(steps) => steps
+                .iter()
+                .filter_map(|step| Self::matching_boost(step, line))
+                .max_by(f32::total_cmp),
+            _ => None,
         }
     }
 
@@ -1242,7 +1249,9 @@ impl<'a> QueryExecutor<'a> {
     /// Recursively collect terms from verification steps
     fn collect_terms(verification: &VerificationStep, terms: &mut Vec<String>) {
         match verification {
-            VerificationStep::Literal(text) | VerificationStep::Phrase { text, .. } => {
+            VerificationStep::Literal(text)
+            | VerificationStep::Phrase { text, .. }
+            | VerificationStep::BoostedPhrase { text, .. } => {
                 // Split into words and collect meaningful terms
                 for word in text.split_whitespace() {
                     if word.len() >= 2 {
@@ -1307,6 +1316,11 @@ impl<'a> QueryExecutor<'a> {
             VerificationStep::Phrase {
                 text,
                 case_insensitive,
+            }
+            | VerificationStep::BoostedPhrase {
+                text,
+                case_insensitive,
+                ..
             } => Self::find_literal_matches_static(content, text, !case_insensitive, doc_id),
             VerificationStep::Regex(pattern) => {
                 // Use cached regex compilation for performance

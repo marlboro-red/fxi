@@ -13,6 +13,8 @@ pub enum QueryNode {
     Literal(String),
     /// Simple literal search with boost
     BoostedLiteral { text: String, boost: f32 },
+    /// Quoted phrase with a ranking boost; retains phrase case semantics.
+    BoostedPhrase { text: String, boost: f32 },
     /// Exact phrase search (quoted)
     Phrase(String),
     /// Regex pattern
@@ -203,7 +205,7 @@ impl<'a> QueryParser<'a> {
             let inner = self.parse_primary();
             return match inner {
                 QueryNode::Literal(text) => QueryNode::BoostedLiteral { text, boost },
-                QueryNode::Phrase(text) => QueryNode::BoostedLiteral { text, boost },
+                QueryNode::Phrase(text) => QueryNode::BoostedPhrase { text, boost },
                 other => other, // Can't boost complex nodes, return as-is
             };
         }
@@ -1116,7 +1118,7 @@ mod tests {
     fn test_boost_on_phrase() {
         let q = parse_query("^3:\"exact phrase\"");
         assert!(
-            matches!(&q.root, QueryNode::BoostedLiteral { text, boost } if text == "exact phrase" && *boost == 3.0)
+            matches!(&q.root, QueryNode::BoostedPhrase { text, boost } if text == "exact phrase" && *boost == 3.0)
         );
     }
 
