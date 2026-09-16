@@ -43,6 +43,19 @@ pub fn is_known_binary_ext(ext: &str) -> bool {
     )
 }
 
+fn checked_chunk_count(file_count: usize, chunk_size: usize) -> Result<usize> {
+    anyhow::ensure!(
+        chunk_size > 0,
+        "Chunk size must be positive after resolving overrides"
+    );
+    let count = file_count.div_ceil(chunk_size);
+    anyhow::ensure!(
+        count <= usize::from(SegmentId::MAX),
+        "Too many index segments ({count}); increase --chunk-size"
+    );
+    Ok(count)
+}
+
 /// Largest-first scheduling avoids concentrating byte-heavy directories in
 /// one segment. Path-order ties make parallel discovery deterministic.
 fn balance_chunks<T: Ord>(mut entries: Vec<(u64, T)>, max_files: usize) -> Vec<Vec<T>> {
@@ -302,6 +315,8 @@ pub fn build_index_with_options(
         None => config.chunk_size,
     };
 
+    let num_chunks = checked_chunk_count(total_files, chunk_size)?;
+
     // Metadata weights prevent one fixed-file-count batch from retaining
     // a disproportionately large token/position expansion. Keep the existing
     // number of segments and file-count limit.
@@ -338,12 +353,6 @@ pub fn build_index_with_options(
     // Files rejected after their content was read (binary sniff, no tokens):
     // recorded in meta so incremental scans skip them while unchanged
     let rejected_files = Arc::new(Mutex::new(Vec::<(PathBuf, u64)>::new()));
-
-    let num_chunks = if chunk_size == 0 {
-        1
-    } else {
-        total_files.div_ceil(chunk_size)
-    };
 
     if num_chunks > 1 && !silent {
         println!(
@@ -1002,6 +1011,16 @@ pub fn build_index_auto(start_path: &Path, force: bool, chunk_size: Option<usize
 #[cfg(test)]
 mod encoding_tests {
     use super::*;
+
+    #[test]
+    fn segment_counts_cannot_wrap_the_disk_identifier() {
+        let max = usize::from(SegmentId::MAX);
+        assert_eq!(checked_chunk_count(max, 1).unwrap(), max);
+        assert!(checked_chunk_count(max + 1, 1).is_err());
+        assert!(checked_chunk_count(1, 0).is_err());
+        assert_eq!(checked_chunk_count(usize::MAX, usize::MAX).unwrap(), 1);
+        assert_eq!(checked_chunk_count(0, 2000).unwrap(), 0);
+    }
 
     #[test]
     fn balanced_chunks_preserve_files_limits_and_determinism() {
