@@ -11,6 +11,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -74,6 +75,26 @@ fn balance_chunks<T: Ord>(mut entries: Vec<(u64, T)>, max_files: usize) -> Vec<V
         }
     }
     chunks
+}
+
+/// Read from the same handle used for metadata, retaining owned bytes and
+/// enforcing the size limit even if the file grows after its metadata check.
+fn read_index_source(
+    file: File,
+    expected_size: u64,
+    max_size: u64,
+) -> std::io::Result<Option<Vec<u8>>> {
+    if expected_size == 0 || expected_size > max_size {
+        return Ok(None);
+    }
+    let capacity = usize::try_from(expected_size).map_err(std::io::Error::other)?;
+    let mut content = Vec::new();
+    content
+        .try_reserve_exact(capacity)
+        .map_err(std::io::Error::other)?;
+    file.take(max_size.saturating_add(1))
+        .read_to_end(&mut content)?;
+    Ok((!content.is_empty() && content.len() as u64 <= max_size).then_some(content))
 }
 
 /// Result of processing a single file (computed in parallel)
@@ -446,8 +467,14 @@ pub fn build_index_with_options(
                 // Source files are mutable; own their bytes before validating
                 // UTF-8 or extracting tokens so external writes cannot change
                 // the memory behind those borrows.
-                let content = match fs::read(full_path) {
-                    Ok(content) => content,
+                let content = match read_index_source(file, file_size, max_file_size) {
+                    Ok(Some(content)) => content,
+                    Ok(None) => {
+                        if let Some(ref pb) = pb_clone {
+                            pb.inc(1);
+                        }
+                        return None;
+                    }
                     Err(_) => {
                         error_count_clone.fetch_add(1, Ordering::Relaxed);
                         if let Some(ref pb) = pb_clone {
@@ -851,13 +878,13 @@ fn process_file_for_update(
         return None;
     }
 
-    let metadata = fs::metadata(full_path).ok()?;
+    let file = File::open(full_path).ok()?;
+    let metadata = file.metadata().ok()?;
     if metadata.len() == 0 || metadata.len() > max_file_size {
         return None;
     }
 
-    // Seconds, matching the full-build path (compute_index_diff compares
-    // against this for change detection)
+    // Nanoseconds, matching the full-build path and change detection.
     let mtime = metadata
         .modified()
         .map(|t| {
@@ -868,7 +895,7 @@ fn process_file_for_update(
         })
         .unwrap_or(0);
 
-    let content = fs::read(full_path).ok()?;
+    let content = read_index_source(file, metadata.len(), max_file_size).ok()??;
     process_file_content(rel_path.to_path_buf(), &content, mtime)
 }
 
@@ -1023,6 +1050,42 @@ mod encoding_tests {
         assert!(checked_chunk_count(1, 0).is_err());
         assert_eq!(checked_chunk_count(usize::MAX, usize::MAX).unwrap(), 1);
         assert_eq!(checked_chunk_count(0, 2000).unwrap(), 0);
+    }
+
+    #[test]
+    fn source_reads_enforce_growth_and_empty_file_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.txt");
+        for (content, expected, limit, accepted) in [
+            ("12345678", 8, 8, true),
+            ("123456789", 2, 8, false),
+            ("", 2, 8, false),
+            ("short", 8, 8, true),
+            ("short", 5, 4, false),
+        ] {
+            fs::write(&path, content).unwrap();
+            let result = read_index_source(File::open(&path).unwrap(), expected, limit).unwrap();
+            assert_eq!(result.is_some(), accepted);
+            if let Some(bytes) = result {
+                assert_eq!(bytes, content.as_bytes());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_reads_do_not_reopen_replaced_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.txt");
+        fs::write(&path, "original").unwrap();
+        let file = File::open(&path).unwrap();
+        let size = file.metadata().unwrap().len();
+        fs::rename(&path, dir.path().join("moved.txt")).unwrap();
+        fs::write(&path, "replacement").unwrap();
+        assert_eq!(
+            read_index_source(file, size, 100).unwrap().unwrap(),
+            b"original"
+        );
     }
 
     #[test]
