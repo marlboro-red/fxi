@@ -1,0 +1,88 @@
+{
+  "corpus": "/private/tmp/fxi-linux-corpus",
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-ukvdl723",
+  "files": 65287,
+  "manifest_sha256": "1a766baca79cf384a46b3d35b1c5848f9cd0c564ce4ce3f5e62684ffe4ca53dd",
+  "variants": {
+    "positions": {
+      "binary": "/private/tmp/fxi-compressed-position-experiment",
+      "kind": "fxi",
+      "binary_sha256": "deb3b874a5996ad10db567ec25795520833bf7610385390023c2810bc93ec0ed",
+      "samples": [
+        {
+          "seconds": 4.349343707999651,
+          "max_rss_bytes": 497926144,
+          "resource_output": "        4.34 real        23.92 user         8.66 sys\n           497926144  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               35640  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  14  voluntary context switches\n               32632  involuntary context switches\n        270727610163  instructions retired\n         99765300895  cycles elapsed\n           448430872  peak memory footprint\n",
+          "validated_files": 65287
+        },
+        {
+          "seconds": 4.39432725000006,
+          "max_rss_bytes": 496238592,
+          "resource_output": "        4.39 real        23.91 user         8.73 sys\n           496238592  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               36102  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 205  voluntary context switches\n               33452  involuntary context switches\n        271000355052  instructions retired\n         99959483028  cycles elapsed\n           450233112  peak memory footprint\n",
+          "validated_files": 65287
+        },
+        {
+          "seconds": 4.336150708000787,
+          "max_rss_bytes": 510935040,
+          "resource_output": "        4.33 real        23.86 user         8.63 sys\n           510935040  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               37353  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  74  voluntary context switches\n               33430  involuntary context switches\n        270342923433  instructions retired\n         99498271466  cycles elapsed\n           458031920  peak memory footprint\n",
+          "validated_files": 65287
+        },
+        {
+          "seconds": 4.413861832999828,
+          "max_rss_bytes": 497909760,
+          "resource_output": "        4.41 real        23.88 user         8.78 sys\n           497909760  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               36125  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  18  voluntary context switches\n               32916  involuntary context switches\n        270771965285  instructions retired\n         99968705566  cycles elapsed\n           443106072  peak memory footprint\n",
+          "validated_files": 65287
+        },
+        {
+          "seconds": 4.435070125000493,
+          "max_rss_bytes": 499662848,
+          "resource_output": "        4.43 real        23.86 user         8.29 sys\n           499662848  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               34993  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  11  voluntary context switches\n               33827  involuntary context switches\n        270221615944  instructions retired\n         98537356043  cycles elapsed\n           441385776  peak memory footprint\n",
+          "validated_files": 65287
+        }
+      ],
+      "index_bytes": 657068414,
+      "median_seconds": 4.39432725000006,
+      "median_peak_rss_bytes": 497926144
+    },
+    "tokens": {
+      "binary": "/private/tmp/fxi-compressed-token-experiment",
+      "kind": "fxi",
+      "binary_sha256": "f2fd41a696eb18a75bcf9a0f06d304614d2bcc79cf5d70e52ad6f73b0f256ba2",
+      "samples": [
+        {
+          "seconds": 4.393640625001353,
+          "max_rss_bytes": 516882432,
+          "resource_output": "        4.39 real        23.95 user         8.35 sys\n           516882432  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               36595  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  59  voluntary context switches\n               29326  involuntary context switches\n        268469606855  instructions retired\n         99031732945  cycles elapsed\n           451822360  peak memory footprint\n",
+          "validated_files": 65287
+        },
+        {
+          "seconds": 4.441386124999553,
+          "max_rss_bytes": 518782976,
+          "resource_output": "        4.43 real        23.98 user         8.35 sys\n           518782976  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               36780  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 115  voluntary context switches\n               30278  involuntary context switches\n        268676107693  instructions retired\n         99058363233  cycles elapsed\n           469140248  peak memory footprint\n",
+          "validated_files": 65287
+        },
+        {
+          "seconds": 4.463138291999712,
+          "max_rss_bytes": 518684672,
+          "resource_output": "        4.45 real        23.89 user         8.59 sys\n           518684672  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               36622  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  93  voluntary context switches\n               29604  involuntary context switches\n        269250238258  instructions retired\n         99607919041  cycles elapsed\n           459064160  peak memory footprint\n",
+          "validated_files": 65287
+        },
+        {
+          "seconds": 4.429950125000687,
+          "max_rss_bytes": 526139392,
+          "resource_output": "        4.42 real        23.94 user         8.45 sys\n           526139392  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               37160  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  45  voluntary context switches\n               30888  involuntary context switches\n        268638068620  instructions retired\n         99238997637  cycles elapsed\n           468763440  peak memory footprint\n",
+          "validated_files": 65287
+        },
+        {
+          "seconds": 4.430577375000212,
+          "max_rss_bytes": 530071552,
+          "resource_output": "        4.42 real        23.96 user         8.63 sys\n           530071552  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               37407  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  11  voluntary context switches\n               30894  involuntary context switches\n        269186061367  instructions retired\n         99856078819  cycles elapsed\n           462046000  peak memory footprint\n",
+          "validated_files": 65287
+        }
+      ],
+      "index_bytes": 657068414,
+      "median_seconds": 4.430577375000212,
+      "median_peak_rss_bytes": 518782976
+    }
+  }
+}

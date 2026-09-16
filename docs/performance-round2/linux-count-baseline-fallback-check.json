@@ -1,0 +1,16 @@
+{
+  "baseline_revision": "56121af",
+  "corpus": "/private/tmp/fxi-linux-corpus",
+  "samples": [
+    {
+      "seconds": 3.1144162920008966,
+      "stderr": "Daemon search failed, falling back to direct search: I/O error: Message too large\n",
+      "output_lines": 44261
+    },
+    {
+      "seconds": 2.787375374999101,
+      "stderr": "Daemon search failed, falling back to direct search: I/O error: Message too large\n",
+      "output_lines": 44261
+    }
+  ]
+}

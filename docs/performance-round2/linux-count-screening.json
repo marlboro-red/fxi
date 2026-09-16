@@ -1,0 +1,640 @@
+{
+  "fxi_binary_sha256": "deb3b874a5996ad10db567ec25795520833bf7610385390023c2810bc93ec0ed",
+  "manifest_sha256": "1a766baca79cf384a46b3d35b1c5848f9cd0c564ce4ce3f5e62684ffe4ca53dd",
+  "suite": "linux",
+  "output_mode": "count",
+  "fxi_commit": "56121af",
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-bench-spnw2by0",
+  "corpus": "/private/tmp/fxi-linux-corpus",
+  "tgrep_commit": "b1d0fc2f6245cc78f1943e5864ceeab812452404",
+  "source_commit": "9b87fdc9af2fbfcdb5c24a64139685ef80f6573f",
+  "files": 65287,
+  "bytes": 1311967080,
+  "builds": {
+    "fxi": {
+      "samples": [
+        {
+          "seconds": 4.466723833000287,
+          "resource_output": "        4.46 real        23.92 user         8.88 sys\n           500318208  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               36451  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  20  voluntary context switches\n               34235  involuntary context switches\n        270656459961  instructions retired\n        100503944256  cycles elapsed\n           447759152  peak memory footprint\n",
+          "max_rss_bytes": 500318208
+        }
+      ],
+      "seconds": 4.466723833000287,
+      "max_rss_bytes": 500318208,
+      "resource_output": "        4.46 real        23.92 user         8.88 sys\n           500318208  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               36451  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  20  voluntary context switches\n               34235  involuntary context switches\n        270656459961  instructions retired\n        100503944256  cycles elapsed\n           447759152  peak memory footprint\n"
+    },
+    "tgrep": {
+      "samples": [
+        {
+          "seconds": 7.930293458999586,
+          "resource_output": "Walking /private/tmp/fxi-linux-corpus...\nFound 65305 text files (0 binary skipped, 0 too large, 0 errors)\nExtracting trigrams...\nMerging 25 spill segment(s) into the index...\nWriting index (340401 trigrams, 65305 files, 25 spill segment(s))...\nIndex built successfully at /private/tmp/fxi-linux-corpus/.tgrep\nIndexed in 7.9s using external strategy (peak memory 270.5 MiB)\n        7.92 real        18.28 user         8.80 sys\n           283656192  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               36896  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 304  voluntary context switches\n               30356  involuntary context switches\n        275807983876  instructions retired\n         85029359213  cycles elapsed\n           277217928  peak memory footprint\n",
+          "max_rss_bytes": 283656192
+        }
+      ],
+      "seconds": 7.930293458999586,
+      "max_rss_bytes": 283656192,
+      "resource_output": "Walking /private/tmp/fxi-linux-corpus...\nFound 65305 text files (0 binary skipped, 0 too large, 0 errors)\nExtracting trigrams...\nMerging 25 spill segment(s) into the index...\nWriting index (340401 trigrams, 65305 files, 25 spill segment(s))...\nIndex built successfully at /private/tmp/fxi-linux-corpus/.tgrep\nIndexed in 7.9s using external strategy (peak memory 270.5 MiB)\n        7.92 real        18.28 user         8.80 sys\n           283656192  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               36896  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 304  voluntary context switches\n               30356  involuntary context switches\n        275807983876  instructions retired\n         85029359213  cycles elapsed\n           277217928  peak memory footprint\n"
+    }
+  },
+  "index_bytes": {
+    "fxi": 657068414,
+    "tgrep": 872213168
+  },
+  "rows": [
+    {
+      "mode": "direct",
+      "query": "selective",
+      "pattern": "folio_wait_bit_common",
+      "files": 1,
+      "tools": {
+        "fxi": {
+          "median_ms": 33.476584,
+          "samples_ms": [
+            33.476584,
+            34.415,
+            32.979375
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 18.202667,
+          "samples_ms": [
+            18.591916,
+            17.925875,
+            18.202667
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 2244.339875,
+          "samples_ms": [
+            2262.563,
+            2236.334292,
+            2244.339875
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "absent",
+      "pattern": "auditNonexistentSymbol94283",
+      "files": 0,
+      "tools": {
+        "fxi": {
+          "median_ms": 26.232875,
+          "samples_ms": [
+            25.50875,
+            26.764875,
+            26.232875
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 17.311209,
+          "samples_ms": [
+            17.313541,
+            16.190792,
+            17.311209
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 2253.149958,
+          "samples_ms": [
+            2083.299291,
+            2253.149958,
+            2297.703958
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "phrase",
+      "pattern": "struct file_operations",
+      "files": 1240,
+      "tools": {
+        "fxi": {
+          "median_ms": 146.147833,
+          "samples_ms": [
+            152.385125,
+            146.147833,
+            136.128834
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 94.68325,
+          "samples_ms": [
+            104.337417,
+            93.505834,
+            94.68325
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 2247.652709,
+          "samples_ms": [
+            2247.652709,
+            2338.902125,
+            2157.218083
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "common",
+      "pattern": "return",
+      "files": 44261,
+      "tools": {
+        "fxi": {
+          "median_ms": 1461.211542,
+          "samples_ms": [
+            1453.556666,
+            1478.701667,
+            1461.211542
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 1889.923333,
+          "samples_ms": [
+            1886.503375,
+            1898.945208,
+            1889.923333
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 2697.535625,
+          "samples_ms": [
+            2535.530792,
+            2697.535625,
+            2711.378833
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "alternation",
+      "pattern": "folio_wait_bit_common|bpf_prog_select_runtime",
+      "files": 6,
+      "tools": {
+        "fxi": {
+          "median_ms": 40.200292,
+          "samples_ms": [
+            40.200292,
+            41.732208,
+            35.029792
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 25.991667,
+          "samples_ms": [
+            26.034958,
+            24.93425,
+            25.991667
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 2265.66275,
+          "samples_ms": [
+            2265.66275,
+            2309.87,
+            2110.48725
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "internal_literal",
+      "pattern": ".*folio_wait_bit_common",
+      "files": 1,
+      "tools": {
+        "fxi": {
+          "median_ms": 33.875125,
+          "samples_ms": [
+            35.495292,
+            33.875125,
+            33.560875
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 18.527625,
+          "samples_ms": [
+            18.962125,
+            17.85425,
+            18.527625
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 2214.535958,
+          "samples_ms": [
+            2061.661125,
+            2214.535958,
+            2312.084542
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "direct",
+      "query": "insensitive",
+      "pattern": "blk_mq_alloc_request",
+      "files": 13,
+      "tools": {
+        "fxi": {
+          "median_ms": 35.834459,
+          "samples_ms": [
+            34.313666,
+            35.834459,
+            36.444625
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 19.83875,
+          "samples_ms": [
+            20.239,
+            19.253708,
+            19.83875
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 2216.681583,
+          "samples_ms": [
+            2309.96975,
+            2209.252333,
+            2216.681583
+          ],
+          "missing": [],
+          "extra": []
+        }
+      }
+    },
+    {
+      "mode": "server",
+      "query": "selective",
+      "pattern": "folio_wait_bit_common",
+      "files": 1,
+      "tools": {
+        "fxi": {
+          "median_ms": 11.690584,
+          "samples_ms": [
+            11.690584,
+            11.506333,
+            11.762083
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 7.757333,
+          "samples_ms": [
+            8.830167,
+            7.31725,
+            7.757333
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 2109.351833,
+          "samples_ms": [
+            2209.405833,
+            2079.302333,
+            2109.351833
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_repeated_query_ms": [
+        11.742333,
+        11.253125,
+        11.318125
+      ],
+      "server_rss_kib": {
+        "fxi": 249200,
+        "tgrep": 362384
+      }
+    },
+    {
+      "mode": "server",
+      "query": "absent",
+      "pattern": "auditNonexistentSymbol94283",
+      "files": 0,
+      "tools": {
+        "fxi": {
+          "median_ms": 5.414208,
+          "samples_ms": [
+            5.45675,
+            5.414208,
+            5.152
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 6.596375,
+          "samples_ms": [
+            7.701125,
+            6.596375,
+            6.583875
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 2301.732209,
+          "samples_ms": [
+            2301.732209,
+            2321.604667,
+            2267.547959
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_repeated_query_ms": [
+        4.10075,
+        3.913125,
+        3.905167
+      ],
+      "server_rss_kib": {
+        "fxi": 249296,
+        "tgrep": 364576
+      }
+    },
+    {
+      "mode": "server",
+      "query": "phrase",
+      "pattern": "struct file_operations",
+      "files": 1240,
+      "tools": {
+        "fxi": {
+          "median_ms": 104.389625,
+          "samples_ms": [
+            104.389625,
+            108.904,
+            96.311792
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 23.575833,
+          "samples_ms": [
+            25.194375,
+            22.5675,
+            23.575833
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 2249.990625,
+          "samples_ms": [
+            2249.990625,
+            2025.44425,
+            2277.421875
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_repeated_query_ms": [
+        100.431625,
+        93.69775,
+        99.443625
+      ],
+      "server_rss_kib": {
+        "fxi": 501648,
+        "tgrep": 476096
+      }
+    },
+    {
+      "mode": "server",
+      "query": "common",
+      "pattern": "return",
+      "files": 44261,
+      "tools": {
+        "fxi": {
+          "median_ms": 2969.719667,
+          "samples_ms": [
+            2756.160209,
+            3002.057417,
+            2969.719667
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 2348.573208,
+          "samples_ms": [
+            2411.281834,
+            2348.573208,
+            2330.486667
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 2706.452833,
+          "samples_ms": [
+            2717.252416,
+            2687.481375,
+            2706.452833
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_repeated_query_ms": [
+        3004.526458,
+        3085.628,
+        2957.151042
+      ],
+      "server_rss_kib": {
+        "fxi": 3483280,
+        "tgrep": 4951776
+      }
+    },
+    {
+      "mode": "server",
+      "query": "alternation",
+      "pattern": "folio_wait_bit_common|bpf_prog_select_runtime",
+      "files": 6,
+      "tools": {
+        "fxi": {
+          "median_ms": 13.974208,
+          "samples_ms": [
+            13.974208,
+            13.49375,
+            14.462042
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 13.013583,
+          "samples_ms": [
+            13.469958,
+            12.65425,
+            13.013583
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 2347.522417,
+          "samples_ms": [
+            2222.671833,
+            2347.522417,
+            2516.578917
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_repeated_query_ms": [
+        18.002084,
+        13.701667,
+        15.790209
+      ],
+      "server_rss_kib": {
+        "fxi": 3489008,
+        "tgrep": 4955792
+      }
+    },
+    {
+      "mode": "server",
+      "query": "internal_literal",
+      "pattern": ".*folio_wait_bit_common",
+      "files": 1,
+      "tools": {
+        "fxi": {
+          "median_ms": 11.618667,
+          "samples_ms": [
+            11.575166,
+            11.618667,
+            20.216917
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 8.402875,
+          "samples_ms": [
+            51.587833,
+            8.402875,
+            8.267333
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 2664.611792,
+          "samples_ms": [
+            2526.7205,
+            2664.611792,
+            2708.339125
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_repeated_query_ms": [
+        11.901792,
+        11.359875,
+        11.176208
+      ],
+      "server_rss_kib": {
+        "fxi": 2167488,
+        "tgrep": 4805472
+      }
+    },
+    {
+      "mode": "server",
+      "query": "insensitive",
+      "pattern": "blk_mq_alloc_request",
+      "files": 13,
+      "tools": {
+        "fxi": {
+          "median_ms": 17.804667,
+          "samples_ms": [
+            12.164458,
+            17.804667,
+            17.889667
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "tgrep": {
+          "median_ms": 9.357625,
+          "samples_ms": [
+            60.954958,
+            9.357625,
+            9.343917
+          ],
+          "missing": [],
+          "extra": []
+        },
+        "rg": {
+          "median_ms": 2565.218209,
+          "samples_ms": [
+            2225.682375,
+            2788.965833,
+            2565.218209
+          ],
+          "missing": [],
+          "extra": []
+        }
+      },
+      "fxi_repeated_query_ms": [
+        10.1725,
+        9.944917,
+        11.744166
+      ],
+      "server_rss_kib": {
+        "fxi": 1422880,
+        "tgrep": 4709408
+      }
+    }
+  ]
+}

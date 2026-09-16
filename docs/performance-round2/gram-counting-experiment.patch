@@ -1,0 +1,126 @@
+diff --git a/src/index/writer.rs b/src/index/writer.rs
+index 9e83d98..10885ae 100644
+--- a/src/index/writer.rs
++++ b/src/index/writer.rs
+@@ -105,6 +105,61 @@ fn invert_token_postings(files: &mut [AssignedFile]) -> InvertedTokens {
+     }
+ }
+ 
++/// Stable counting inversion over the 24-bit gram universe. The zeroed
++/// offset table is sparse in physical memory on demand-paged allocators; only
++/// encountered grams are enumerated, so no full-universe scan is needed.
++fn invert_trigram_postings(files: &mut [AssignedFile]) -> Vec<(u32, DocId)> {
++    let total: usize = files.iter().map(|f| f.trigrams.len()).sum();
++    if total == 0 {
++        return Vec::new();
++    }
++    // Keep the writer's general u32-key API, including caller-constructed
++    // ProcessedFile values outside the extractor's 24-bit gram universe.
++    if total > u32::MAX as usize
++        || files
++            .iter()
++            .any(|f| f.trigrams.iter().any(|&g| g > 0xffffff))
++    {
++        let mut pairs = Vec::with_capacity(total);
++        for file in files {
++            pairs.extend(
++                std::mem::take(&mut file.trigrams)
++                    .into_iter()
++                    .map(|g| (g, file.doc_id)),
++            );
++        }
++        pairs.par_sort_unstable();
++        return pairs;
++    }
++    let mut offsets = vec![0u32; 1 << 24];
++    let mut touched = Vec::new();
++    for file in files.iter() {
++        for &gram in &file.trigrams {
++            let count = &mut offsets[gram as usize];
++            if *count == 0 {
++                touched.push(gram);
++            }
++            *count += 1;
++        }
++    }
++    touched.sort_unstable();
++    let mut next = 0;
++    for gram in touched {
++        let count = offsets[gram as usize];
++        offsets[gram as usize] = next;
++        next += count;
++    }
++    let mut pairs = vec![(0, 0); total];
++    for file in files {
++        for gram in std::mem::take(&mut file.trigrams) {
++            let offset = &mut offsets[gram as usize];
++            pairs[*offset as usize] = (gram, file.doc_id);
++            *offset += 1;
++        }
++    }
++    pairs
++}
++
+ /// Data needed to write a segment to disk (sent to background thread)
+ struct SegmentWriteJob {
+     segment_id: SegmentId,
+@@ -327,18 +382,13 @@ impl ChunkedIndexWriter {
+             positions: position_triples,
+             symbols: symbols_sorted,
+         } = invert_token_postings(&mut job.files);
+-        let trigram_count = job.files.iter().map(|f| f.trigrams.len()).sum();
+-        let mut trigram_pairs = Vec::with_capacity(trigram_count);
+-        let mut line_maps = Vec::with_capacity(file_count);
+-        for file in job.files {
+-            trigram_pairs.extend(file.trigrams.into_iter().map(|gram| (gram, file.doc_id)));
+-            line_maps.push((file.doc_id, file.line_offsets));
+-        }
+-
+         let t_collect = std::time::Instant::now();
+-
+-        // Sort flat pairs — par_sort is very cache-friendly on contiguous data
+-        trigram_pairs.par_sort_unstable();
++        let trigram_pairs = invert_trigram_postings(&mut job.files);
++        let line_maps: Vec<_> = job
++            .files
++            .into_iter()
++            .map(|file| (file.doc_id, file.line_offsets))
++            .collect();
+ 
+         let t_sort = std::time::Instant::now();
+ 
+@@ -1173,6 +1223,34 @@ mod tests {
+     use std::fs;
+     use tempfile::TempDir;
+ 
++    #[test]
++    fn stable_trigram_inversion_matches_full_sort() {
++        for wide_keys in [false, true] {
++            let mut files = Vec::new();
++            let mut expected = Vec::new();
++            let mut state = 42u64;
++            for doc in 0..17 {
++                let mut grams = vec![0, 0xffffff, 127, 127];
++                for _ in 0..doc * 13 {
++                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
++                    grams.push((state >> 32) as u32 & if wide_keys { u32::MAX } else { 0xffffff });
++                }
++                expected.extend(grams.iter().map(|&g| (g, doc * 131)));
++                files.push(AssignedFile {
++                    doc_id: doc * 131,
++                    trigrams: grams,
++                    tokens: vec![],
++                    line_offsets: vec![],
++                    token_positions: vec![],
++                });
++            }
++            expected.sort_unstable();
++            assert_eq!(invert_trigram_postings(&mut files), expected);
++            assert!(invert_trigram_postings(&mut files).is_empty());
++        }
++        assert!(invert_trigram_postings(&mut []).is_empty());
++    }
++
+     #[test]
+     fn stable_token_inversion_matches_full_sort() {
+         for file_count in [0, 1, 7, 35] {

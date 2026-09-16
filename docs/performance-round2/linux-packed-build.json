@@ -1,0 +1,63 @@
+{
+  "fxi_binary_sha256": "70e252c603c10ae02fbfa108a185c3c37f19bd35215f1b078d8e38878437c19b",
+  "manifest_sha256": "1a766baca79cf384a46b3d35b1c5848f9cd0c564ce4ce3f5e62684ffe4ca53dd",
+  "suite": "linux",
+  "fxi_commit": "5b96bb1db760bfa976254a94c5f42875d2f5411d",
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-bench-7xg76x3p",
+  "corpus": "/private/tmp/fxi-linux-corpus",
+  "tgrep_commit": "b1d0fc2f6245cc78f1943e5864ceeab812452404",
+  "source_commit": "9b87fdc9af2fbfcdb5c24a64139685ef80f6573f",
+  "files": 65287,
+  "bytes": 1311967080,
+  "builds": {
+    "fxi": {
+      "samples": [
+        {
+          "seconds": 4.183936958000231,
+          "resource_output": "        4.18 real        23.01 user         7.48 sys\n          1735262208  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n              125341  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 102  voluntary context switches\n               31318  involuntary context switches\n        265801028924  instructions retired\n         93248363272  cycles elapsed\n          1673955056  peak memory footprint\n",
+          "max_rss_bytes": 1735262208
+        },
+        {
+          "seconds": 4.342355834000045,
+          "resource_output": "        4.33 real        22.93 user         8.59 sys\n          1258258432  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               80772  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  58  voluntary context switches\n               33180  involuntary context switches\n        267942357774  instructions retired\n         96579479914  cycles elapsed\n          1157006704  peak memory footprint\n",
+          "max_rss_bytes": 1258258432
+        },
+        {
+          "seconds": 4.310960374999922,
+          "resource_output": "        4.30 real        23.04 user         8.57 sys\n          1649360896  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n              111431  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  28  voluntary context switches\n               33044  involuntary context switches\n        268061856100  instructions retired\n         96843826289  cycles elapsed\n          1586890384  peak memory footprint\n",
+          "max_rss_bytes": 1649360896
+        }
+      ],
+      "seconds": 4.310960374999922,
+      "max_rss_bytes": 1649360896,
+      "resource_output": "        4.30 real        23.04 user         8.57 sys\n          1649360896  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n              111431  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  28  voluntary context switches\n               33044  involuntary context switches\n        268061856100  instructions retired\n         96843826289  cycles elapsed\n          1586890384  peak memory footprint\n"
+    },
+    "tgrep": {
+      "samples": [
+        {
+          "seconds": 7.786272834000556,
+          "resource_output": "Walking /private/tmp/fxi-linux-corpus...\nFound 65305 text files (0 binary skipped, 0 too large, 0 errors)\nExtracting trigrams...\nMerging 25 spill segment(s) into the index...\nWriting index (340401 trigrams, 65305 files, 25 spill segment(s))...\nIndex built successfully at /private/tmp/fxi-linux-corpus/.tgrep\nIndexed in 7.8s using external strategy (peak memory 269.6 MiB)\n        7.78 real        18.29 user         8.70 sys\n           282705920  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               36840  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  86  voluntary context switches\n               31166  involuntary context switches\n        275771665154  instructions retired\n         84607109262  cycles elapsed\n           276267656  peak memory footprint\n",
+          "max_rss_bytes": 282705920
+        },
+        {
+          "seconds": 7.844233167000311,
+          "resource_output": "Walking /private/tmp/fxi-linux-corpus...\nFound 65305 text files (0 binary skipped, 0 too large, 0 errors)\nExtracting trigrams...\nMerging 25 spill segment(s) into the index...\nWriting index (340401 trigrams, 65305 files, 25 spill segment(s))...\nIndex built successfully at /private/tmp/fxi-linux-corpus/.tgrep\nIndexed in 7.8s using external strategy (peak memory 264.5 MiB)\n        7.84 real        18.33 user         8.41 sys\n           277348352  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               36466  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  64  voluntary context switches\n               30125  involuntary context switches\n        275701405241  instructions retired\n         83850324635  cycles elapsed\n           270910088  peak memory footprint\n",
+          "max_rss_bytes": 277348352
+        },
+        {
+          "seconds": 7.951072166999438,
+          "resource_output": "Walking /private/tmp/fxi-linux-corpus...\nFound 65305 text files (0 binary skipped, 0 too large, 0 errors)\nExtracting trigrams...\nMerging 25 spill segment(s) into the index...\nWriting index (340401 trigrams, 65305 files, 25 spill segment(s))...\nIndex built successfully at /private/tmp/fxi-linux-corpus/.tgrep\nIndexed in 7.9s using external strategy (peak memory 270.1 MiB)\n        7.94 real        18.13 user         8.29 sys\n           283246592  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               36833  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  47  voluntary context switches\n               30853  involuntary context switches\n        275606434501  instructions retired\n         83069641410  cycles elapsed\n           276791920  peak memory footprint\n",
+          "max_rss_bytes": 283246592
+        }
+      ],
+      "seconds": 7.844233167000311,
+      "max_rss_bytes": 282705920,
+      "resource_output": "Walking /private/tmp/fxi-linux-corpus...\nFound 65305 text files (0 binary skipped, 0 too large, 0 errors)\nExtracting trigrams...\nMerging 25 spill segment(s) into the index...\nWriting index (340401 trigrams, 65305 files, 25 spill segment(s))...\nIndex built successfully at /private/tmp/fxi-linux-corpus/.tgrep\nIndexed in 7.9s using external strategy (peak memory 270.1 MiB)\n        7.94 real        18.13 user         8.29 sys\n           283246592  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               36833  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  47  voluntary context switches\n               30853  involuntary context switches\n        275606434501  instructions retired\n         83069641410  cycles elapsed\n           276791920  peak memory footprint\n"
+    }
+  },
+  "index_bytes": {
+    "fxi": 630376023,
+    "tgrep": 872213166
+  },
+  "rows": []
+}

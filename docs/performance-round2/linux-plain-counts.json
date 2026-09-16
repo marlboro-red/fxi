@@ -1,0 +1,64 @@
+{
+  "corpus": "/private/tmp/fxi-linux-corpus",
+  "indexes": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-ynnmv8ta/rank/indexes",
+  "mode": "direct",
+  "output_mode": "count",
+  "query_syntax": "plain",
+  "binaries": {
+    "before": {
+      "path": "/private/tmp/fxi-doc-lookup-experiment",
+      "sha256": "da3844d78f69f65e15bfe76ff6d9e9891925b53dc2f840bd9b3463c8b2218b71"
+    },
+    "after": {
+      "path": "/private/tmp/fxi-count-literals-experiment",
+      "sha256": "2dff12bb34424d08cb1fdc77b1ad9c3a1fbd3b5dd3ddf1306878d4110d7868dd"
+    },
+    "tgrep": {
+      "path": "/private/tmp/fxi-audit-tgrep/target/release/tgrep",
+      "sha256": "f9aa670e2dfadf831c28a8549fbb2e11d03ab9eb7db6c4c77ca40b682124c1d3"
+    }
+  },
+  "rows": [
+    {
+      "query": "return",
+      "pattern": "return",
+      "files": 44691,
+      "tools": {
+        "before": {
+          "median_ms": 560.586584,
+          "samples_ms": [
+            548.23675,
+            551.511209,
+            600.07325,
+            587.069334,
+            560.586584
+          ]
+        },
+        "after": {
+          "median_ms": 448.274833,
+          "samples_ms": [
+            459.989417,
+            476.745875,
+            448.274833,
+            447.96225,
+            444.498291
+          ]
+        },
+        "tgrep": {
+          "median_ms": 2078.65525,
+          "samples_ms": [
+            2078.65525,
+            2087.617417,
+            2095.33425,
+            2077.16275,
+            2044.384792
+          ]
+        }
+      }
+    }
+  ],
+  "source_commits": {
+    "before": "7657994",
+    "after": "650d341"
+  }
+}

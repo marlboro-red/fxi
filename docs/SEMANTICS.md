@@ -36,7 +36,9 @@ Candidates use conservative trigram constraints derived from the matching
 expression, including Unicode case alternatives. Short substrings and omitted
 stop-grams broaden the candidate set; neither whole-token equality nor token
 positions may exclude a valid substring. Punctuation-spanning substrings retain
-recall even when every relevant gram is omitted.
+recall even when every relevant gram is omitted. Fresh indexes retain common
+grams by default; only legacy or explicitly configured omitted-gram sets require
+that fallback. Compaction preserves this distinction.
 
 ### Phrases — case-sensitive unless `-i`
 
@@ -152,6 +154,8 @@ cross or inspect line boundaries. Anchored, empty, and other context-sensitive
 patterns retain per-line matching. Content output always preserves original UTF-8
 byte offsets.
 
-Content caches are sharded, limited by both retained text bytes (64 MiB per reader)
-and entry count (4096), and validated against file metadata before each reuse.
+Content caches are sharded and shared across readers in the process. Defaults
+limit retained text to 1 GiB and entries to 131,072; `FXI_CACHE_MIB` accepts
+0–4096 MiB (0 disables admission). One-shot CLI readers bypass admission.
+Cached snapshots are validated against file metadata before each reuse.
 Concurrent queries can keep additional snapshots alive beyond those cache bounds.

@@ -174,11 +174,11 @@ src/server/daemon.rs
 The daemon keeps immutable index readers loaded and reuses bounded, metadata-validated content snapshots. Every query is verified; full-result memoization is disabled. Latency depends on candidate volume, file sizes, and output mode. See the reproducible benchmarks below.
 
 ```bash
-# Start daemon for instant searches
+# Keep indexes loaded for repeated searches
 fxi daemon start
 
 # Searches now reuse the loaded index
-fxi '"class Browser"'  # ~111ms vs ripgrep's ~9.9 seconds on Chromium
+fxi '"class Browser"'  # Search an exact phrase
 ```
 
 ### Interactive TUI
@@ -392,9 +392,10 @@ Press `F1` or `?` to show help in the TUI.
 ## Performance and validation
 
 Current measurements, correctness fixes, research experiments, and remaining gaps
-are documented in [the engineering report](docs/audit-2026-09-17/PROGRESS.md).
+are documented in [the latest experiments](docs/performance-round2/NOTES.md) and
+[the first engineering report](docs/audit-2026-09-17/PROGRESS.md).
 The [benchmark harness](docs/audit-2026-09-17/benchmark.py) compares full matching
-file sets against ripgrep on every run, with pinned Redis and CPython corpora,
+file sets against ripgrep on every run, with pinned Redis, CPython, and Linux corpora,
 interleaved samples, and separate direct/server measurements.
 
 Earlier Linux/Chromium “up to 400x” claims and million-file extrapolations are
@@ -403,8 +404,12 @@ explains the scope, cache, and correctness problems in the old methodology.
 
 Search worker concurrency can be explored with `FXI_SEARCH_PARALLELISM` (positive
 integer). The default bounds source-file read tasks independently of index build
-workers. Each reader retains at most 64 MiB of cached text and 4096 cache entries;
-metadata is checked before reuse. These are cache bounds, not a total RSS limit.
+workers. Long-lived readers share one process-wide content cache, retaining at
+most 1 GiB of text and 131,072 entries across all roots. Storage is allocated on
+demand, and metadata is checked before reuse. Set `FXI_CACHE_MIB` before starting
+the daemon to change the text budget (0 disables caching; valid range 0–4096).
+One-shot CLI searches bypass content caching. These limits cover retained cache
+contents, not index construction, active results, or total process RSS.
 
 ## License
 

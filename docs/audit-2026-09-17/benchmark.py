@@ -16,7 +16,9 @@ parser.add_argument("--build-repetitions", type=int, default=1)
 parser.add_argument("--build-only", action="store_true")
 parser.add_argument("--modes", nargs="+", choices=["direct", "server"], default=["direct", "server"])
 parser.add_argument("--output-mode", choices=["files", "count"], default="files")
+parser.add_argument("--queries", nargs="+", choices=["selective", "absent", "phrase", "common", "alternation", "internal_literal", "insensitive"])
 args = parser.parse_args()
+harness_sha256 = hashlib.sha256(P.Path(__file__).read_bytes()).hexdigest()
 fxi=str(P.Path(args.fxi).resolve()); tg='/tmp/fxi-audit-tgrep/target/release/tgrep'
 base=P.Path(tempfile.mkdtemp(prefix='fxi-audit-bench-')); root=P.Path(args.source).resolve() if args.prepared_corpus else base/'corpus'
 if not args.prepared_corpus: root.mkdir()
@@ -62,6 +64,8 @@ if args.suite == 'python':
  queries=[('selective','PyObject_GenericGetAttr'),('absent','auditNonexistentSymbol94283'),('phrase','static void'),('common','return'),('alternation','PyObject_GenericGetAttr|PyUnicode_DecodeUTF8'),('internal_literal','.*PyObject_GenericGetAttr'),('insensitive','pyobject_genericgetattr')]
 if args.suite == 'linux':
  queries=[('selective','folio_wait_bit_common'),('absent','auditNonexistentSymbol94283'),('phrase','struct file_operations'),('common','return'),('alternation','folio_wait_bit_common|bpf_prog_select_runtime'),('internal_literal','.*folio_wait_bit_common'),('insensitive','blk_mq_alloc_request')]
+if args.queries:
+ queries=[q for q in queries if q[0] in args.queries]
 rows=[]; processes=[]
 try:
  for mode in ([] if args.build_only else args.modes):
@@ -88,13 +92,14 @@ try:
     row['fxi_repeated_query_ms']=[run(cmds['fxi'])[0] for _ in range(args.repetitions)]
     row['server_rss_kib']={name:int(sp.check_output(['ps','-o','rss=','-p',str(proc.pid)],text=True).strip()) for name,proc in zip(['fxi','tgrep'], processes)}
    rows.append(row)
+   print(mode, label, {k: round(v["median_ms"], 2) for k, v in row["tools"].items()}, flush=True)
 finally:
  for p in processes:
   p.terminate()
  for p in processes:
   try:p.wait(timeout=5)
   except sp.TimeoutExpired:p.kill();p.wait()
-result={'fxi_binary_sha256':hashlib.sha256(P.Path(fxi).read_bytes()).hexdigest(),'manifest_sha256':hashlib.sha256(json.dumps(sorted(manifest)).encode()).hexdigest(),'suite':args.suite,'output_mode':args.output_mode,'fxi_commit':args.fxi_revision or (sp.check_output(['git','rev-parse','HEAD'],text=True).strip() if args.fxi=='target/release/fxi' else 'external-binary'),'base':str(base),'corpus':str(root),'tgrep_commit':sp.check_output(['git','rev-parse','HEAD'],cwd='/tmp/fxi-audit-tgrep',text=True).strip(),'source_commit':args.source_revision or sp.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip(),'files':count,'bytes':size,'builds':builds,'index_bytes':{'fxi':sum(p.stat().st_size for p in (base/'indexes').rglob('*') if p.is_file()),'tgrep':sum(p.stat().st_size for p in (root/'.tgrep').rglob('*') if p.is_file())},'rows':rows}
+result={'harness_sha256':harness_sha256,'fxi_binary_sha256':hashlib.sha256(P.Path(fxi).read_bytes()).hexdigest(),'manifest_sha256':hashlib.sha256(json.dumps(sorted(manifest)).encode()).hexdigest(),'suite':args.suite,'output_mode':args.output_mode,'fxi_commit':args.fxi_revision or (sp.check_output(['git','rev-parse','HEAD'],text=True).strip() if args.fxi=='target/release/fxi' else 'external-binary'),'base':str(base),'corpus':str(root),'tgrep_commit':sp.check_output(['git','rev-parse','HEAD'],cwd='/tmp/fxi-audit-tgrep',text=True).strip(),'source_commit':args.source_revision or sp.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip(),'files':count,'bytes':size,'builds':builds,'index_bytes':{'fxi':sum(p.stat().st_size for p in (base/'indexes').rglob('*') if p.is_file()),'tgrep':sum(p.stat().st_size for p in (root/'.tgrep').rglob('*') if p.is_file())},'rows':rows}
 P.Path(args.output).write_text(json.dumps(result,indent=2))
 print(json.dumps({k:v for k,v in result.items() if k not in ['rows','builds']},indent=2))
 for row in rows:print(row['mode'],row['query'],row['files'],{k:(round(v['median_ms'],2),len(v['missing']),len(v['extra'])) for k,v in row['tools'].items()})
