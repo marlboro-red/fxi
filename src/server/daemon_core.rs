@@ -642,8 +642,8 @@ impl IndexServer {
         self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
 
         // Parse and execute query. Case-insensitivity is applied at the plan
-        // level: the planner narrows through the lowercased token index and
-        // verifiers ignore case.
+        // level: the planner derives sound Unicode-aware gram alternatives
+        // and verifiers apply the requested case semantics.
         let mut parsed = parse_query(&pattern);
         parsed.options.case_insensitive = options.case_insensitive;
         if parsed.is_empty() {

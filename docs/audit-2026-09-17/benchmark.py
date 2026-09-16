@@ -6,6 +6,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--output", default="docs/audit-2026-09-17/benchmark-results.json")
 parser.add_argument("--source", default="/tmp/fxi-audit-redis")
 parser.add_argument("--fxi", default="target/release/fxi")
+parser.add_argument("--fxi-revision", help="Revision of an alternate --fxi binary")
 parser.add_argument("--suite", choices=["redis", "python"], default="redis")
 parser.add_argument("--repetitions", type=int, default=9)
 args = parser.parse_args()
@@ -54,7 +55,9 @@ try:
       cmd[cmd.index('re:/'+pat+'/') if k=='fxi' else cmd.index(pat)]='re:/'+variant+'/' if k=='fxi' else variant
      ms,paths=run(cmd); assert paths==outputs[k]; timings[k].append(ms)
    row={'mode':mode,'query':label,'pattern':pat,'files':len(expected),'tools':{k:{'median_ms':statistics.median(v),'samples_ms':v,'missing':sorted(expected-outputs[k]),'extra':sorted(outputs[k]-expected)} for k,v in timings.items()}}
-   if mode=='server': row['fxi_result_cache_ms']=[run(cmds['fxi'])[0] for _ in range(args.repetitions)]
+   if mode=='server':
+    row['fxi_repeated_query_ms']=[run(cmds['fxi'])[0] for _ in range(args.repetitions)]
+    row['server_rss_kib']={name:int(sp.check_output(['ps','-o','rss=','-p',str(proc.pid)],text=True).strip()) for name,proc in zip(['fxi','tgrep'], processes)}
    rows.append(row)
 finally:
  for p in processes:
@@ -62,7 +65,7 @@ finally:
  for p in processes:
   try:p.wait(timeout=5)
   except sp.TimeoutExpired:p.kill();p.wait()
-result={'fxi_binary_sha256':hashlib.sha256(P.Path(fxi).read_bytes()).hexdigest(),'manifest_sha256':hashlib.sha256(json.dumps(sorted(manifest)).encode()).hexdigest(),'suite':args.suite,'fxi_commit':sp.check_output(['git','rev-parse','HEAD'],text=True).strip(),'base':str(base),'source_commit':sp.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip(),'files':count,'bytes':size,'builds':builds,'index_bytes':{'fxi':sum(p.stat().st_size for p in (base/'indexes').rglob('*') if p.is_file()),'tgrep':sum(p.stat().st_size for p in (root/'.tgrep').rglob('*') if p.is_file())},'rows':rows}
+result={'fxi_binary_sha256':hashlib.sha256(P.Path(fxi).read_bytes()).hexdigest(),'manifest_sha256':hashlib.sha256(json.dumps(sorted(manifest)).encode()).hexdigest(),'suite':args.suite,'fxi_commit':args.fxi_revision or (sp.check_output(['git','rev-parse','HEAD'],text=True).strip() if args.fxi=='target/release/fxi' else 'external-binary'),'base':str(base),'tgrep_commit':sp.check_output(['git','rev-parse','HEAD'],cwd='/tmp/fxi-audit-tgrep',text=True).strip(),'source_commit':sp.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip(),'files':count,'bytes':size,'builds':builds,'index_bytes':{'fxi':sum(p.stat().st_size for p in (base/'indexes').rglob('*') if p.is_file()),'tgrep':sum(p.stat().st_size for p in (root/'.tgrep').rglob('*') if p.is_file())},'rows':rows}
 P.Path(args.output).write_text(json.dumps(result,indent=2))
 print(json.dumps({k:v for k,v in result.items() if k not in ['rows','builds']},indent=2))
 for row in rows:print(row['mode'],row['query'],row['files'],{k:(round(v['median_ms'],2),len(v['missing']),len(v['extra'])) for k,v in row['tools'].items()})
