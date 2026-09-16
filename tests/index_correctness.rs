@@ -513,3 +513,55 @@ fn incremental_searches_exclude_tombstoned_documents_in_every_output_mode() {
         assert!(executor.execute(&query).unwrap().is_empty(), "{pattern}");
     }
 }
+
+#[test]
+fn file_limits_select_the_sorted_prefix_across_segments() {
+    use fxi::query::{QueryExecutor, parse_query};
+    for file_count in [9, 500] {
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..file_count {
+            fs::write(
+                root.path().join(format!("{i:04}.rs")),
+                format!(
+                    "{} {}\n",
+                    if i % 3 == 0 { "needle" } else { "other" },
+                    "x".repeat(i)
+                ),
+            )
+            .unwrap();
+        }
+        build_index_with_options(root.path(), true, true, Some(17)).unwrap();
+        for reader in [
+            IndexReader::open(root.path()).unwrap(),
+            IndexReader::open_uncached(root.path()).unwrap(),
+        ] {
+            let executor = QueryExecutor::new(&reader);
+            for pattern in ["needle", "re:/needle/", "re:/x/", "ext:rs"] {
+                let expected: Vec<PathBuf> = (0..file_count)
+                    .filter(|i| match pattern {
+                        "ext:rs" => true,
+                        "re:/x/" => *i > 0,
+                        _ => i % 3 == 0,
+                    })
+                    .map(|i| PathBuf::from(format!("{i:04}.rs")))
+                    .collect();
+                for limit in [1, 2, 17, 93, 0] {
+                    for _ in 0..3 {
+                        let length = if limit == 0 {
+                            expected.len()
+                        } else {
+                            limit.min(expected.len())
+                        };
+                        assert_eq!(
+                            executor
+                                .execute_files_only(&parse_query(pattern), limit)
+                                .unwrap(),
+                            expected[..length],
+                            "{pattern}, limit {limit}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

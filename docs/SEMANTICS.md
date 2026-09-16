@@ -175,3 +175,9 @@ them. Loading then performs the same validation and propagates errors through
 the query, including nested plans. A gram-only query can therefore succeed when
 unused token data is damaged; this is not a complete index integrity check.
 Immutable generation leases keep deferred files available for the reader's lifetime.
+
+## File result ordering
+
+Files-only searches return paths in lexical path order. A nonzero file limit
+selects that ordered prefix of verified matches, including across segments and
+parallel workers. Zero means unlimited. Path-only filters use the same order.

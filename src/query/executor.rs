@@ -506,47 +506,37 @@ impl<'a> QueryExecutor<'a> {
         let plan = QueryPlan::from_query(query);
         let candidates = self.execute_plan(&plan)?;
 
-        let verification = match &plan.verification {
-            Some(v) => v,
-            None => {
-                // No content verification - just return file paths up to limit
-                let paths: Vec<PathBuf> = candidates
-                    .iter()
-                    .filter_map(|doc_id| {
-                        self.reader
-                            .get_document(doc_id)
-                            .and_then(|doc| self.reader.get_path(doc).cloned())
-                    })
-                    .take(if file_limit == 0 {
-                        usize::MAX
-                    } else {
-                        file_limit
-                    })
-                    .collect();
-                return Ok(paths);
-            }
+        let ordered = file_limit != 0
+            || plan.verification.is_none()
+            || self.reader.should_cache_path_order(&candidates);
+        let candidate_ids = if ordered {
+            self.reader.candidates_in_path_order(&candidates)
+        } else {
+            candidates.iter().collect()
         };
-
-        // Collect candidate doc_ids with their paths for processing
-        let candidate_infos: Vec<(DocId, PathBuf, PathBuf)> = candidates
-            .iter()
-            .filter_map(|doc_id| {
-                self.reader.get_document(doc_id).and_then(|doc| {
-                    self.reader.get_full_path(doc).map(|full_path| {
-                        let rel_path = self.reader.get_path(doc).cloned().unwrap_or_default();
-                        (doc_id, full_path, rel_path)
-                    })
-                })
-            })
-            .collect();
-
-        let candidate_count = candidate_infos.len();
-        let cache_scan = self.reader.should_cache_scan(&candidates);
         let effective_limit = if file_limit == 0 {
             usize::MAX
         } else {
             file_limit
         };
+        let relative_path = |id| {
+            self.reader
+                .get_document(id)
+                .and_then(|doc| self.reader.get_path(doc))
+                .cloned()
+        };
+        let verification = match &plan.verification {
+            Some(v) => v,
+            None => {
+                return Ok(candidate_ids
+                    .into_iter()
+                    .take(effective_limit)
+                    .filter_map(relative_path)
+                    .collect());
+            }
+        };
+        let candidate_count = candidate_ids.len();
+        let cache_scan = self.reader.should_cache_scan(&candidates);
 
         let (line_start, line_end) = Self::extract_line_filter(&plan.steps);
         let has_match = |content: &str| {
@@ -562,62 +552,58 @@ impl<'a> QueryExecutor<'a> {
             }
         };
 
-        // For files-only, we use parallel processing with early termination
-        // Each file only needs to find ONE match to be included
-        let match_count = AtomicUsize::new(0);
-
-        let matching_files: Vec<PathBuf> = if !should_use_parallel(candidate_count) {
-            // Sequential for small result sets
-            let mut results = Vec::new();
-            for (_doc_id, full_path, rel_path) in candidate_infos {
-                if results.len() >= effective_limit {
+        let verify = |id: &DocId| {
+            let doc = self.reader.get_document(*id)?;
+            let full_path = self.reader.get_full_path(doc)?;
+            let content = self.reader.read_file_for_scan(&full_path, cache_scan)?;
+            has_match(&content).then_some(*id)
+        };
+        let matching_ids: Vec<DocId> = if !should_use_parallel(candidate_count) {
+            candidate_ids
+                .iter()
+                .filter_map(verify)
+                .take(effective_limit)
+                .collect()
+        } else if effective_limit >= candidate_count {
+            // Indexed collection preserves path order regardless of worker completion.
+            candidate_ids
+                .par_iter()
+                .with_min_len(search_batch_size(candidate_count))
+                .map(verify)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .flatten()
+                .collect()
+        } else {
+            // Bound excess verification while selecting the same prefix on every run.
+            let mut matches = Vec::new();
+            for batch in candidate_ids.chunks(64) {
+                let verified: Vec<_> = batch.par_iter().map(verify).collect();
+                matches.extend(
+                    verified
+                        .into_iter()
+                        .flatten()
+                        .take(effective_limit - matches.len()),
+                );
+                if matches.len() == effective_limit {
                     break;
                 }
-
-                let content = match self.reader.read_file_for_scan(&full_path, cache_scan) {
-                    Some(c) => c,
-                    None => continue,
-                };
-
-                // Check if file has ANY match (fast path)
-                if has_match(&content) {
-                    results.push(rel_path);
-                }
             }
-            results
-        } else {
-            // Parallel processing with early termination and owned content snapshots
-            candidate_infos
-                .into_par_iter()
-                .with_min_len(search_batch_size(candidate_count))
-                .filter_map(|(_doc_id, full_path, rel_path)| {
-                    // Early termination check
-                    if match_count.load(Ordering::Relaxed) >= effective_limit {
-                        return None;
-                    }
-
-                    // Read an owned snapshot of editable file content
-                    let content = self.reader.read_file_for_scan(&full_path, cache_scan)?;
-
-                    // Check if file has ANY match
-                    if has_match(&content) {
-                        match_count.fetch_add(1, Ordering::Relaxed);
-                        Some(rel_path)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
+            matches
         };
-
-        // Sort by path for consistent output
-        let mut sorted = matching_files;
-        sorted.sort();
-        if sorted.len() > effective_limit {
-            sorted.truncate(effective_limit);
+        if !ordered {
+            let mut paths: Vec<_> = matching_ids
+                .into_iter()
+                .filter_map(|id| {
+                    self.reader
+                        .get_document(id)
+                        .and_then(|doc| self.reader.get_path(doc))
+                })
+                .collect();
+            paths.sort_unstable();
+            return Ok(paths.into_iter().cloned().collect());
         }
-
-        Ok(sorted)
+        Ok(matching_ids.into_iter().filter_map(relative_path).collect())
     }
 
     /// Fast check if content has ANY match (for files-only mode)

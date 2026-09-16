@@ -655,6 +655,7 @@ pub struct IndexReader {
     /// Lazily-built bitmap of valid doc IDs. Safe to cache: documents are
     /// immutable after open (index updates swap in a whole new reader).
     valid_docs_cache: OnceLock<RoaringBitmap>,
+    path_order_cache: OnceLock<Vec<DocId>>,
 }
 
 impl IndexReader {
@@ -780,6 +781,7 @@ impl IndexReader {
             file_cache,
             content_cache_enabled: true,
             valid_docs_cache: OnceLock::new(),
+            path_order_cache: OnceLock::new(),
         })
     }
 
@@ -1105,6 +1107,37 @@ impl IndexReader {
         }
 
         result
+    }
+
+    pub(crate) fn should_cache_path_order(&self, candidates: &RoaringBitmap) -> bool {
+        self.content_cache_enabled
+            && candidates.len() >= 256
+            && candidates.len().saturating_mul(2) >= self.valid_doc_ids().len()
+    }
+
+    /// Order immutable document IDs without allocating candidate path strings.
+    pub(crate) fn candidates_in_path_order(&self, candidates: &RoaringBitmap) -> Vec<DocId> {
+        let sort_ids = |ids: &RoaringBitmap| {
+            let mut paths: Vec<_> = ids
+                .iter()
+                .filter_map(|id| {
+                    let doc = self.get_document(id)?;
+                    Some((id, self.get_path(doc)?))
+                })
+                .collect();
+            paths.sort_unstable_by(|a, b| a.1.cmp(b.1).then(a.0.cmp(&b.0)));
+            paths.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
+        };
+        if self.should_cache_path_order(candidates) {
+            self.path_order_cache
+                .get_or_init(|| sort_ids(self.valid_doc_ids()))
+                .iter()
+                .copied()
+                .filter(|id| candidates.contains(*id))
+                .collect()
+        } else {
+            sort_ids(candidates)
+        }
     }
 
     /// Get all valid (non-stale, non-tombstone) doc IDs as a RoaringBitmap.
