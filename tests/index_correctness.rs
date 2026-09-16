@@ -320,7 +320,7 @@ fn damaged_or_legacy_optional_blooms_cannot_hide_documents() {
         let fixture = Fixture::new();
         let path = fixture.index().join("segments/seg_0001/bloom.bin");
         let mut bytes = fs::read(&path).unwrap();
-        assert_eq!(&bytes[..6], b"\0FXBF\x01");
+        assert_eq!(&bytes[..6], b"\0\0\0\0\0\x01");
         match corruption {
             0 => {
                 // A valid old-format filter with all bits unset must be ignored.

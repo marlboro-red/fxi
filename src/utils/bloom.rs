@@ -3,9 +3,10 @@
 //! Uses multiple hash functions derived from fast bit-mixing operations
 //! for cache-friendly membership testing optimized for u32 trigrams.
 
-/// Leading zero makes legacy readers either reject the unfamiliar length or
-/// use zero hash probes (MatchAll), rather than risk a false negative.
-pub(crate) const BLOOM_MAGIC: &[u8; 6] = b"\0FXBF\x01";
+/// The first five bytes decode as zero probes and zero words for legacy
+/// readers. They reject or ignore the filter without allocating a huge buffer.
+/// The sixth byte is the version of the portable hash/checksum format.
+pub(crate) const BLOOM_MAGIC: &[u8; 6] = b"\0\0\0\0\0\x01";
 
 /// Fixed SplitMix64 finalizer, part of bloom format version 1. Public-domain
 /// reference: https://prng.di.unimi.it/splitmix64.c . Do not replace this with
@@ -193,6 +194,14 @@ impl Default for BloomFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_header_view_is_an_empty_wildcard() {
+        assert_eq!(BLOOM_MAGIC[0], 0);
+        assert_eq!(u32::from_le_bytes(BLOOM_MAGIC[1..5].try_into().unwrap()), 0);
+        let legacy_view = BloomFilter::from_raw(Vec::new(), BLOOM_MAGIC[0]);
+        assert!(legacy_view.might_contain(123));
+    }
 
     #[test]
     #[should_panic(expected = "Bloom probe counts must match")]
