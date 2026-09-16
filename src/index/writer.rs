@@ -145,6 +145,107 @@ fn invert_token_postings(files: &mut [AssignedFile]) -> InvertedTokens {
     }
 }
 
+/// Compressed postings indexed by sorted gram rank. A 24-bit membership
+/// bitset plus per-word prefix counts replaces a 64 MiB direct-address table.
+struct CompressedTrigrams {
+    grams: Vec<u32>,
+    offsets: Vec<usize>,
+    frequencies: Vec<u32>,
+    bytes: Vec<u8>,
+}
+
+fn compress_trigram_postings(files: &mut [AssignedFile]) -> Option<CompressedTrigrams> {
+    const WORDS: usize = (1 << 24) / 64;
+    let mut bits = vec![0u64; WORDS];
+    for file in files.iter() {
+        for &gram in &file.trigrams {
+            // Preserve the public writer's general u32-key support using its
+            // existing sorter when callers supply non-byte-trigram keys.
+            if gram > 0xffffff {
+                return None;
+            }
+            bits[gram as usize / 64] |= 1 << (gram % 64);
+        }
+    }
+    let mut prefix = Vec::with_capacity(WORDS);
+    let mut grams = Vec::new();
+    for (word, &value) in bits.iter().enumerate() {
+        prefix.push(grams.len() as u32);
+        let mut remaining = value;
+        while remaining != 0 {
+            grams.push((word * 64 + remaining.trailing_zeros() as usize) as u32);
+            remaining &= remaining - 1;
+        }
+    }
+    let rank = |gram: u32| {
+        let word = gram as usize / 64;
+        let below = (1u64 << (gram % 64)) - 1;
+        (prefix[word] + (bits[word] & below).count_ones()) as usize
+    };
+    let mut lengths = vec![0usize; grams.len()];
+    let mut frequencies = vec![0u32; grams.len()];
+    // u64::MAX is outside the complete u32 document-ID domain, including 0.
+    let mut previous = vec![u64::MAX; grams.len()];
+    for file in files.iter() {
+        for &gram in &file.trigrams {
+            let rank = rank(gram);
+            if previous[rank] == u64::from(file.doc_id) {
+                continue;
+            }
+            let delta = if previous[rank] == u64::MAX {
+                file.doc_id
+            } else {
+                file.doc_id - previous[rank] as u32
+            };
+            lengths[rank] += (32 - delta.leading_zeros()).max(1).div_ceil(7) as usize;
+            frequencies[rank] += 1;
+            previous[rank] = u64::from(file.doc_id);
+        }
+    }
+    let mut offsets = Vec::with_capacity(grams.len() + 1);
+    offsets.push(0);
+    for length in lengths {
+        offsets.push(offsets.last().unwrap() + length);
+    }
+    let mut bytes = vec![0u8; *offsets.last().unwrap()];
+    let mut cursors = offsets.clone();
+    previous.fill(u64::MAX);
+    for file in files {
+        for gram in std::mem::take(&mut file.trigrams) {
+            let rank = rank(gram);
+            if previous[rank] == u64::from(file.doc_id) {
+                continue;
+            }
+            let mut delta = if previous[rank] == u64::MAX {
+                file.doc_id
+            } else {
+                file.doc_id - previous[rank] as u32
+            };
+            let cursor = &mut cursors[rank];
+            while delta >= 128 {
+                bytes[*cursor] = (delta as u8 & 0x7f) | 0x80;
+                *cursor += 1;
+                delta >>= 7;
+            }
+            bytes[*cursor] = delta as u8;
+            *cursor += 1;
+            previous[rank] = u64::from(file.doc_id);
+        }
+    }
+    debug_assert!(
+        cursors[..grams.len()]
+            .iter()
+            .zip(&offsets[1..])
+            .all(|(a, b)| a == b)
+    );
+    Some(CompressedTrigrams {
+        grams,
+        offsets,
+        frequencies,
+        bytes,
+    })
+}
+
 /// Data needed to write a segment to disk (sent to background thread)
 struct SegmentWriteJob {
     segment_id: SegmentId,
@@ -386,8 +487,13 @@ impl ChunkedIndexWriter {
             positions: encoded_positions,
             symbols: symbols_sorted,
         } = invert_token_postings(&mut job.files);
-        let trigram_count = job.files.iter().map(|f| f.trigrams.len()).sum();
-        let mut trigram_pairs = Vec::with_capacity(trigram_count);
+        let trigram_count: usize = job.files.iter().map(|f| f.trigrams.len()).sum();
+        let compressed_grams = compress_trigram_postings(&mut job.files);
+        let mut trigram_pairs = Vec::with_capacity(if compressed_grams.is_some() {
+            0
+        } else {
+            trigram_count
+        });
         let mut line_maps = Vec::with_capacity(file_count);
         for file in job.files {
             trigram_pairs.extend(file.trigrams.into_iter().map(|gram| (gram, file.doc_id)));
@@ -401,43 +507,37 @@ impl ChunkedIndexWriter {
 
         let t_sort = std::time::Instant::now();
 
-        // Build bloom filter from sorted unique trigrams only
-        let unique_trigrams = usize::from(!trigram_pairs.is_empty())
-            + trigram_pairs
-                .windows(2)
-                .filter(|pair| pair[0].0 != pair[1].0)
-                .count();
-        let mut bloom_filter = BloomFilter::new(unique_trigrams, 0.01);
-        {
-            let mut prev: Option<u32> = None;
-            for &(trigram, _) in &trigram_pairs {
-                if prev != Some(trigram) {
-                    bloom_filter.insert(trigram);
-                    prev = Some(trigram);
+        let gram_frequencies: Vec<(u32, u32)> = if let Some(compressed) = &compressed_grams {
+            compressed
+                .grams
+                .iter()
+                .copied()
+                .zip(compressed.frequencies.iter().copied())
+                .collect()
+        } else {
+            let mut frequencies = Vec::new();
+            let mut previous = None;
+            for &(gram, doc) in &trigram_pairs {
+                if previous.is_none_or(|(last_gram, _)| last_gram != gram) {
+                    frequencies.push((gram, 1));
+                } else if previous != Some((gram, doc)) {
+                    frequencies.last_mut().unwrap().1 += 1;
                 }
+                previous = Some((gram, doc));
             }
+            frequencies
+        };
+        let mut bloom_filter = BloomFilter::new(gram_frequencies.len(), 0.01);
+        for &(gram, _) in &gram_frequencies {
+            bloom_filter.insert(gram);
         }
-
         let t_bloom = std::time::Instant::now();
-
-        // Frequency collection is unnecessary when every posting is retained.
         if let Some(frequencies) = &job.trigram_frequencies {
             let mut freq_map = frequencies
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !trigram_pairs.is_empty() {
-                let mut current = trigram_pairs[0].0;
-                let mut count: u32 = 1;
-                for &(trigram, _) in &trigram_pairs[1..] {
-                    if trigram == current {
-                        count += 1;
-                    } else {
-                        *freq_map.entry(current).or_insert(0) += count;
-                        current = trigram;
-                        count = 1;
-                    }
-                }
-                *freq_map.entry(current).or_insert(0) += count;
+            for &(gram, count) in &gram_frequencies {
+                *freq_map.entry(gram).or_insert(0) += count;
             }
         }
 
@@ -445,8 +545,13 @@ impl ChunkedIndexWriter {
 
         // Write all segment files concurrently (5 threads)
         thread::scope(|s| {
-            let trigram_handle =
-                s.spawn(|| Self::write_trigram_index_flat(&job.segment_path, &trigram_pairs));
+            let trigram_handle = s.spawn(|| {
+                if let Some(compressed) = &compressed_grams {
+                    Self::write_compressed_trigrams(&job.segment_path, compressed)
+                } else {
+                    Self::write_trigram_index_flat(&job.segment_path, &trigram_pairs)
+                }
+            });
             let token_handle = s.spawn(|| {
                 Self::write_token_index_flat(
                     &job.segment_path,
@@ -474,7 +579,7 @@ impl ChunkedIndexWriter {
                 "[seg{}] files={} pairs={} | collect={:?} sort={:?} bloom={:?} freq={:?} write={:?} TOTAL={:?}",
                 job.segment_id,
                 file_count,
-                trigram_pairs.len(),
+                trigram_count,
                 t_collect - t_start,
                 t_sort - t_collect,
                 t_bloom - t_sort,
@@ -484,6 +589,23 @@ impl ChunkedIndexWriter {
             );
         }
 
+        Ok(())
+    }
+
+    fn write_compressed_trigrams(segment_path: &Path, grams: &CompressedTrigrams) -> Result<()> {
+        let mut dict =
+            BufWriter::with_capacity(65536, File::create(segment_path.join("grams.dict"))?);
+        dict.write_all(&(grams.grams.len() as u32).to_le_bytes())?;
+        for (rank, &gram) in grams.grams.iter().enumerate() {
+            dict.write_all(&gram.to_le_bytes())?;
+            dict.write_all(&(grams.offsets[rank] as u64).to_le_bytes())?;
+            dict.write_all(
+                &((grams.offsets[rank + 1] - grams.offsets[rank]) as u32).to_le_bytes(),
+            )?;
+            dict.write_all(&grams.frequencies[rank].to_le_bytes())?;
+        }
+        dict.flush()?;
+        fs::write(segment_path.join("grams.postings"), &grams.bytes)?;
         Ok(())
     }
 
@@ -1226,6 +1348,51 @@ mod tests {
             bytes
         };
         assert_eq!(produce(1), produce(32));
+    }
+
+    #[test]
+    fn rank_compressed_grams_match_sorted_reference() {
+        for file_count in [0, 1, 17] {
+            let mut files: Vec<_> = (0..file_count)
+                .map(|i| AssignedFile {
+                    doc_id: if i == 16 { u32::MAX } else { i * 65536 },
+                    trigrams: (0..30)
+                        .map(|j| (j * 8191 + i * 33) % 0xffffff)
+                        .chain([0, 0xffffff, 0, 64, 63, 127, 128, 0xffffff])
+                        .rev()
+                        .collect(),
+                    tokens: Vec::new().into(),
+                    line_offsets: vec![],
+                    token_positions: vec![],
+                })
+                .collect();
+            let mut pairs: Vec<_> = files
+                .iter()
+                .flat_map(|f| f.trigrams.iter().map(move |&g| (g, f.doc_id)))
+                .collect();
+            pairs.sort_unstable();
+            let encoded = compress_trigram_postings(&mut files).unwrap();
+            assert!(files.iter().all(|f| f.trigrams.is_empty()));
+            let old = TempDir::new().unwrap();
+            let new = TempDir::new().unwrap();
+            ChunkedIndexWriter::write_trigram_index_flat(old.path(), &pairs).unwrap();
+            ChunkedIndexWriter::write_compressed_trigrams(new.path(), &encoded).unwrap();
+            for name in ["grams.dict", "grams.postings"] {
+                assert_eq!(
+                    fs::read(old.path().join(name)).unwrap(),
+                    fs::read(new.path().join(name)).unwrap()
+                );
+            }
+        }
+        let mut files = vec![AssignedFile {
+            doc_id: 0,
+            trigrams: vec![0, u32::MAX],
+            tokens: Vec::new().into(),
+            line_offsets: vec![],
+            token_positions: vec![],
+        }];
+        assert!(compress_trigram_postings(&mut files).is_none());
+        assert_eq!(files[0].trigrams, vec![0, u32::MAX]);
     }
 
     #[test]
