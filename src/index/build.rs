@@ -624,6 +624,26 @@ struct IndexDiff {
 /// Incrementally update the index (smart mode)
 /// Returns Ok(true) if incremental update was performed, Ok(false) if full rebuild was needed
 pub fn update_index(root_path: &Path) -> Result<bool> {
+    Ok(!matches!(
+        reconcile_index(root_path, None, INCREMENTAL_THRESHOLD_PERCENT)?,
+        UpdateOutcome::Rebuilt
+    ))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UpdateOutcome {
+    Unchanged(PathBuf),
+    Incremental,
+    Rebuilt,
+}
+
+/// A watcher can reuse its immutable reader only while CURRENT still names
+/// that generation. A force-build by another process must invalidate reuse.
+pub(crate) fn reconcile_index(
+    root_path: &Path,
+    cached: Option<&IndexReader>,
+    rebuild_threshold_percent: usize,
+) -> Result<UpdateOutcome> {
     let root = root_path.canonicalize().context("Invalid path")?;
     let index_path = get_index_dir(&root)?;
 
@@ -631,16 +651,19 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
     if !index_path.exists() {
         println!("No existing index found, performing full build...");
         build_index(&root, false)?;
-        return Ok(false);
+        return Ok(UpdateOutcome::Rebuilt);
     }
 
-    // Read existing index metadata
-    let meta_path = index_path.join("meta.json");
-    let meta: IndexMeta =
-        serde_json::from_reader(File::open(&meta_path).context("Failed to open meta.json")?)?;
-
-    // Open existing index to get file list
-    let reader = IndexReader::open(&root)?;
+    let opened;
+    let reader = if let Some(reader) =
+        cached.filter(|reader| reader.root_path() == root && reader.generation_path() == index_path)
+    {
+        reader
+    } else {
+        opened = IndexReader::open(&root)?;
+        &opened
+    };
+    let meta = &reader.meta;
 
     // Build map of indexed files: rel_path -> (doc_id, mtime)
     let mut indexed_files: HashMap<PathBuf, (u32, u64, u64)> = HashMap::new();
@@ -662,7 +685,9 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
 
     if total_changes == 0 {
         println!("Index is up to date, no changes detected.");
-        return Ok(true);
+        return Ok(UpdateOutcome::Unchanged(
+            reader.generation_path().to_path_buf(),
+        ));
     }
 
     // Calculate change percentage
@@ -680,20 +705,20 @@ pub fn update_index(root_path: &Path) -> Result<bool> {
     );
 
     // If too many changes, do full rebuild
-    if change_percent > INCREMENTAL_THRESHOLD_PERCENT {
+    if change_percent > rebuild_threshold_percent {
         println!(
             "Change threshold exceeded (>{}%), performing full rebuild...",
-            INCREMENTAL_THRESHOLD_PERCENT
+            rebuild_threshold_percent
         );
         build_index(&root, true)?;
-        return Ok(false);
+        return Ok(UpdateOutcome::Rebuilt);
     }
 
     // Perform incremental update
     println!("Performing incremental update...");
-    perform_incremental_update(&root, &meta, diff)?;
+    perform_incremental_update(&root, meta, diff)?;
 
-    Ok(true)
+    Ok(UpdateOutcome::Incremental)
 }
 
 type ScannedFile = (PathBuf, PathBuf, u64, u64);

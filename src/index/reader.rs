@@ -1120,6 +1120,11 @@ impl IndexReader {
         })
     }
 
+    /// Identity of the immutable generation held by this reader's lease.
+    pub(crate) fn generation_path(&self) -> &Path {
+        &self.index_path
+    }
+
     /// Get the root path
     pub fn root_path(&self) -> &Path {
         &self.root_path

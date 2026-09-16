@@ -5,7 +5,7 @@
 //! `daemon_windows`: named pipe) only accept connections, frame messages,
 //! and call [`IndexServer::handle_request`].
 
-use crate::index::build::build_index_with_progress;
+use crate::index::build::{UpdateOutcome, build_index_with_progress, reconcile_index};
 use crate::index::reader::IndexReader;
 use crate::index::types::IndexMeta;
 use crate::query::{QueryExecutor, parse_query};
@@ -339,37 +339,11 @@ impl IndexServer {
             return Ok(());
         }
 
-        // Get current doc count for threshold calculation
-        let doc_count = {
-            let indexes = self.indexes.read().unwrap();
-            indexes
-                .get(&root_path)
-                .map(|c| c.get_reader().meta.doc_count as usize)
-                .unwrap_or(0)
-        };
-
-        // Calculate change percentage
-        let change_percent = (total * 100) / doc_count.max(1);
-
-        if change_percent > self.watcher_config.rebuild_threshold_percent {
-            eprintln!(
-                "fxid: {}% changes detected (>{} threshold), triggering rebuild for {}",
-                change_percent,
-                self.watcher_config.rebuild_threshold_percent,
-                root_path.display()
-            );
-            self.rebuild_with_lock(&root_path, lock)
-        } else {
-            eprintln!(
-                "fxid: applying {} changes to {} ({} created, {} modified, {} deleted)",
-                total,
-                root_path.display(),
-                batch.created.len(),
-                batch.modified.len(),
-                batch.deleted.len()
-            );
-            self.apply_incremental_update(&root_path, lock)
-        }
+        // Watcher messages are hints, not a count of changed documents. A
+        // directory or ignore-rule event can affect any number of files, and
+        // the startup sentinel may affect none. Let reconciliation measure the
+        // real diff before applying the configured rebuild threshold.
+        self.apply_incremental_update(&root_path, lock)
     }
 
     /// Apply an incremental update using delta segments
@@ -381,9 +355,33 @@ impl IndexServer {
         // Notifications are hints, not an authoritative file list. Reconcile
         // through the same walker as CLI indexing so directory renames, nested
         // ignore rules, removals and symlinks have identical semantics.
-        if let Err(e) = crate::index::build::update_index(root_path) {
-            eprintln!("fxid: reconcile failed: {e}; rebuilding");
-            return self.rebuild_with_lock(root_path, lock);
+        let current = self
+            .indexes
+            .read()
+            .unwrap()
+            .get(root_path)
+            .map(|cached| cached.get_reader());
+        match reconcile_index(
+            root_path,
+            current.as_deref(),
+            self.watcher_config.rebuild_threshold_percent,
+        ) {
+            Ok(UpdateOutcome::Unchanged(generation))
+                if current.as_ref().is_some_and(|reader| {
+                    reader.generation_path() == generation
+                        && !should_compact(
+                            &reader.meta,
+                            self.watcher_config.merge_segment_threshold,
+                        )
+                }) =>
+            {
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("fxid: reconcile failed: {error}; rebuilding");
+                return self.rebuild_with_lock(root_path, lock);
+            }
         }
         let refreshed = IndexReader::open(root_path).and_then(|reader| {
             if should_compact(&reader.meta, self.watcher_config.merge_segment_threshold) {
@@ -1008,7 +1006,21 @@ impl IndexServer {
                 // would stay stale until a manual `fxi index`
                 eprintln!("fxid: reconciling index for {}", root_path.display());
                 let _lock = crate::utils::IndexLock::acquire(root_path)?;
-                match crate::index::build::update_index(root_path) {
+                let current = self
+                    .indexes
+                    .read()
+                    .unwrap()
+                    .get(root_path)
+                    .map(|cached| cached.get_reader());
+                match reconcile_index(
+                    root_path,
+                    current.as_deref(),
+                    self.watcher_config.rebuild_threshold_percent,
+                ) {
+                    Ok(UpdateOutcome::Unchanged(generation))
+                        if current
+                            .as_ref()
+                            .is_some_and(|reader| reader.generation_path() == generation) => {}
                     Ok(_) => {
                         // Swap in a fresh reader in case the scan changed it
                         if let Ok(reader) = IndexReader::open(root_path) {
@@ -1159,6 +1171,98 @@ mod tests {
             .collect();
         paths.sort();
         paths
+    }
+
+    #[test]
+    fn unchanged_reconciliation_still_performs_due_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for i in 0..20 {
+            std::fs::write(root.join(format!("{i}.rs")), "old content\n").unwrap();
+        }
+        build_index_with_progress(&root, true, true).unwrap();
+        std::fs::write(root.join("0.rs"), "different fresh content\n").unwrap();
+        {
+            let _lock = crate::utils::IndexLock::acquire(&root).unwrap();
+            crate::index::build::update_index(&root).unwrap();
+        }
+        let mut server = IndexServer::new(false);
+        Arc::get_mut(&mut server)
+            .unwrap()
+            .watcher_config
+            .merge_segment_threshold = 1;
+        server.ensure_index_loaded(&root).unwrap();
+        let original = server
+            .indexes
+            .read()
+            .unwrap()
+            .get(&root)
+            .unwrap()
+            .get_reader();
+        assert!(should_compact(&original.meta, 1));
+        queue_reconciliation(&server, &root);
+        server.flush_expired_changes(Duration::ZERO);
+        let compacted = server
+            .indexes
+            .read()
+            .unwrap()
+            .get(&root)
+            .unwrap()
+            .get_reader();
+        assert_ne!(original.generation_path(), compacted.generation_path());
+        assert_eq!(compacted.meta.tombstone_count, 0);
+        assert_eq!(compacted.valid_doc_ids().len(), 20);
+        drop((original, compacted, server));
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn unchanged_reconciliation_reuses_reader_but_external_publication_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("old.rs"), "old content\n").unwrap();
+        build_index_with_progress(&root, true, true).unwrap();
+        let server = IndexServer::new(false);
+        server.ensure_index_loaded(&root).unwrap();
+        let original = server
+            .indexes
+            .read()
+            .unwrap()
+            .get(&root)
+            .unwrap()
+            .get_reader();
+        queue_reconciliation(&server, &root);
+        server.flush_expired_changes(Duration::ZERO);
+        let unchanged = server
+            .indexes
+            .read()
+            .unwrap()
+            .get(&root)
+            .unwrap()
+            .get_reader();
+        assert!(Arc::ptr_eq(&original, &unchanged));
+        std::fs::write(root.join("new.rs"), "new content\n").unwrap();
+        {
+            let _lock = crate::utils::IndexLock::acquire(&root).unwrap();
+            build_index_with_progress(&root, true, true).unwrap();
+        }
+        queue_reconciliation(&server, &root);
+        server.flush_expired_changes(Duration::ZERO);
+        let refreshed = server
+            .indexes
+            .read()
+            .unwrap()
+            .get(&root)
+            .unwrap()
+            .get_reader();
+        assert!(!Arc::ptr_eq(&original, &refreshed));
+        assert_ne!(original.generation_path(), refreshed.generation_path());
+        assert_eq!(
+            indexed_paths(&server, &root),
+            vec![PathBuf::from("new.rs"), PathBuf::from("old.rs")]
+        );
+        drop((original, unchanged, refreshed, server));
+        crate::utils::remove_index(&root).unwrap();
     }
 
     #[test]
