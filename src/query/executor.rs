@@ -780,6 +780,15 @@ impl<'a> QueryExecutor<'a> {
     }
 
     fn execute_plan(&self, plan: &QueryPlan) -> Result<RoaringBitmap> {
+        let mut candidates = self.execute_candidate_plan(plan)?;
+        // Immutable older segments retain postings for superseded documents.
+        // Apply liveness on every plan path, including compound fast paths and
+        // nested exclusions, before verification can read a reused file path.
+        candidates &= self.reader.valid_doc_ids();
+        Ok(candidates)
+    }
+
+    fn execute_candidate_plan(&self, plan: &QueryPlan) -> Result<RoaringBitmap> {
         if let Some(verification) = &plan.verification {
             Self::validate_verification(verification)?;
         }

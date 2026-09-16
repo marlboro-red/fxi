@@ -435,3 +435,81 @@ fn index_payload_directories_are_rejected() {
         assert!(IndexReader::open(fixture.0.path()).is_err(), "{name}");
     }
 }
+
+#[test]
+fn incremental_searches_exclude_tombstoned_documents_in_every_output_mode() {
+    use fxi::index::build::update_index;
+    use fxi::query::{QueryExecutor, parse_query};
+    let fixture = Fixture::new();
+    let root = fixture.0.path();
+    fs::create_dir(root.join(".git")).unwrap();
+    fs::write(root.join("a.txt"), "needle original\n").unwrap();
+    for i in 0..20 {
+        fs::write(root.join(format!("filler-{i}.txt")), "unrelated text\n").unwrap();
+    }
+    build_index_with_options(root, true, true, Some(3)).unwrap();
+    let patterns = [
+        "re:/needle/",
+        "needle",
+        "re:/needle|missing/",
+        "re:/^needle/",
+        "needle ext:txt",
+    ];
+    for version in 0..3 {
+        let content = format!("needle version {version} {}\n", "x".repeat(version));
+        fs::write(root.join("a.txt"), &content).unwrap();
+        {
+            let _lock = fxi::utils::IndexLock::acquire(root).unwrap();
+            assert!(update_index(root).unwrap());
+        }
+        let reader = IndexReader::open(root).unwrap();
+        assert_eq!(reader.meta.tombstone_count, version as u32 + 1);
+        let executor = QueryExecutor::new(&reader);
+        for pattern in patterns {
+            let query = parse_query(pattern);
+            assert_eq!(
+                executor.execute_files_only(&query, 0).unwrap(),
+                vec![PathBuf::from("a.txt")],
+                "{pattern}"
+            );
+            assert_eq!(
+                executor.execute_match_counts(&query, 0).unwrap(),
+                vec![(PathBuf::from("a.txt"), 1)],
+                "{pattern}"
+            );
+            let matches = executor.execute_with_content(&query, 0, 0).unwrap();
+            assert_eq!(matches.len(), 1, "{pattern}");
+            assert_eq!(matches[0].line_content, content.strip_suffix('\n').unwrap());
+            assert_eq!(executor.execute(&query).unwrap().len(), 1, "{pattern}");
+        }
+    }
+    fs::remove_file(root.join("a.txt")).unwrap();
+    fs::write(root.join(".gitignore"), "a.txt\n").unwrap();
+    {
+        let _lock = fxi::utils::IndexLock::acquire(root).unwrap();
+        update_index(root).unwrap();
+    }
+    // Recreated but excluded content must not resurrect an old posting entry.
+    fs::write(root.join("a.txt"), "needle recreated but ignored\n").unwrap();
+    let reader = IndexReader::open(root).unwrap();
+    let executor = QueryExecutor::new(&reader);
+    for pattern in patterns {
+        let query = parse_query(pattern);
+        assert!(
+            executor.execute_files_only(&query, 0).unwrap().is_empty(),
+            "{pattern}"
+        );
+        assert!(
+            executor.execute_match_counts(&query, 0).unwrap().is_empty(),
+            "{pattern}"
+        );
+        assert!(
+            executor
+                .execute_with_content(&query, 0, 0)
+                .unwrap()
+                .is_empty(),
+            "{pattern}"
+        );
+        assert!(executor.execute(&query).unwrap().is_empty(), "{pattern}");
+    }
+}
