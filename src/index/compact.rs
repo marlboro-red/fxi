@@ -112,13 +112,9 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
         }
     );
 
-    // Step 3: Compute stop-grams from merged frequencies
-    let mut stop_grams = compute_stop_grams(&trigram_postings, remapping.valid_docs.len(), 512);
-    // Earlier compactions may have omitted these postings. Even when their
-    // frequency falls, they cannot safely narrow until a full rebuild restores
-    // coverage. Keep that knowledge across every subsequent merge.
-    stop_grams.extend(meta.stop_grams.iter().copied());
-    eprintln!("  Computed {} stop-grams", stop_grams.len());
+    // Keep every available posting. Only legacy/configured omissions must
+    // remain marked: compaction cannot reconstruct previously omitted data.
+    let stop_grams: HashSet<_> = meta.stop_grams.iter().copied().collect();
 
     // Step 4: Write merged segment atomically
     let mut generation = crate::index::generation::Generation::new(&root)?;
@@ -577,20 +573,6 @@ fn merge_token_positions_segment(
     Ok(())
 }
 
-/// Compute stop-grams from merged trigram frequencies.
-fn compute_stop_grams(
-    trigram_postings: &BTreeMap<Trigram, Vec<DocId>>,
-    doc_count: usize,
-    count: usize,
-) -> HashSet<Trigram> {
-    let freq: Vec<_> = trigram_postings
-        .iter()
-        .map(|(&t, v)| (t, v.len()))
-        .collect();
-
-    crate::index::writer::select_stop_grams(freq, doc_count, count)
-}
-
 /// Legacy compact function - now calls merge_segments.
 pub fn compact_segments(root_path: &Path) -> Result<()> {
     merge_segments(root_path)
@@ -599,30 +581,6 @@ pub fn compact_segments(root_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_compute_stop_grams() {
-        let mut postings = BTreeMap::new();
-        postings.insert(1u32, vec![1, 2, 3, 4, 5]); // in 5/6 docs
-        postings.insert(2u32, vec![1, 2]); // in 2/6 docs
-        postings.insert(3u32, vec![1, 2, 3, 4]); // in 4/6 docs
-        postings.insert(4u32, vec![1]); // in 1/6 docs
-
-        // Only trigrams present in more than half of the 6 documents qualify
-        let stop_grams = compute_stop_grams(&postings, 6, 2);
-        assert_eq!(stop_grams.len(), 2);
-        assert!(stop_grams.contains(&1u32)); // 5/6 docs
-        assert!(stop_grams.contains(&3u32)); // 4/6 docs
-
-        // The cap still applies among qualifying trigrams
-        let capped = compute_stop_grams(&postings, 6, 1);
-        assert_eq!(capped.len(), 1);
-        assert!(capped.contains(&1u32));
-
-        // In a tiny index nothing is hot enough to stop
-        let none = compute_stop_grams(&postings, 100, 2);
-        assert!(none.is_empty());
-    }
 
     #[test]
     fn test_merge_sorted_lists() {

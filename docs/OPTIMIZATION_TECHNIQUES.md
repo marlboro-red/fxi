@@ -1,6 +1,6 @@
 # FXI: Index Search Optimization Techniques
 
-> A comprehensive technical deep-dive into the optimization strategies powering fxi's 100-400x faster code search
+> Historical design notes, not current benchmark evidence. The former 100–400× claim is unverified. Fresh indexes now retain common-gram constraints by default; the stop-gram optimization described below is no longer the default. See [the audit](audit-2026-09-17/AUDIT.md) and [current experiments](performance-round2/NOTES.md) for measured behavior.
 
 ---
 

@@ -115,12 +115,13 @@ struct SegmentWriteJob {
     segment_id: SegmentId,
     segment_path: PathBuf,
     files: Vec<AssignedFile>,
-    trigram_frequencies: Arc<Mutex<ahash::AHashMap<Trigram, u32>>>,
+    trigram_frequencies: Option<Arc<Mutex<ahash::AHashMap<Trigram, u32>>>>,
 }
 
 /// Pick stop-grams from (trigram, doc-frequency) pairs: a trigram qualifies
-/// only when it appears in more than half of all documents (it can no longer
-/// narrow the candidate set), capped at the `cap` hottest ones. The fraction
+/// only when it appears in more than half of all documents, capped at `cap`.
+/// This lossy candidate-planning policy is opt-in: frequent grams can still
+/// narrow the candidate set and save considerable source I/O. The fraction
 /// threshold keeps small indexes from declaring every trigram a stop-gram.
 pub(crate) fn select_stop_grams(
     freq: Vec<(Trigram, usize)>,
@@ -328,7 +329,8 @@ impl ChunkedIndexWriter {
                 segment_id,
                 segment_path,
                 files: assigned_files,
-                trigram_frequencies: Arc::clone(&self.trigram_frequencies),
+                trigram_frequencies: (self.config.stop_gram_count > 0)
+                    .then(|| Arc::clone(&self.trigram_frequencies)),
             };
             let _ = sender.send(job);
         }
@@ -383,10 +385,9 @@ impl ChunkedIndexWriter {
 
         let t_bloom = std::time::Instant::now();
 
-        // Derive frequencies from sorted pairs and batch update shared map
-        {
-            let mut freq_map = job
-                .trigram_frequencies
+        // Frequency collection is unnecessary when every posting is retained.
+        if let Some(frequencies) = &job.trigram_frequencies {
+            let mut freq_map = frequencies
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if !trigram_pairs.is_empty() {
@@ -1180,6 +1181,21 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn explicit_stop_gram_policy_respects_frequency_and_cap() {
+        let frequencies = vec![(1, 5), (2, 2), (3, 4), (4, 1)];
+        assert_eq!(
+            select_stop_grams(frequencies.clone(), 6, 2),
+            HashSet::from([1, 3])
+        );
+        assert_eq!(
+            select_stop_grams(frequencies.clone(), 6, 1),
+            HashSet::from([1])
+        );
+        assert!(select_stop_grams(frequencies.clone(), 6, 0).is_empty());
+        assert!(select_stop_grams(frequencies, 100, 2).is_empty());
+    }
 
     #[test]
     fn repeated_documents_do_not_enlarge_the_gram_bloom() {

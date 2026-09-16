@@ -53,6 +53,13 @@ fn repeated_compaction_preserves_omitted_gram_coverage() {
     }
     fs::write(fixture.0.path().join("filler.txt"), "unrelated content\n").unwrap();
     build_index_with_options(fixture.0.path(), true, true, Some(2)).unwrap();
+    // Simulate a legacy index that elected to omit these common grams.
+    // Fresh indexes retain all grams by default now.
+    let meta_path = fixture.index().join("meta.json");
+    let mut meta: fxi::index::types::IndexMeta =
+        serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+    meta.stop_grams = fxi::utils::query_trigrams("r::st");
+    fs::write(meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
     for iteration in 0..4 {
         merge_segments(fixture.0.path()).unwrap();
         let reader = IndexReader::open(fixture.0.path()).unwrap();
@@ -332,5 +339,22 @@ fn damaged_or_legacy_optional_blooms_cannot_hide_documents() {
         let docs = reader
             .get_trigram_docs_with_bloom(&[fxi::index::types::bytes_to_trigram(b'v', b'e', b'c')]);
         assert_eq!(docs.iter().collect::<Vec<_>>(), vec![1]);
+    }
+}
+
+#[test]
+fn common_grams_remain_selective_after_repeated_compaction() {
+    use fxi::index::compact::merge_segments;
+    let fixture = Fixture::new();
+    fs::write(fixture.0.path().join("b.txt"), "vector::start\n").unwrap();
+    fs::write(fixture.0.path().join("c.txt"), "unrelated content\n").unwrap();
+    build_index_with_options(fixture.0.path(), true, true, Some(1)).unwrap();
+    let gram = fxi::index::types::bytes_to_trigram(b'v', b'e', b'c');
+    for _ in 0..3 {
+        let reader = IndexReader::open(fixture.0.path()).unwrap();
+        assert!(!reader.is_stop_gram(gram));
+        assert_eq!(reader.get_trigram_docs_with_bloom(&[gram]).len(), 2);
+        drop(reader);
+        merge_segments(fixture.0.path()).unwrap();
     }
 }

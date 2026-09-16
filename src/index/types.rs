@@ -312,7 +312,9 @@ impl Default for IndexConfig {
     fn default() -> Self {
         Self {
             max_file_size: 10 * 1024 * 1024, // 10MB
-            stop_gram_count: 512,
+            // Frequent grams can still avoid substantial source I/O. Keep all
+            // postings usable by default; old omitted-gram metadata is honored.
+            stop_gram_count: 0,
             delta_threshold: 100,
             compaction_ratio: 0.5,
             ignored_paths: vec![
