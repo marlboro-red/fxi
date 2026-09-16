@@ -168,6 +168,7 @@ fn add_token(tokens: &mut HashSet<String>, token: &str) {
 /// The position counter increments for every token boundary (including sub-2-char
 /// tokens that are filtered from the index) to maintain gap consistency between
 /// index-time and query-time tokenization.
+#[allow(dead_code)] // Public occurrence API; bulk ingestion interns during scanning.
 pub fn extract_tokens_with_positions(content: &str) -> Vec<(String, u32)> {
     let bytes = content.as_bytes();
 
@@ -298,31 +299,57 @@ pub fn tokenize_query_with_positions(query: &str) -> Vec<(String, u32)> {
     extract_tokens_with_positions_simple(query)
 }
 
-/// Tokenize content in a single scan, returning both the unique token set
-/// and the full position list. The unique set is derived from the position
-/// list instead of re-tokenizing the content (extract_tokens +
-/// extract_tokens_with_positions each scan the whole content).
+/// Intern tokens during the scan: occurrences store only (token ID, position).
+/// Lowercase into a reusable stack buffer and allocate only for distinct tokens.
 pub fn extract_tokens_and_positions(text: &str) -> (Vec<String>, Vec<(u32, u32)>) {
-    let tok_pos = extract_tokens_with_positions(text);
-    // Positions reference the unique-token list by index instead of carrying
-    // an owned String per occurrence: a 30KB source file has thousands of
-    // token occurrences but only hundreds of unique tokens, and the
-    // per-occurrence Strings dominated indexing peak memory
-    let mut ids: ahash::AHashMap<String, u32> =
-        ahash::AHashMap::with_capacity(tok_pos.len() / 2 + 1);
-    let mut tokens: Vec<String> = Vec::new();
-    let mut positions = Vec::with_capacity(tok_pos.len());
-    for (t, pos) in tok_pos {
-        let id = match ids.get(t.as_str()) {
-            Some(&id) => id,
-            None => {
-                let id = tokens.len() as u32;
-                tokens.push(t.clone());
-                ids.insert(t, id);
-                id
-            }
+    let mut ids: ahash::AHashMap<String, u32> = ahash::AHashMap::with_capacity(128);
+    let mut positions = Vec::with_capacity(text.len() / 8);
+    let mut normalized = [0u8; MAX_TOKEN_LENGTH];
+    let mut emit = |token: &[u8], position: u32| {
+        if !(2..=MAX_TOKEN_LENGTH).contains(&token.len()) {
+            return;
+        }
+        let lower = &mut normalized[..token.len()];
+        lower.copy_from_slice(token);
+        lower.make_ascii_lowercase();
+        let lower = std::str::from_utf8(lower).expect("ASCII token scanner");
+        let id = if let Some(&id) = ids.get(lower) {
+            id
+        } else {
+            let id = ids.len() as u32;
+            ids.insert(lower.to_owned(), id);
+            id
         };
-        positions.push((id, pos));
+        positions.push((id, position));
+    };
+    let bytes = text.as_bytes();
+    let mut start = None;
+    let mut previous_lower = false;
+    let mut position = 0;
+    // The sentinel flushes the final token without a second code path.
+    for (i, byte) in bytes.iter().copied().chain(std::iter::once(0)).enumerate() {
+        if byte.is_ascii_alphanumeric() {
+            if byte.is_ascii_uppercase() && previous_lower {
+                if let Some(begin) = start {
+                    emit(&bytes[begin..i], position);
+                    position += 1;
+                }
+                start = Some(i);
+            } else if start.is_none() {
+                start = Some(i);
+            }
+            previous_lower = byte.is_ascii_lowercase();
+        } else {
+            if let Some(begin) = start.take() {
+                emit(&bytes[begin..i], position);
+                position += 1;
+            }
+            previous_lower = false;
+        }
+    }
+    let mut tokens = vec![String::new(); ids.len()];
+    for (token, id) in ids {
+        tokens[id as usize] = token;
     }
     (tokens, positions)
 }
@@ -457,5 +484,40 @@ mod tests {
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0], ("big".to_string(), 1));
         assert_eq!(tokens[1], ("dog".to_string(), 3));
+    }
+}
+
+#[cfg(test)]
+mod interning_tests {
+    use super::*;
+
+    #[test]
+    fn direct_interning_preserves_occurrences_and_positions() {
+        let alphabet = b"aAzZ019_ .\n!";
+        let mut state = 42u64;
+        let mut cases = vec![
+            String::new(),
+            "helloWorld foo_bar x y 9 ABC9Def".into(),
+            "foo Kbar Σbaz İdot".into(),
+            "return return return".repeat(100),
+            "a".repeat(300) + " x fooBar",
+        ];
+        for len in 0..600 {
+            let mut input = String::new();
+            for _ in 0..len {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                input.push(alphabet[(state >> 32) as usize % alphabet.len()] as char);
+            }
+            cases.push(input);
+        }
+        for input in cases {
+            let expected = extract_tokens_with_positions(&input);
+            let (tokens, positions) = extract_tokens_and_positions(&input);
+            let actual: Vec<_> = positions
+                .into_iter()
+                .map(|(id, pos)| (tokens[id as usize].clone(), pos))
+                .collect();
+            assert_eq!(actual, expected, "input length {}", input.len());
+        }
     }
 }
