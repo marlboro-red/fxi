@@ -92,6 +92,7 @@ fn read_file_content(path: &Path) -> Option<FileContent> {
 struct CachedRegex {
     regex: Regex,
     line_local: bool,
+    existence_literal: Option<Vec<u8>>,
 }
 
 impl std::ops::Deref for CachedRegex {
@@ -103,7 +104,9 @@ impl std::ops::Deref for CachedRegex {
 
 impl CachedRegex {
     fn is_match_in_lines(&self, content: &str) -> bool {
-        if self.line_local {
+        if let Some(literal) = &self.existence_literal {
+            memchr::memmem::find(content.as_bytes(), literal).is_some()
+        } else if self.line_local {
             self.regex.is_match(content)
         } else {
             content.lines().any(|line| self.regex.is_match(line))
@@ -143,6 +146,7 @@ impl RegexCache {
         let arc_re = Arc::new(CachedRegex {
             regex: re,
             line_local: super::regex_plan::is_line_local(pattern),
+            existence_literal: super::regex_plan::existence_literal(pattern),
         });
 
         // Slow path: insert with write lock

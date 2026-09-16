@@ -274,3 +274,83 @@ mod line_tests {
         assert!(!is_line_local("foo.bar")); // dot can consume a stripped CR
     }
 }
+
+/// Existence of a literal with nullable, assertion-free surroundings is just
+/// existence of that literal. This covers `.*needle` without scanning each
+/// line or paying the regex engine's greedy-prefix cost.
+pub(super) fn existence_literal(pattern: &str) -> Option<Vec<u8>> {
+    fn no_assertions(hir: &Hir) -> bool {
+        match hir.kind() {
+            HirKind::Look(_) => false,
+            _ => hir.kind().subs().iter().all(no_assertions),
+        }
+    }
+    fn required(hir: &Hir) -> Option<Vec<u8>> {
+        match hir.kind() {
+            HirKind::Literal(lit) => Some(lit.0.to_vec()),
+            HirKind::Capture(cap) => required(&cap.sub),
+            HirKind::Concat(parts) => {
+                let mut required_parts = parts.iter().filter(|part| {
+                    part.properties().minimum_len() != Some(0) || !no_assertions(part)
+                });
+                let literal = required(required_parts.next()?)?;
+                required_parts.next().is_none().then_some(literal)
+            }
+            _ => None,
+        }
+    }
+    let hir = regex_syntax::Parser::new().parse(pattern).ok()?;
+    let literal = required(&hir)?;
+    (!literal.is_empty() && !literal.contains(&b'\n') && !literal.contains(&b'\r'))
+        .then_some(literal)
+}
+
+#[cfg(test)]
+mod existence_tests {
+    use super::*;
+    #[test]
+    fn nullable_literal_reduction_preserves_line_existence() {
+        let patterns = [
+            "needle",
+            ".*needle",
+            "(?s).*needle.*",
+            "(?:prefix)?needle(?:suffix)*",
+            "^needle",
+            "needle$",
+            "foo.*needle",
+            "(?:needle|other)",
+            "needle?",
+            "",
+            ".*",
+            "a*",
+            "needle\r",
+            "(?:^)?needle",
+            "(?i)needle",
+            "(?:x+)?needle",
+        ];
+        let contents = [
+            "",
+            "needle",
+            "prefixneedlesuffix",
+            "before\nneedle\r\nafter",
+            "xneedle",
+            "unrelated",
+            "nee dle",
+        ];
+        for pattern in patterns {
+            let re = regex::Regex::new(pattern).unwrap();
+            if let Some(literal) = existence_literal(pattern) {
+                for content in contents {
+                    assert_eq!(
+                        memchr::memmem::find(content.as_bytes(), &literal).is_some(),
+                        content.lines().any(|line| re.is_match(line)),
+                        "{pattern:?}: {content:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(existence_literal(".*needle"), Some(b"needle".to_vec()));
+        assert!(existence_literal("^needle").is_none());
+        assert!(existence_literal("foo.*needle").is_none());
+    }
+}
