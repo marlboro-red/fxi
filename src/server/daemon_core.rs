@@ -409,7 +409,7 @@ impl IndexServer {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("fxid: failed to read meta.json: {}", e);
-                self.trigger_rebuild(root_path);
+                self.rebuild_with_lock(root_path, &_lock);
                 return;
             }
         };
@@ -428,7 +428,7 @@ impl IndexServer {
             Ok(w) => w,
             Err(e) => {
                 eprintln!("fxid: failed to create delta writer: {}", e);
-                self.trigger_rebuild(root_path);
+                self.rebuild_with_lock(root_path, &_lock);
                 return;
             }
         };
@@ -469,7 +469,7 @@ impl IndexServer {
         // Finalize (writes segment + updates global files atomically)
         if let Err(e) = writer.finalize(&mut meta) {
             eprintln!("fxid: failed to finalize delta segment: {}", e);
-            self.trigger_rebuild(root_path);
+            self.rebuild_with_lock(root_path, &_lock);
             return;
         }
 
@@ -485,7 +485,7 @@ impl IndexServer {
             );
             if let Err(e) = crate::index::compact::merge_segments(root_path) {
                 eprintln!("fxid: merge failed, falling back to rebuild: {}", e);
-                self.trigger_rebuild(root_path);
+                self.rebuild_with_lock(root_path, &_lock);
                 return;
             }
             eprintln!("fxid: segment merge completed successfully");
@@ -525,6 +525,11 @@ impl IndexServer {
             }
         };
 
+        self.rebuild_with_lock(root_path, &_lock);
+    }
+
+    /// Recovery from a failed delta already owns the mutation lock.
+    fn rebuild_with_lock(&self, root_path: &PathBuf, _lock: &crate::utils::IndexLock) {
         // Stop the watcher during rebuild
         {
             let indexes = self.indexes.read().unwrap();
@@ -551,8 +556,10 @@ impl IndexServer {
                 }
                 eprintln!("fxid: rebuilt index with {} files", doc_count);
 
-                // Restart watcher
-                self.spawn_watcher(root_path);
+                // Restart watching only for a watching server.
+                if self.watch_enabled {
+                    self.spawn_watcher(root_path);
+                }
             }
             Err(e) => {
                 eprintln!("fxid: failed to reload index after rebuild: {}", e);
@@ -1366,6 +1373,27 @@ fn run_watcher_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delta_recovery_reuses_held_writer_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("test.txt"), "recovery needle\n").unwrap();
+        build_index_with_progress(&root, true, true).unwrap();
+        std::fs::write(get_index_dir(&root).unwrap().join("meta.json"), "broken").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_root = root.clone();
+        let worker = std::thread::spawn(move || {
+            let server = IndexServer::new(false);
+            server.apply_incremental_update(&worker_root, ChangeBatch::default());
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("recovery deadlocked on its own lock");
+        worker.join().unwrap();
+        assert_eq!(IndexReader::open(&root).unwrap().meta.doc_count, 1);
+        crate::utils::remove_index(&root).unwrap();
+    }
 
     fn make_meta(
         delta_segments: Vec<u16>,
