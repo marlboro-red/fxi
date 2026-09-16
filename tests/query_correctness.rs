@@ -217,7 +217,7 @@ fn ranked_limit_is_a_prefix_of_the_complete_ranking() {
 }
 
 #[test]
-fn hir_candidates_match_brute_force_regex_before_and_after_compaction() {
+fn hir_candidates_match_brute_force_regex_across_deltas_and_compaction() {
     let dir = tempfile::tempdir().unwrap();
     let mut corpus: Vec<String> = [
         "needle",
@@ -297,8 +297,13 @@ fn hir_candidates_match_brute_force_regex_before_and_after_compaction() {
             patterns.push(format!("prefix.*(?:{atom}){suffix}.*suffix"));
         }
     }
-    for compact in [false, true] {
-        if compact {
+    for stage in ["initial", "delta", "compact"] {
+        if stage == "delta" {
+            corpus[0] = "NEEDLE extra suffix".into();
+            fs::write(dir.path().join("f0.txt"), &corpus[0]).unwrap();
+            fxi::index::build::update_index(dir.path()).unwrap();
+        }
+        if stage == "compact" {
             fxi::index::compact::compact_segments(dir.path()).unwrap();
         }
         let reader = IndexReader::open(dir.path()).unwrap();
@@ -320,14 +325,14 @@ fn hir_candidates_match_brute_force_regex_before_and_after_compaction() {
                 .unwrap()
                 .into_iter()
                 .collect();
-            assert_eq!(actual, expected, "{pattern}, compact={compact}");
+            assert_eq!(actual, expected, "{pattern}, stage={stage}");
             let actual: BTreeSet<_> = executor
                 .execute_with_content(&query, 0, 0)
                 .unwrap()
                 .into_iter()
                 .map(|m| m.path)
                 .collect();
-            assert_eq!(actual, expected, "content {pattern}, compact={compact}");
+            assert_eq!(actual, expected, "content {pattern}, stage={stage}");
         }
     }
     fxi::utils::remove_index(dir.path()).unwrap();

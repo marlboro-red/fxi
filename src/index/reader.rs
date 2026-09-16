@@ -687,32 +687,43 @@ impl IndexReader {
             return RoaringBitmap::new();
         }
 
-        // Multiple segments - parallel with bloom filter and selectivity ordering
-        self.segments
-            .par_iter()
-            .filter(|s| s.might_contain_trigrams(trigrams))
-            .map(|segment| {
-                // Sort trigrams by document frequency within this segment
-                let mut sorted_trigrams: Vec<(Trigram, u32)> = trigrams
-                    .iter()
-                    .map(|&t| (t, segment.get_trigram_doc_freq(t)))
-                    .collect();
-                sorted_trigrams.sort_by_key(|&(_, freq)| freq);
-
-                // Start with rarest trigram
-                let mut result = segment.get_trigram_docs(sorted_trigrams[0].0);
-                for &(t, _) in &sorted_trigrams[1..] {
-                    if result.is_empty() {
-                        break;
-                    }
-                    result = segment.get_trigram_docs_intersect(t, &result);
+        let search_segment = |segment: &SegmentReader| {
+            let mut sorted: Vec<_> = trigrams
+                .iter()
+                .map(|&t| (t, segment.get_trigram_doc_freq(t)))
+                .collect();
+            sorted.sort_unstable_by_key(|&(_, frequency)| frequency);
+            let mut result = segment.get_trigram_docs(sorted[0].0);
+            for &(gram, _) in &sorted[1..] {
+                if result.is_empty() {
+                    break;
                 }
-                result
-            })
-            .reduce(RoaringBitmap::new, |mut a, b| {
-                a |= b;
-                a
-            })
+                result = segment.get_trigram_docs_intersect(gram, &result);
+            }
+            result
+        };
+        // Small segment sets contain too little work to amortize a Rayon
+        // dispatch for every case variant. Preserve parallel lookup for larger
+        // indexes, but keep these microsecond-scale intersections local.
+        if self.segments.len() <= 4 {
+            self.segments
+                .iter()
+                .filter(|s| s.might_contain_trigrams(trigrams))
+                .map(search_segment)
+                .fold(RoaringBitmap::new(), |mut a, b| {
+                    a |= b;
+                    a
+                })
+        } else {
+            self.segments
+                .par_iter()
+                .filter(|s| s.might_contain_trigrams(trigrams))
+                .map(search_segment)
+                .reduce(RoaringBitmap::new, |mut a, b| {
+                    a |= b;
+                    a
+                })
+        }
     }
 
     /// Resolve a phrase query positionally: check if phrase tokens appear in
