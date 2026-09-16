@@ -343,9 +343,6 @@ impl IndexReader {
             anyhow::bail!("No index found. Run 'fxi index' first.");
         }
 
-        // Cleanup stale .tmp files from interrupted operations (crash safety)
-        cleanup_tmp_files(&index_path);
-
         // Read metadata first (needed for segment IDs)
         let meta_path = index_path.join("meta.json");
         let meta_file = File::open(&meta_path).context("Failed to open meta.json")?;
@@ -1110,43 +1107,6 @@ fn read_bloom_filter(segment_path: &Path) -> Result<BloomFilter> {
     }
 
     Ok(BloomFilter::from_raw(bits, num_hashes))
-}
-
-/// Cleanup stale .tmp files from interrupted operations (crash safety).
-/// This removes leftover temporary files that may exist from a crashed/interrupted
-/// merge or delta segment write operation.
-fn cleanup_tmp_files(index_path: &Path) {
-    // Clean up .tmp files in the index directory
-    let tmp_patterns = ["docs.bin.tmp", "paths.bin.tmp", "meta.json.tmp"];
-
-    for pattern in &tmp_patterns {
-        let tmp_path = index_path.join(pattern);
-        if tmp_path.exists() {
-            if let Err(e) = std::fs::remove_file(&tmp_path) {
-                eprintln!("Warning: failed to cleanup {}: {}", tmp_path.display(), e);
-            }
-        }
-    }
-
-    // Clean up any .tmp segment directories in segments/
-    let segments_path = index_path.join("segments");
-    if segments_path.exists() {
-        if let Ok(entries) = std::fs::read_dir(&segments_path) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str.ends_with(".tmp") {
-                    if let Err(e) = std::fs::remove_dir_all(entry.path()) {
-                        eprintln!(
-                            "Warning: failed to cleanup {}: {}",
-                            entry.path().display(),
-                            e
-                        );
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
