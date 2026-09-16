@@ -41,44 +41,104 @@ struct TrigramDictEntry {
     doc_freq: u32,
 }
 
-/// Trigram dictionary
+/// Immutable on-disk fixed-width entries, decoded only when accessed.
 struct TrigramDict {
-    entries: Vec<TrigramDictEntry>,
+    data: MappedBytes,
+    count: usize,
+}
+
+fn le32(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes(bytes[..4].try_into().unwrap())
+}
+fn le64(bytes: &[u8]) -> u64 {
+    u64::from_le_bytes(bytes[..8].try_into().unwrap())
 }
 
 impl TrigramDict {
-    fn lookup(&self, trigram: Trigram) -> Option<&TrigramDictEntry> {
-        self.entries
-            .binary_search_by_key(&trigram, |e| e.trigram)
-            .ok()
-            .map(|i| &self.entries[i])
+    fn entry(&self, index: usize) -> TrigramDictEntry {
+        let bytes = &self.data[4 + index * 20..];
+        TrigramDictEntry {
+            trigram: le32(bytes),
+            offset: le64(&bytes[4..]),
+            length: le32(&bytes[12..]),
+            doc_freq: le32(&bytes[16..]),
+        }
+    }
+    fn iter(&self) -> impl Iterator<Item = TrigramDictEntry> + '_ {
+        (0..self.count).map(|i| self.entry(i))
+    }
+    fn lookup(&self, trigram: Trigram) -> Option<TrigramDictEntry> {
+        let mut lo = 0;
+        let mut hi = self.count;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let entry = self.entry(mid);
+            match entry.trigram.cmp(&trigram) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Some(entry),
+            }
+        }
+        None
     }
 }
 
-/// Token dictionary entry
-struct TokenDictEntry {
-    token: String,
+struct TokenDictEntry<'a> {
+    token: &'a str,
     offset: u64,
     length: u32,
-    #[allow(dead_code)]
-    doc_freq: u32,
-    /// Offset into tokens.positions file (0 if no positions)
     pos_offset: u64,
-    /// Length of position data in tokens.positions file
     pos_length: u32,
 }
 
-/// Token dictionary
+/// Retain only offsets into the immutable mapping, not one String/allocation
+/// and a widened metadata record per token. The variable-width format stays
+/// compatible with existing generations.
 struct TokenDict {
-    entries: Vec<TokenDictEntry>,
+    data: MappedBytes,
+    offsets: Vec<usize>,
+    has_positions: bool,
 }
 
 impl TokenDict {
-    fn lookup(&self, token: &str) -> Option<&TokenDictEntry> {
-        self.entries
-            .binary_search_by(|e| e.token.as_str().cmp(token))
-            .ok()
-            .map(|i| &self.entries[i])
+    fn entry(&self, index: usize) -> TokenDictEntry<'_> {
+        let bytes = &self.data[self.offsets[index]..];
+        let len = u16::from_le_bytes(bytes[..2].try_into().unwrap()) as usize;
+        let token =
+            std::str::from_utf8(&bytes[2..2 + len]).expect("validated immutable token dictionary");
+        let fields = &bytes[2 + len..];
+        TokenDictEntry {
+            token,
+            offset: le64(fields),
+            length: le32(&fields[8..]),
+            pos_offset: if self.has_positions {
+                le64(&fields[16..])
+            } else {
+                0
+            },
+            pos_length: if self.has_positions {
+                le32(&fields[24..])
+            } else {
+                0
+            },
+        }
+    }
+    fn iter(&self) -> impl Iterator<Item = TokenDictEntry<'_>> {
+        (0..self.offsets.len()).map(|i| self.entry(i))
+    }
+    fn lookup(&self, token: &str) -> Option<TokenDictEntry<'_>> {
+        let mut lo = 0;
+        let mut hi = self.offsets.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let entry = self.entry(mid);
+            match entry.token.cmp(token) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Some(entry),
+            }
+        }
+        None
     }
 }
 
@@ -138,40 +198,36 @@ impl SegmentReader {
         };
         anyhow::ensure!(
             trigram_dict
-                .entries
                 .iter()
                 .all(|e| fits(e.offset, e.length, trigram_postings.len())),
             "Truncated trigram postings"
         );
         anyhow::ensure!(
             token_dict
-                .entries
                 .iter()
                 .all(|e| fits(e.offset, e.length, token_postings.len())),
             "Truncated token postings"
         );
         if let Some(positions) = &token_positions {
             anyhow::ensure!(
-                token_dict.entries.iter().all(|e| fits(
-                    e.pos_offset,
-                    e.pos_length,
-                    positions.len()
-                )),
+                token_dict
+                    .iter()
+                    .all(|e| fits(e.pos_offset, e.pos_length, positions.len())),
                 "Truncated token positions"
             );
         }
         anyhow::ensure!(
             trigram_dict
-                .entries
-                .windows(2)
-                .all(|w| w[0].trigram < w[1].trigram),
+                .iter()
+                .zip(trigram_dict.iter().skip(1))
+                .all(|(a, b)| a.trigram < b.trigram),
             "Unsorted trigram dictionary"
         );
         anyhow::ensure!(
             token_dict
-                .entries
-                .windows(2)
-                .all(|w| w[0].token < w[1].token),
+                .iter()
+                .zip(token_dict.iter().skip(1))
+                .all(|(a, b)| a.token < b.token),
             "Unsorted token dictionary"
         );
 
@@ -248,7 +304,7 @@ impl SegmentReader {
         let finder = memmem::Finder::new(needle.as_bytes());
 
         let mut result = RoaringBitmap::new();
-        for entry in &self.token_dict.entries {
+        for entry in self.token_dict.iter() {
             if entry.token.len() >= needle.len() && finder.find(entry.token.as_bytes()).is_some() {
                 let start = entry.offset as usize;
                 let end = start + entry.length as usize;
@@ -1027,122 +1083,49 @@ pub fn read_paths(index_path: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// Read trigram dictionary
+/// Validate lengths before accessing records in immutable mappings.
 fn read_trigram_dict(segment_path: &Path) -> Result<TrigramDict> {
-    let dict_path = segment_path.join("grams.dict");
-
-    let mut file = BufReader::new(File::open(&dict_path)?);
-
-    let mut buf4 = [0u8; 4];
-    let mut buf8 = [0u8; 8];
-
-    // Read count
-    file.read_exact(&mut buf4)?;
-    let count = u32::from_le_bytes(buf4) as usize;
-
-    validate_disk_count(&file, count, 4, 20)?;
-    let mut entries = Vec::with_capacity(count);
-
-    for _ in 0..count {
-        // trigram (u32)
-        file.read_exact(&mut buf4)?;
-        let trigram = u32::from_le_bytes(buf4);
-
-        // offset (u64)
-        file.read_exact(&mut buf8)?;
-        let offset = u64::from_le_bytes(buf8);
-
-        // length (u32)
-        file.read_exact(&mut buf4)?;
-        let length = u32::from_le_bytes(buf4);
-
-        // doc_freq (u32)
-        file.read_exact(&mut buf4)?;
-        let doc_freq = u32::from_le_bytes(buf4);
-
-        entries.push(TrigramDictEntry {
-            trigram,
-            offset,
-            length,
-            doc_freq,
-        });
-    }
-
-    // Note: Data is already sorted from BTreeMap write - no sort needed
-    // (Previously sorted here, now skipped for ~10-30ms savings per segment)
-
-    Ok(TrigramDict { entries })
+    let data = MappedBytes::open(&segment_path.join("grams.dict"))?;
+    anyhow::ensure!(data.len() >= 4, "Truncated trigram dictionary header");
+    let count = le32(&data) as usize;
+    anyhow::ensure!(
+        count <= (data.len() - 4) / 20 && data.len() - 4 == count * 20,
+        "Trigram dictionary count exceeds file bounds"
+    );
+    Ok(TrigramDict { data, count })
 }
 
-/// Read token dictionary
 fn read_token_dict(segment_path: &Path, has_positions: bool) -> Result<TokenDict> {
-    let dict_path = segment_path.join("tokens.dict");
-
-    let mut file = BufReader::new(File::open(&dict_path)?);
-
-    let mut buf2 = [0u8; 2];
-    let mut buf4 = [0u8; 4];
-    let mut buf8 = [0u8; 8];
-
-    // Read count
-    file.read_exact(&mut buf4)?;
-    let count = u32::from_le_bytes(buf4) as usize;
-
-    validate_disk_count(&file, count, 4, if has_positions { 30 } else { 18 })?;
-    let mut entries = Vec::with_capacity(count);
-
-    for i in 0..count {
-        // token length (u16)
-        file.read_exact(&mut buf2).with_context(|| {
-            format!(
-                "Token dictionary truncated at entry {}/{} - index may be corrupted",
-                i, count
-            )
-        })?;
-        let token_len = u16::from_le_bytes(buf2) as usize;
-
-        // token bytes
-        let mut token_bytes = vec![0u8; token_len];
-        file.read_exact(&mut token_bytes)?;
-        let token = String::from_utf8_lossy(&token_bytes).to_string();
-
-        // offset (u64)
-        file.read_exact(&mut buf8)?;
-        let offset = u64::from_le_bytes(buf8);
-
-        // length (u32)
-        file.read_exact(&mut buf4)?;
-        let length = u32::from_le_bytes(buf4);
-
-        // doc_freq (u32)
-        file.read_exact(&mut buf4)?;
-        let doc_freq = u32::from_le_bytes(buf4);
-
-        // Position offset and length (only present in new indexes with positions)
-        let (pos_offset, pos_length) = if has_positions {
-            file.read_exact(&mut buf8)?;
-            let po = u64::from_le_bytes(buf8);
-            file.read_exact(&mut buf4)?;
-            let pl = u32::from_le_bytes(buf4);
-            (po, pl)
-        } else {
-            (0, 0)
-        };
-
-        entries.push(TokenDictEntry {
-            token,
-            offset,
-            length,
-            doc_freq,
-            pos_offset,
-            pos_length,
-        });
+    let data = MappedBytes::open(&segment_path.join("tokens.dict"))?;
+    anyhow::ensure!(data.len() >= 4, "Truncated token dictionary header");
+    let count = le32(&data) as usize;
+    let fixed_size = if has_positions { 30 } else { 18 };
+    anyhow::ensure!(
+        count <= (data.len() - 4) / fixed_size,
+        "Token dictionary count exceeds file bounds"
+    );
+    let mut offsets = Vec::with_capacity(count);
+    let mut cursor = 4;
+    for _ in 0..count {
+        anyhow::ensure!(
+            data.len() - cursor >= fixed_size,
+            "Truncated token dictionary record"
+        );
+        let len = u16::from_le_bytes(data[cursor..cursor + 2].try_into().unwrap()) as usize;
+        anyhow::ensure!(
+            len <= data.len() - cursor - fixed_size,
+            "Token length exceeds file bounds"
+        );
+        std::str::from_utf8(&data[cursor + 2..cursor + 2 + len]).context("Invalid token UTF-8")?;
+        offsets.push(cursor);
+        cursor += fixed_size + len;
     }
-
-    // Note: Data is already sorted from BTreeMap write - no sort needed
-    // (Previously sorted here, now skipped for ~100-500ms savings per segment)
-
-    Ok(TokenDict { entries })
+    anyhow::ensure!(cursor == data.len(), "Trailing token dictionary bytes");
+    Ok(TokenDict {
+        data,
+        offsets,
+        has_positions,
+    })
 }
 
 /// Read line maps

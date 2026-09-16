@@ -290,3 +290,19 @@ fn impossible_record_counts_and_path_lengths_fail_before_allocation() {
     fs::write(path, bytes).unwrap();
     assert!(IndexReader::open(fixture.0.path()).is_err());
 }
+
+#[test]
+fn mapped_dictionaries_reject_bad_lengths_and_token_encoding() {
+    for corrupt_length in [false, true] {
+        let fixture = Fixture::new();
+        let path = fixture.index().join("segments/seg_0001/tokens.dict");
+        let mut bytes = fs::read(&path).unwrap();
+        if corrupt_length {
+            bytes[4..6].copy_from_slice(&u16::MAX.to_le_bytes());
+        } else {
+            bytes[6] = 0xff;
+        }
+        fs::write(path, bytes).unwrap();
+        assert!(IndexReader::open(fixture.0.path()).is_err());
+    }
+}
