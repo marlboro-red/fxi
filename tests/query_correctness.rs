@@ -410,3 +410,53 @@ fn boosts_preserve_phrase_case_and_only_affect_matching_lines() {
     drop(reader);
     fxi::utils::remove_index(dir.path()).unwrap();
 }
+
+#[test]
+fn compound_regex_candidates_are_sound_across_segment_partitions() {
+    let sources = [
+        "FoObAr\n",
+        "foobaz\n",
+        "x\n",
+        "other\n",
+        "prefixFOOBARsuffix\n",
+        "foo bar\n",
+        "Kelvin\n",
+        "kelvin\n",
+        "foobar fooquux\n",
+    ];
+    let patterns = [
+        "(?i)foobar",
+        "(?i)foo(bar|baz)",
+        "(?:foobar|x?)",
+        "foobar|kelvin",
+        "(?i)kelvin",
+        "foo.*(?:bar|quux)",
+        "(?i)foob(a|u)r|kelvin",
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    for (id, source) in sources.iter().enumerate() {
+        fs::write(dir.path().join(format!("{id}.txt")), source).unwrap();
+    }
+    for chunk in [1, 3, 0] {
+        fxi::index::build::build_index_with_options(dir.path(), true, true, Some(chunk)).unwrap();
+        let reader = IndexReader::open(dir.path()).unwrap();
+        for pattern in patterns {
+            let regex = regex::Regex::new(pattern).unwrap();
+            let expected: BTreeSet<_> = sources
+                .iter()
+                .enumerate()
+                .filter(|(_, source)| source.lines().any(|line| regex.is_match(line)))
+                .map(|(id, _)| std::path::PathBuf::from(format!("{id}.txt")))
+                .collect();
+            let actual = QueryExecutor::new(&reader)
+                .execute_files_only(&parse_query(&format!("re:/{pattern}/")), 0)
+                .unwrap();
+            assert_eq!(
+                actual.into_iter().collect::<BTreeSet<_>>(),
+                expected,
+                "{pattern}, chunk={chunk}"
+            );
+        }
+    }
+    let _ = fxi::utils::remove_index(dir.path());
+}

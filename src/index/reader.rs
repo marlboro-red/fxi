@@ -142,6 +142,78 @@ impl TokenDict {
     }
 }
 
+/// Positive gram constraints that can be evaluated independently within each
+/// segment. A valid document's postings belong to one segment, so intersection
+/// distributes over the union of these disjoint document-ID partitions.
+pub(crate) enum GramQuery {
+    All,
+    Empty,
+    Terms(Vec<Trigram>),
+    And(Vec<GramQuery>),
+    Or(Vec<GramQuery>),
+}
+
+impl GramQuery {
+    pub(crate) fn terms(grams: Vec<Trigram>) -> Self {
+        if grams.is_empty() {
+            Self::All
+        } else {
+            Self::Terms(grams)
+        }
+    }
+    pub(crate) fn and(mut children: Vec<Self>) -> Self {
+        if children.iter().any(|q| matches!(q, Self::Empty)) {
+            return Self::Empty;
+        }
+        children.retain(|q| !matches!(q, Self::All));
+        match children.len() {
+            0 => Self::All,
+            1 => children.pop().unwrap(),
+            _ => Self::And(children),
+        }
+    }
+    pub(crate) fn or(mut children: Vec<Self>) -> Self {
+        if children.iter().any(|q| matches!(q, Self::All)) {
+            return Self::All;
+        }
+        children.retain(|q| !matches!(q, Self::Empty));
+        match children.len() {
+            0 => Self::Empty,
+            1 => children.pop().unwrap(),
+            _ => Self::Or(children),
+        }
+    }
+    fn in_segment(&self, segment: &SegmentReader, universe: &RoaringBitmap) -> RoaringBitmap {
+        match self {
+            Self::All => universe.clone(),
+            Self::Empty => RoaringBitmap::new(),
+            Self::Terms(grams) => segment.intersect_trigrams(grams),
+            Self::And(children) => {
+                let mut children = children.iter();
+                let mut result = children
+                    .next()
+                    .map(|q| q.in_segment(segment, universe))
+                    .unwrap_or_else(|| universe.clone());
+                for child in children {
+                    if result.is_empty() {
+                        break;
+                    }
+                    result &= child.in_segment(segment, universe);
+                }
+                result
+            }
+            Self::Or(children) => {
+                children
+                    .iter()
+                    .fold(RoaringBitmap::new(), |mut result, child| {
+                        result |= child.in_segment(segment, universe);
+                        result
+                    })
+            }
+        }
+    }
+}
+
 /// Reader for a single segment
 struct SegmentReader {
     #[allow(dead_code)]
@@ -245,6 +317,25 @@ impl SegmentReader {
             segment_path: segment_path.to_path_buf(),
             bloom_filter,
         })
+    }
+
+    fn intersect_trigrams(&self, trigrams: &[Trigram]) -> RoaringBitmap {
+        if !self.might_contain_trigrams(trigrams) {
+            return RoaringBitmap::new();
+        }
+        let mut sorted: Vec<_> = trigrams
+            .iter()
+            .map(|&g| (g, self.get_trigram_doc_freq(g)))
+            .collect();
+        sorted.sort_unstable_by_key(|&(_, frequency)| frequency);
+        let mut result = self.get_trigram_docs(sorted[0].0);
+        for &(gram, _) in &sorted[1..] {
+            if result.is_empty() {
+                break;
+            }
+            result = self.get_trigram_docs_intersect(gram, &result);
+        }
+        result
     }
 
     /// Get documents matching a trigram in this segment as a RoaringBitmap
@@ -712,58 +803,11 @@ impl IndexReader {
         if trigrams.is_empty() {
             return self.valid_doc_ids().clone();
         }
-
-        if self.segments.len() <= 1 {
-            // Single segment - just check bloom and proceed
-            if let Some(segment) = self.segments.first() {
-                if !segment.might_contain_trigrams(trigrams) {
-                    return RoaringBitmap::new();
-                }
-
-                // Sort trigrams by document frequency (selectivity) - rarest first
-                // This minimizes intermediate result set sizes during intersection
-                let mut sorted_trigrams: Vec<(Trigram, u32)> = trigrams
-                    .iter()
-                    .map(|&t| (t, segment.get_trigram_doc_freq(t)))
-                    .collect();
-                sorted_trigrams.sort_by_key(|&(_, freq)| freq);
-
-                // Start with rarest trigram
-                let mut result = segment.get_trigram_docs(sorted_trigrams[0].0);
-                for &(t, _) in &sorted_trigrams[1..] {
-                    if result.is_empty() {
-                        break;
-                    }
-                    result = segment.get_trigram_docs_intersect(t, &result);
-                }
-                return result;
-            }
-            return RoaringBitmap::new();
-        }
-
-        let search_segment = |segment: &SegmentReader| {
-            let mut sorted: Vec<_> = trigrams
-                .iter()
-                .map(|&t| (t, segment.get_trigram_doc_freq(t)))
-                .collect();
-            sorted.sort_unstable_by_key(|&(_, frequency)| frequency);
-            let mut result = segment.get_trigram_docs(sorted[0].0);
-            for &(gram, _) in &sorted[1..] {
-                if result.is_empty() {
-                    break;
-                }
-                result = segment.get_trigram_docs_intersect(gram, &result);
-            }
-            result
-        };
-        // Small segment sets contain too little work to amortize a Rayon
-        // dispatch for every case variant. Preserve parallel lookup for larger
-        // indexes, but keep these microsecond-scale intersections local.
+        let search = |segment: &SegmentReader| segment.intersect_trigrams(trigrams);
         if self.segments.len() <= 4 {
             self.segments
                 .iter()
-                .filter(|s| s.might_contain_trigrams(trigrams))
-                .map(search_segment)
+                .map(search)
                 .fold(RoaringBitmap::new(), |mut a, b| {
                     a |= b;
                     a
@@ -771,8 +815,35 @@ impl IndexReader {
         } else {
             self.segments
                 .par_iter()
-                .filter(|s| s.might_contain_trigrams(trigrams))
-                .map(search_segment)
+                .map(search)
+                .reduce(RoaringBitmap::new, |mut a, b| {
+                    a |= b;
+                    a
+                })
+        }
+    }
+
+    /// Dispatch once for the entire positive plan, rather than once per
+    /// case variant per gram window. Keep intermediate bitmaps segment-local.
+    pub(crate) fn get_gram_query_docs(&self, query: &GramQuery) -> RoaringBitmap {
+        match query {
+            GramQuery::All => return self.valid_doc_ids().clone(),
+            GramQuery::Empty => return RoaringBitmap::new(),
+            _ => {}
+        }
+        let search = |segment: &SegmentReader| query.in_segment(segment, self.valid_doc_ids());
+        if self.segments.len() <= 4 {
+            self.segments
+                .iter()
+                .map(search)
+                .fold(RoaringBitmap::new(), |mut a, b| {
+                    a |= b;
+                    a
+                })
+        } else {
+            self.segments
+                .par_iter()
+                .map(search)
                 .reduce(RoaringBitmap::new, |mut a, b| {
                     a |= b;
                     a

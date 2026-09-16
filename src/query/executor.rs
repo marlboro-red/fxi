@@ -1,4 +1,4 @@
-use crate::index::reader::{FileContent, IndexReader};
+use crate::index::reader::{FileContent, GramQuery, IndexReader};
 use crate::index::types::{DocId, Language, SearchMatch};
 use crate::query::parser::{Query, SortOrder};
 use crate::query::planner::{FilterStep, PlanStep, QueryPlan, VerificationStep};
@@ -618,9 +618,56 @@ impl<'a> QueryExecutor<'a> {
         Ok(())
     }
 
+    fn pure_gram_query(&self, plan: &QueryPlan) -> Option<GramQuery> {
+        let mut children = Vec::new();
+        for step in &plan.steps {
+            let query = match step {
+                PlanStep::TrigramIntersect(grams) => GramQuery::terms(
+                    grams
+                        .iter()
+                        .copied()
+                        .filter(|g| !self.reader.is_stop_gram(*g))
+                        .collect(),
+                ),
+                PlanStep::Union(plans) | PlanStep::Intersect(plans) => {
+                    // Preserve recursive validation semantics for public plans
+                    // with their own verification. HIR candidate branches have
+                    // no verification; the complete regex was validated above.
+                    let children = plans
+                        .iter()
+                        .map(|p| {
+                            if p.verification.is_some() {
+                                None
+                            } else {
+                                self.pure_gram_query(p)
+                            }
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    if matches!(step, PlanStep::Union(_)) {
+                        GramQuery::or(children)
+                    } else {
+                        GramQuery::and(children)
+                    }
+                }
+                _ => return None,
+            };
+            children.push(query);
+        }
+        Some(GramQuery::and(children))
+    }
+
     fn execute_plan(&self, plan: &QueryPlan) -> Result<RoaringBitmap> {
         if let Some(verification) = &plan.verification {
             Self::validate_verification(verification)?;
+        }
+        if (plan.steps.len() > 1
+            || plan
+                .steps
+                .iter()
+                .any(|s| matches!(s, PlanStep::Union(_) | PlanStep::Intersect(_))))
+            && let Some(query) = self.pure_gram_query(plan)
+        {
+            return Ok(self.reader.get_gram_query_docs(&query));
         }
         let mut candidates: Option<RoaringBitmap> = None;
         let mut exclude_plans: Vec<&QueryPlan> = Vec::new();
