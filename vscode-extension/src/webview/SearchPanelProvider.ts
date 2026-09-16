@@ -10,6 +10,8 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider, vscode.D
   public static readonly viewType = "fxi.searchPanel";
 
   private view?: vscode.WebviewView;
+  private searchSequence = 0;
+  private resultRoot?: string;
   private client: DaemonClient;
   private connectionListener: (connected: boolean) => void;
   private configListener: vscode.Disposable;
@@ -38,6 +40,7 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider, vscode.D
   }
 
   dispose(): void {
+    this.searchSequence++;
     this.client.removeListener("connectionChange", this.connectionListener);
     this.configListener.dispose();
   }
@@ -113,6 +116,7 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider, vscode.D
   }
 
   private async handleSearch(msg: Extract<WebviewMessage, { command: "search" }>): Promise<void> {
+    const sequence = ++this.searchSequence;
     const root = getWorkspaceRoot();
     if (!root) {
       this.postMessage({ command: "error", message: "No workspace folder open." });
@@ -131,6 +135,8 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider, vscode.D
         case_insensitive: false,
         files_only: msg.filesOnly,
       });
+      if (sequence !== this.searchSequence) { return; }
+      this.resultRoot = resp.resolved_root ?? root;
       this.postMessage({
         command: "searchResults",
         matches: resp.matches,
@@ -138,6 +144,7 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider, vscode.D
         files_with_matches: resp.files_with_matches,
       });
     } catch (e) {
+      if (sequence !== this.searchSequence) { return; }
       this.postMessage({
         command: "error",
         message: e instanceof Error ? e.message : String(e),
@@ -148,7 +155,7 @@ export class SearchPanelProvider implements vscode.WebviewViewProvider, vscode.D
   private async handleOpenFile(msg: Extract<WebviewMessage, { command: "openFile" }>): Promise<void> {
     try {
       let filePath = msg.path;
-      const root = getWorkspaceRoot();
+      const root = this.resultRoot ?? getWorkspaceRoot();
       if (root && !path.isAbsolute(filePath)) {
         filePath = path.join(root, filePath);
       }

@@ -5,6 +5,7 @@ export const Uri = {
 };
 
 export const workspace = {
+  onDidChangeConfiguration: (_handler: any) => ({ dispose: () => {} }),
   workspaceFolders: undefined as any,
   getConfiguration: (_section: string) => ({
     get: <T>(_key: string, defaultValue: T): T => defaultValue,
