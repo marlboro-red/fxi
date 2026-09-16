@@ -368,7 +368,7 @@ impl ContentCache {
 }
 
 /// Maximum file size to cache (files larger than this are not cached)
-const MAX_CACHEABLE_FILE_SIZE: usize = 512 * 1024; // 512KB
+const MAX_CACHEABLE_FILE_SIZE: usize = 128 * 1024; // 128 KiB; avoid large entries displacing many small source files.
 
 /// An owned source snapshot or a shared, immutable copy of one.
 pub enum FileContent {
@@ -1401,7 +1401,7 @@ mod cache_budget_tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let stamp = FileStamp::from_metadata(&file.as_file().metadata().unwrap());
         let mut cache = ContentCache::new();
-        for i in 0..20 {
+        for i in 0..64 {
             cache.put(
                 format!("f{i}").into(),
                 stamp.clone(),
@@ -1410,7 +1410,7 @@ mod cache_budget_tests {
             assert!(cache.bytes <= FILE_CACHE_SHARD_BYTES);
         }
         assert!(!cache.entries.contains(Path::new("f0")));
-        cache.put("f19".into(), stamp.clone(), Arc::from("small"));
+        cache.put("f63".into(), stamp.clone(), Arc::from("small"));
         assert_eq!(
             cache.bytes,
             cache
