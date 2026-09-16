@@ -89,8 +89,8 @@ Consequences worth knowing:
 
 - **UTF-16 files are not searched** (their NUL bytes fail the sniff).
   ripgrep transcodes BOM-marked UTF-16; fxi does not.
-- Non-UTF-8 (but text-like) files are searchable by trigram/substring, but
-  produce no identifier tokens.
+- Only valid UTF-8 content is indexed and searched. Other encodings need
+  conversion first; byte-oriented matching and automatic transcoding are not supported.
 - Files the indexer rejects are remembered (with mtime) in `meta.json`, so
   incremental scans skip them until they change.
 

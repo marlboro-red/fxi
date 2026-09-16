@@ -65,6 +65,8 @@ fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option
         return None;
     }
 
+    let text = std::str::from_utf8(content).ok()?;
+
     // Detect language from extension
     let ext = rel_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let language = Language::from_extension(ext);
@@ -79,12 +81,7 @@ fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option
     let trigrams: Vec<u32> = extract_trigrams(content);
 
     // Extract tokens and token positions in a single scan of the content
-    let (tokens, token_positions): (Vec<String>, Vec<(u32, u32)>) =
-        if let Ok(text) = std::str::from_utf8(content) {
-            extract_tokens_and_positions(text)
-        } else {
-            (Vec::new(), Vec::new())
-        };
+    let (tokens, token_positions) = extract_tokens_and_positions(text);
 
     // Build line map
     let line_offsets = build_line_map(content);
@@ -936,5 +933,16 @@ pub fn build_index_auto(start_path: &Path, force: bool, chunk_size: Option<usize
         // Try incremental update first
         update_index(&root)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+
+    #[test]
+    fn index_eligibility_matches_utf8_verification() {
+        assert!(process_file_content("a.txt".into(), b"needle \xff", 0).is_none());
+        assert!(process_file_content("a.txt".into(), "needle K Σ".as_bytes(), 0).is_some());
     }
 }
