@@ -468,7 +468,7 @@ impl<'a> QueryExecutor<'a> {
                     }
 
                     // Read an owned snapshot of editable file content
-                    let content = read_file_content(&full_path)?;
+                    let content = self.reader.read_file_cached(&full_path)?;
 
                     // Check if file has ANY match
                     if has_match(&content) {
@@ -1163,7 +1163,7 @@ impl<'a> QueryExecutor<'a> {
                         return None;
                     }
 
-                    let content = read_file_content(&full_path)?;
+                    let content = self.reader.read_file_cached(&full_path)?;
 
                     let mut file_matches =
                         Self::verify_content_static(&content, verification, doc_id);

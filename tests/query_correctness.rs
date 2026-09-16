@@ -332,3 +332,35 @@ fn hir_candidates_match_brute_force_regex_before_and_after_compaction() {
     }
     fxi::utils::remove_index(dir.path()).unwrap();
 }
+
+#[test]
+fn parallel_cached_verification_observes_rewrites_and_deletions() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..128 {
+        fs::write(dir.path().join(format!("f{i}.txt")), "cached_needle\n").unwrap();
+    }
+    build_index_with_progress(dir.path(), true, true).unwrap();
+    let reader = IndexReader::open(dir.path()).unwrap();
+    let executor = QueryExecutor::new(&reader);
+    let query = parse_query("cached_needle");
+    for _ in 0..2 {
+        assert_eq!(executor.execute_files_only(&query, 0).unwrap().len(), 128);
+    }
+    for i in 0..128 {
+        let path = dir.path().join(format!("f{i}.txt"));
+        if i % 2 == 0 {
+            fs::remove_file(path).unwrap();
+        } else {
+            fs::write(path, "other_content\n").unwrap();
+        }
+    }
+    assert!(executor.execute_files_only(&query, 0).unwrap().is_empty());
+    assert!(
+        executor
+            .execute_with_content(&query, 0, 0)
+            .unwrap()
+            .is_empty()
+    );
+    drop(reader);
+    fxi::utils::remove_index(dir.path()).unwrap();
+}

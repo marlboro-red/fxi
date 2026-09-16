@@ -334,8 +334,38 @@ impl FileStamp {
     }
 }
 
-/// Default file cache size (number of files to cache)
-const DEFAULT_FILE_CACHE_SIZE: usize = 256;
+/// Sharded cache: at most 64 MiB retained text and 4096 entries per reader.
+const FILE_CACHE_SHARDS: usize = 16;
+const FILE_CACHE_SHARD_ENTRIES: usize = 256;
+const FILE_CACHE_SHARD_BYTES: usize = 4 * 1024 * 1024;
+
+/// Byte and entry limits both apply, including replacement accounting.
+struct ContentCache {
+    entries: LruCache<PathBuf, (FileStamp, Arc<str>)>,
+    bytes: usize,
+}
+
+impl ContentCache {
+    fn new() -> Self {
+        Self {
+            entries: LruCache::new(NonZeroUsize::new(FILE_CACHE_SHARD_ENTRIES).unwrap()),
+            bytes: 0,
+        }
+    }
+
+    fn put(&mut self, path: PathBuf, stamp: FileStamp, content: Arc<str>) {
+        let size = content.len();
+        if let Some((_, (_, old))) = self.entries.push(path, (stamp, content)) {
+            self.bytes -= old.len();
+        }
+        self.bytes += size;
+        while self.bytes > FILE_CACHE_SHARD_BYTES {
+            if let Some((_, (_, old))) = self.entries.pop_lru() {
+                self.bytes -= old.len();
+            }
+        }
+    }
+}
 
 /// Maximum file size to cache (files larger than this are not cached)
 const MAX_CACHEABLE_FILE_SIZE: usize = 512 * 1024; // 512KB
@@ -371,7 +401,8 @@ pub struct IndexReader {
     /// O(1) stop-gram lookup (converted from Vec on load)
     stop_grams: AHashSet<Trigram>,
     /// LRU cache for file contents (speeds up repeated queries on same files)
-    file_cache: Mutex<LruCache<PathBuf, (FileStamp, Arc<str>)>>,
+    file_cache: [Mutex<ContentCache>; FILE_CACHE_SHARDS],
+    file_cache_hasher: ahash::RandomState,
     /// Lazily-built bitmap of valid doc IDs. Safe to cache: documents are
     /// immutable after open (index updates swap in a whole new reader).
     valid_docs_cache: OnceLock<RoaringBitmap>,
@@ -452,9 +483,7 @@ impl IndexReader {
         let stop_grams: AHashSet<Trigram> = meta.stop_grams.iter().copied().collect();
 
         // Initialize file content cache
-        let file_cache = Mutex::new(LruCache::new(
-            NonZeroUsize::new(DEFAULT_FILE_CACHE_SIZE).unwrap(),
-        ));
+        let file_cache = std::array::from_fn(|_| Mutex::new(ContentCache::new()));
 
         Ok(Self {
             _generation_lease: generation_lease,
@@ -467,6 +496,7 @@ impl IndexReader {
             segments,
             stop_grams,
             file_cache,
+            file_cache_hasher: ahash::RandomState::new(),
             valid_docs_cache: OnceLock::new(),
         })
     }
@@ -829,9 +859,11 @@ impl IndexReader {
     /// plain Strings without the Arc conversion copy.
     /// Returns None if the file cannot be read.
     pub fn read_file_cached(&self, path: &Path) -> Option<FileContent> {
+        let shard =
+            &self.file_cache[self.file_cache_hasher.hash_one(path) as usize % FILE_CACHE_SHARDS];
         let stamp = FileStamp::from_metadata(&std::fs::metadata(path).ok()?);
-        if let Ok(mut cache) = self.file_cache.lock()
-            && let Some((cached_stamp, content)) = cache.get(path)
+        if let Ok(mut cache) = shard.lock()
+            && let Some((cached_stamp, content)) = cache.entries.get(path)
             && *cached_stamp == stamp
         {
             return Some(FileContent::Cached(Arc::clone(content)));
@@ -844,8 +876,8 @@ impl IndexReader {
         let after = FileStamp::from_metadata(&file.metadata().ok()?);
         if content.len() <= MAX_CACHEABLE_FILE_SIZE && before == after {
             let content: Arc<str> = content.into();
-            if let Ok(mut cache) = self.file_cache.lock() {
-                cache.put(path.to_path_buf(), (after, Arc::clone(&content)));
+            if let Ok(mut cache) = shard.lock() {
+                cache.put(path.to_path_buf(), after, Arc::clone(&content));
             }
             Some(FileContent::Cached(content))
         } else {
@@ -865,8 +897,11 @@ impl IndexReader {
     /// Call this after index updates to ensure stale content isn't served.
     #[allow(dead_code)]
     pub fn clear_file_cache(&self) {
-        if let Ok(mut cache) = self.file_cache.lock() {
-            cache.clear();
+        for shard in &self.file_cache {
+            if let Ok(mut cache) = shard.lock() {
+                cache.entries.clear();
+                cache.bytes = 0;
+            }
         }
     }
 }
@@ -1343,5 +1378,40 @@ mod tests {
                     .starts_with(root_path.canonicalize().unwrap()),
             "Path should be within root directory"
         );
+    }
+}
+
+#[cfg(test)]
+mod cache_budget_tests {
+    use super::*;
+
+    #[test]
+    fn cache_accounts_for_replacement_and_byte_eviction() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let stamp = FileStamp::from_metadata(&file.as_file().metadata().unwrap());
+        let mut cache = ContentCache::new();
+        for i in 0..20 {
+            cache.put(
+                format!("f{i}").into(),
+                stamp.clone(),
+                Arc::from("x".repeat(MAX_CACHEABLE_FILE_SIZE)),
+            );
+            assert!(cache.bytes <= FILE_CACHE_SHARD_BYTES);
+        }
+        assert!(!cache.entries.contains(Path::new("f0")));
+        cache.put("f19".into(), stamp.clone(), Arc::from("small"));
+        assert_eq!(
+            cache.bytes,
+            cache
+                .entries
+                .iter()
+                .map(|(_, (_, text))| text.len())
+                .sum::<usize>()
+        );
+        for i in 0..FILE_CACHE_SHARD_ENTRIES + 1 {
+            cache.put(format!("small{i}").into(), stamp.clone(), Arc::from("x"));
+        }
+        assert_eq!(cache.entries.len(), FILE_CACHE_SHARD_ENTRIES);
+        assert_eq!(cache.bytes, FILE_CACHE_SHARD_ENTRIES);
     }
 }
