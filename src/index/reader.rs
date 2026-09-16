@@ -1,7 +1,5 @@
 use crate::index::types::*;
-use crate::utils::{
-    BloomFilter, delta_decode, delta_decode_bitmap, delta_decode_intersect, get_index_dir,
-};
+use crate::utils::{BloomFilter, delta_decode, delta_decode_bitmap, delta_decode_intersect};
 use ahash::AHashSet;
 use anyhow::{Context, Result};
 use lru::LruCache;
@@ -344,6 +342,7 @@ impl std::ops::Deref for FileContent {
 
 /// Memory-mapped index reader for fast queries
 pub struct IndexReader {
+    _generation_lease: Option<File>,
     root_path: PathBuf,
     #[allow(dead_code)]
     index_path: PathBuf,
@@ -367,7 +366,7 @@ impl IndexReader {
     /// Open an existing index with parallel loading for maximum startup speed
     pub fn open(root_path: &Path) -> Result<Self> {
         let root_path = root_path.canonicalize()?;
-        let index_path = get_index_dir(&root_path)?;
+        let (index_path, generation_lease) = crate::index::generation::pin(&root_path)?;
 
         if !index_path.exists() {
             anyhow::bail!("No index found. Run 'fxi index' first.");
@@ -443,6 +442,7 @@ impl IndexReader {
         ));
 
         Ok(Self {
+            _generation_lease: generation_lease,
             root_path,
             index_path,
             meta,

@@ -56,3 +56,5 @@ pub mod writer;
 pub use reader::IndexReader;
 #[allow(unused_imports)]
 pub use types::*;
+
+pub(crate) mod generation;

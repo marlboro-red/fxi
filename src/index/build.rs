@@ -3,7 +3,7 @@ use crate::index::types::{DocFlags, IndexConfig, IndexMeta, Language, SegmentId}
 use crate::index::writer::ChunkedIndexWriter;
 use crate::utils::{
     extract_tokens_and_positions, extract_trigrams, find_codebase_root, get_index_dir, is_binary,
-    is_minified, remove_index,
+    is_minified,
 };
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
@@ -162,17 +162,11 @@ pub fn build_index_with_progress(root_path: &Path, force: bool, silent: bool) ->
 /// Build or rebuild the search index with all options
 pub fn build_index_with_options(
     root_path: &Path,
-    force: bool,
+    _force: bool,
     silent: bool,
     chunk_size_override: Option<usize>,
 ) -> Result<()> {
     let root = root_path.canonicalize().context("Invalid path")?;
-    let index_path = get_index_dir(&root)?;
-
-    // Check if we should force rebuild
-    if force && index_path.exists() {
-        remove_index(&root).context("Failed to remove existing index")?;
-    }
 
     let config = IndexConfig::default();
     let max_file_size = config.max_file_size;
@@ -532,7 +526,7 @@ pub fn build_index_with_options(
     }
 
     if !silent {
-        println!("Index stored at: {}", index_path.display());
+        println!("Index stored at: {}", get_index_dir(&root)?.display());
     }
 
     let errors = error_count.load(Ordering::Relaxed);
@@ -904,7 +898,7 @@ fn perform_incremental_update(root: &Path, meta: &IndexMeta, diff: IndexDiff) ->
         // Nothing indexable, but the rejected-file list may have grown (e.g.
         // newly seen binaries): persist it so the next scan skips them
         if meta.rejected_files != old_rejected_files {
-            crate::index::writer::write_meta_atomic(&get_index_dir(root)?, &meta)?;
+            writer.finalize(&mut meta)?;
         }
         println!("No indexable changes to apply.");
         return Ok(());

@@ -8,7 +8,7 @@
 //! nested operations (an incremental update escalating to a full rebuild,
 //! or triggering compaction) run under their caller's lock.
 
-use crate::utils::app_data::get_index_dir;
+use crate::utils::app_data::get_index_container;
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use std::fs::{self, File};
@@ -28,7 +28,7 @@ impl IndexLock {
     /// not inside it: a forced rebuild deletes the index directory while
     /// holding the lock.
     pub fn acquire(root: &Path) -> Result<IndexLock> {
-        let index_dir = get_index_dir(root)?;
+        let index_dir = get_index_container(root)?;
         let lock_path = index_dir.with_extension("lock");
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)?;
@@ -69,7 +69,7 @@ mod tests {
 
         // A second lock attempt on the same root must not succeed while the
         // first is held (probe with try_lock on the same path)
-        let lock_path = get_index_dir(root).unwrap().with_extension("lock");
+        let lock_path = get_index_container(root).unwrap().with_extension("lock");
         let probe = File::create(&lock_path).unwrap();
         assert!(
             probe.try_lock_exclusive().is_err(),
@@ -84,7 +84,7 @@ mod tests {
 
         drop(IndexLock::acquire(root).unwrap());
 
-        let lock_path = get_index_dir(root).unwrap().with_extension("lock");
+        let lock_path = get_index_container(root).unwrap().with_extension("lock");
         let probe = File::create(&lock_path).unwrap();
         assert!(probe.try_lock_exclusive().is_ok());
     }

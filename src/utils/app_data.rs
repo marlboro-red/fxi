@@ -39,6 +39,11 @@ fn get_indexes_dir() -> Result<PathBuf> {
 
 /// Get the index directory for a specific codebase root
 pub fn get_index_dir(root_path: &Path) -> Result<PathBuf> {
+    crate::index::generation::resolve(&get_index_container(root_path)?)
+}
+
+/// Stable container and lock identity, independent of published generation.
+pub fn get_index_container(root_path: &Path) -> Result<PathBuf> {
     let indexes_dir = get_indexes_dir()?;
 
     // Create a unique folder name from the root path
@@ -148,7 +153,10 @@ pub fn list_indexed_codebases() -> Result<Vec<IndexLocation>> {
 
     for entry in fs::read_dir(&indexes_dir)? {
         let entry = entry?;
-        let path = entry.path();
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = crate::index::generation::resolve(&entry.path())?;
 
         if path.is_dir() {
             let meta_path = path.join("meta.json");
@@ -171,7 +179,7 @@ pub fn list_indexed_codebases() -> Result<Vec<IndexLocation>> {
 
 /// Remove an index for a codebase
 pub fn remove_index(root_path: &Path) -> Result<()> {
-    let index_dir = get_index_dir(root_path)?;
+    let index_dir = get_index_container(root_path)?;
     if index_dir.exists() {
         fs::remove_dir_all(&index_dir)?;
     }

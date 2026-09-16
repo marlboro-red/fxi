@@ -121,8 +121,9 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
     eprintln!("  Computed {} stop-grams", stop_grams.len());
 
     // Step 4: Write merged segment atomically
+    let mut generation = crate::index::generation::Generation::new(&root)?;
     let new_segment_id: SegmentId = 1;
-    let segments_path = index_path.join("segments");
+    let segments_path = generation.path.join("segments");
     let new_segment_path = segments_path.join(format!("seg_{:04}", new_segment_id));
 
     // Create new segment directory
@@ -146,10 +147,10 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
 
     // Step 5: Write global files atomically
     // docs.bin.tmp -> docs.bin
-    write_documents_atomic(&index_path, &remapping.valid_docs)?;
+    write_documents_atomic(&generation.path, &remapping.valid_docs)?;
 
     // paths.bin.tmp -> paths.bin
-    write_paths_atomic(&index_path, &remapping.valid_paths)?;
+    write_paths_atomic(&generation.path, &remapping.valid_paths)?;
 
     // Step 6: Update and write meta.json (commits the transaction)
     let now = SystemTime::now()
@@ -175,21 +176,9 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
         // unaffected and must survive the meta rewrite
         rejected_files: meta.rejected_files,
     };
-    write_meta_atomic(&index_path, &new_meta)?;
+    write_meta_atomic(&generation.path, &new_meta)?;
+    generation.publish()?;
     eprintln!("  Updated meta.json");
-
-    // Step 7: Delete old segments (safe now that meta is committed)
-    for seg_id in &segment_ids {
-        if *seg_id == new_segment_id {
-            continue; // Don't delete our new segment
-        }
-        let old_seg_path = segments_path.join(format!("seg_{:04}", seg_id));
-        if old_seg_path.exists() {
-            if let Err(e) = fs::remove_dir_all(&old_seg_path) {
-                eprintln!("  Warning: failed to remove old segment {}: {}", seg_id, e);
-            }
-        }
-    }
 
     eprintln!(
         "Merge complete: {} docs in 1 segment (was {} segments)",

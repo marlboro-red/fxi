@@ -122,3 +122,90 @@ fn truncated_postings_fail_open() {
         assert!(IndexReader::open(fixture.0.path()).is_err(), "{name}");
     }
 }
+
+#[test]
+fn published_readers_remain_valid_across_compaction_and_rebuild() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.path().join("b.txt"), "other text\n").unwrap();
+    build_index_with_options(fixture.0.path(), true, true, Some(1)).unwrap();
+    let old_path = fixture.index();
+    let reader = IndexReader::open(fixture.0.path()).unwrap();
+    let postings = reader.get_token_docs("vector");
+    let old_bytes = fs::read(old_path.join("segments/seg_0001/grams.postings")).unwrap();
+    fxi::index::compact::merge_segments(fixture.0.path()).unwrap();
+    assert_ne!(old_path, fixture.index());
+    assert_eq!(reader.get_token_docs("vector"), postings);
+    assert_eq!(
+        fs::read(old_path.join("segments/seg_0001/grams.postings")).unwrap(),
+        old_bytes
+    );
+    for id in postings.iter() {
+        assert!(reader.get_line_map(id).is_some());
+    }
+    build_index_with_options(fixture.0.path(), true, true, None).unwrap();
+    assert_eq!(reader.get_token_docs("vector"), postings);
+    assert!(old_path.exists(), "active reader must pin its generation");
+    drop(reader);
+    build_index_with_options(fixture.0.path(), true, true, None).unwrap();
+    assert!(
+        !old_path.exists(),
+        "unleased generations should be reclaimed"
+    );
+}
+
+#[test]
+fn failed_rebuild_does_not_replace_published_index() {
+    let fixture = Fixture::new();
+    let published = fixture.index();
+    let mut writer = fxi::index::writer::ChunkedIndexWriter::new(
+        fixture.0.path(),
+        fxi::index::types::IndexConfig::default(),
+    )
+    .unwrap();
+    let staging = writer.index_path().to_path_buf();
+    fs::create_dir(staging.join("meta.json")).unwrap();
+    assert!(writer.finalize().is_err());
+    assert_eq!(fixture.index(), published);
+    assert_eq!(
+        IndexReader::open(fixture.0.path()).unwrap().meta.doc_count,
+        1
+    );
+    drop(writer);
+    assert!(!staging.exists());
+}
+
+#[test]
+fn deletion_only_delta_publishes_no_missing_segment() {
+    let fixture = Fixture::new();
+    let mut meta = IndexReader::open(fixture.0.path()).unwrap().meta.clone();
+    let mut writer = fxi::index::writer::DeltaSegmentWriter::new(fixture.0.path(), 2).unwrap();
+    writer.mark_tombstone(std::path::Path::new("a.txt"));
+    writer.finalize(&mut meta).unwrap();
+    let reader = IndexReader::open(fixture.0.path()).unwrap();
+    assert!(reader.valid_doc_ids().is_empty());
+    assert!(reader.meta.delta_segments.is_empty());
+}
+
+#[test]
+fn concurrent_opens_observe_complete_rebuild_generations() {
+    let fixture = Fixture::new();
+    let root = fixture.0.path().to_path_buf();
+    let worker = std::thread::spawn(move || {
+        for _ in 0..8 {
+            build_index_with_options(&root, true, true, None).unwrap();
+        }
+    });
+    for _ in 0..100 {
+        let reader = IndexReader::open(fixture.0.path()).unwrap();
+        assert_eq!(reader.meta.doc_count, 1);
+        let docs = reader.get_token_docs("vector");
+        assert_eq!(docs.len(), 1);
+        for id in docs {
+            assert_eq!(
+                reader.get_path(reader.get_document(id).unwrap()).unwrap(),
+                std::path::Path::new("a.txt")
+            );
+        }
+    }
+    worker.join().unwrap();
+}

@@ -54,6 +54,7 @@ pub(crate) fn select_stop_grams(
 /// Segment writes happen asynchronously in a background thread to overlap
 /// I/O with processing of the next chunk.
 pub struct ChunkedIndexWriter {
+    generation: crate::index::generation::Generation,
     root_path: PathBuf,
     index_path: PathBuf,
     config: IndexConfig,
@@ -76,11 +77,22 @@ pub struct ChunkedIndexWriter {
     completion_receiver: Option<Receiver<SegmentId>>,
 }
 
+impl Drop for ChunkedIndexWriter {
+    fn drop(&mut self) {
+        // Finish queued writes before the unpublished generation is removed.
+        self.write_sender.take();
+        if let Some(thread) = self.write_thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 impl ChunkedIndexWriter {
     /// Create a new chunked index writer
     pub fn new(root_path: &Path, config: IndexConfig) -> Result<Self> {
         let root_path = root_path.canonicalize()?;
-        let index_path = get_index_dir(&root_path)?;
+        let generation = crate::index::generation::Generation::new(&root_path)?;
+        let index_path = generation.path.clone();
 
         // Create index directory structure
         fs::create_dir_all(&index_path)?;
@@ -112,6 +124,7 @@ impl ChunkedIndexWriter {
         });
 
         Ok(Self {
+            generation,
             root_path,
             index_path,
             config,
@@ -736,6 +749,7 @@ impl ChunkedIndexWriter {
 
         // Write metadata
         self.write_meta(&stop_grams)?;
+        self.generation.publish()?;
 
         Ok(())
     }
@@ -850,6 +864,7 @@ impl ChunkedIndexWriter {
 /// Delta segment writer for incremental index updates.
 /// Loads existing index data and writes a new delta segment containing only changed files.
 pub struct DeltaSegmentWriter {
+    generation: crate::index::generation::Generation,
     #[allow(dead_code)]
     root_path: PathBuf,
     index_path: PathBuf,
@@ -886,6 +901,10 @@ impl DeltaSegmentWriter {
         let existing_documents = crate::index::reader::read_documents(&index_path)?;
         let existing_paths = crate::index::reader::read_paths(&index_path)?;
 
+        let generation = crate::index::generation::Generation::new(&root_path)?;
+        generation.inherit_segments(&index_path)?;
+        let index_path = generation.path.clone();
+
         // Build path lookup map
         let mut path_to_id: HashMap<PathBuf, PathId> = HashMap::new();
         for (idx, path) in existing_paths.iter().enumerate() {
@@ -902,6 +921,7 @@ impl DeltaSegmentWriter {
         let next_path_id = existing_paths.len() as PathId;
 
         Ok(Self {
+            generation,
             root_path,
             index_path,
             segment_id,
@@ -1005,19 +1025,16 @@ impl DeltaSegmentWriter {
 
     /// Finalize the delta segment - write all data atomically.
     /// Returns the updated IndexMeta.
-    pub fn finalize(self, meta: &mut IndexMeta) -> Result<()> {
-        // If no changes, nothing to do
-        if !self.has_changes() {
-            return Ok(());
-        }
-
+    pub fn finalize(mut self, meta: &mut IndexMeta) -> Result<()> {
         // Create segment directory if we have new documents
-        if !self.new_documents.is_empty() {
+        let has_new_documents = !self.new_documents.is_empty();
+        if has_new_documents {
             let segment_path = self
                 .index_path
                 .join("segments")
                 .join(format!("seg_{:04}", self.segment_id));
-            fs::create_dir_all(&segment_path)?;
+            fs::create_dir_all(segment_path.parent().unwrap())?;
+            fs::create_dir(&segment_path)?;
 
             // Write segment files
             self.write_segment_files(&segment_path)?;
@@ -1052,8 +1069,11 @@ impl DeltaSegmentWriter {
 
         // Update meta
         meta.doc_count = all_documents.len() as u32;
-        meta.delta_segments.push(self.segment_id);
-        meta.segment_count = 1 + meta.delta_segments.len() as u16;
+        if has_new_documents {
+            meta.delta_segments.push(self.segment_id);
+        }
+        meta.segment_count =
+            u16::from(meta.base_segment.is_some()) + meta.delta_segments.len() as u16;
         meta.updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1068,6 +1088,7 @@ impl DeltaSegmentWriter {
 
         // Write meta.json atomically (commits the transaction)
         write_meta_atomic(&self.index_path, meta)?;
+        self.generation.publish()?;
 
         Ok(())
     }
