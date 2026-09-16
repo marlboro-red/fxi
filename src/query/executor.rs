@@ -520,14 +520,9 @@ impl<'a> QueryExecutor<'a> {
                 .is_some();
         }
 
-        for line in content.lines() {
-            let line_lower = line.to_lowercase();
-            if finder.find(line_lower.as_bytes()).is_some() {
-                return true;
-            }
-        }
-
-        false
+        get_regex_cache()
+            .get_or_compile(&format!("(?i:{})", regex::escape(text)))
+            .is_some_and(|re| content.lines().any(|line| re.is_match(line)))
     }
 
     /// Extract context lines around a match.
@@ -1268,80 +1263,32 @@ impl<'a> QueryExecutor<'a> {
 
     /// Find proximity matches: all terms must appear within distance lines of each other (static)
     ///
-    /// OPTIMIZATION: Lowercases the content once, then locates each term with a
-    /// single SIMD substring search over the whole haystack. Match offsets are
-    /// mapped to line numbers via precomputed line starts; newlines are
-    /// unaffected by lowercasing, so line numbers computed on the lowered copy
-    /// are valid for the original content.
     fn find_proximity_matches_static(
         content: &str,
         terms: &[String],
         distance: u32,
         _doc_id: DocId,
     ) -> Vec<(u32, String, usize, usize)> {
-        use memchr::memmem;
-
         if terms.is_empty() {
             return Vec::new();
         }
 
-        // Pre-lowercase all terms once
-        let terms_lower: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
-
-        // A term containing a line break can never match within a single line
-        if terms_lower
-            .iter()
-            .any(|t| t.contains('\n') || t.contains('\r'))
-        {
-            return Vec::new();
-        }
-
-        let content_lower = if content.is_ascii() {
-            content.to_ascii_lowercase()
-        } else {
-            content.to_lowercase()
-        };
-        let lower_bytes = content_lower.as_bytes();
-
-        // Line start offsets in the lowered content (for offset → line mapping)
-        let mut line_starts: Vec<usize> = Vec::with_capacity(256);
-        line_starts.push(0);
-        for nl in memchr::memchr_iter(b'\n', lower_bytes) {
-            line_starts.push(nl + 1);
-        }
-
-        // For each term, the sorted, deduped 1-based line numbers where it
-        // appears; for the first term, also the column of its first occurrence
-        // in each of those lines (byte offset in the lowered line).
-        let mut term_lines: Vec<Vec<u32>> = Vec::with_capacity(terms.len());
-        let mut first_term_cols: Vec<usize> = Vec::new();
-
-        for (term_idx, term_lower) in terms_lower.iter().enumerate() {
-            let finder = memmem::Finder::new(term_lower.as_bytes());
-            let mut lines_with_term: Vec<u32> = Vec::new();
-            let mut line_cursor = 0usize;
-
-            for pos in finder.find_iter(lower_bytes) {
-                // Match positions are ascending, so the cursor only moves forward
-                while line_cursor + 1 < line_starts.len() && line_starts[line_cursor + 1] <= pos {
-                    line_cursor += 1;
-                }
-                let line_num = (line_cursor + 1) as u32;
-                if lines_with_term.last() == Some(&line_num) {
-                    continue;
-                }
-                lines_with_term.push(line_num);
-                if term_idx == 0 {
-                    first_term_cols.push(pos - line_starts[line_cursor]);
-                }
-            }
-
-            if lines_with_term.is_empty() {
-                // One of the terms doesn't exist in the file - early exit
+        // Reuse literal matching so every reported span refers to original
+        // bytes, including Unicode folds with different encoded lengths.
+        let mut term_lines = Vec::with_capacity(terms.len());
+        let mut first_term_spans = Vec::new();
+        for (idx, term) in terms.iter().enumerate() {
+            let hits = Self::find_literal_matches_static(content, term, false, _doc_id);
+            if hits.is_empty() {
                 return Vec::new();
             }
-
-            term_lines.push(lines_with_term);
+            if idx == 0 {
+                first_term_spans = hits
+                    .iter()
+                    .map(|(_, _, start, end)| (*start, *end))
+                    .collect();
+            }
+            term_lines.push(hits.iter().map(|(line, _, _, _)| *line).collect::<Vec<_>>());
         }
 
         // Find line combinations where all terms are within distance
@@ -1354,7 +1301,7 @@ impl<'a> QueryExecutor<'a> {
             // (each term's line list is sorted, so binary search the window)
             let all_within_distance = term_lines[1..].iter().all(|other_term_lines| {
                 let lo = first_line.saturating_sub(distance);
-                let hi = first_line + distance;
+                let hi = first_line.saturating_add(distance);
                 let i = other_term_lines.partition_point(|&l| l < lo);
                 i < other_term_lines.len() && other_term_lines[i] <= hi
             });
@@ -1363,8 +1310,8 @@ impl<'a> QueryExecutor<'a> {
                 // Found a valid proximity match - return the first term's match
                 let line_idx = (first_line - 1) as usize;
                 if let Some(&line) = lines.get(line_idx) {
-                    let pos = first_term_cols[idx];
-                    matches.push((first_line, line.to_string(), pos, pos + terms[0].len()));
+                    let (start, end) = first_term_spans[idx];
+                    matches.push((first_line, line.to_string(), start, end));
                 }
             }
         }
@@ -1442,34 +1389,12 @@ impl<'a> QueryExecutor<'a> {
                     ));
                 }
             } else {
-                // Unicode path: lowercasing changes byte offsets, so match
-                // line by line. ASCII lines reuse a scratch buffer to avoid
-                // a String allocation per line.
-                let mut scratch: Vec<u8> = Vec::new();
-
-                for (line_num, line) in content.lines().enumerate() {
-                    // Quick rejection: if line is shorter than needle, skip
-                    if line.len() < needle_lower.len() {
-                        continue;
-                    }
-
-                    let pos = if line.is_ascii() && needle.is_ascii() {
-                        scratch.clear();
-                        scratch.extend(line.as_bytes().iter().map(|b| b.to_ascii_lowercase()));
-                        finder.find(&scratch)
-                    } else {
-                        let line_lower = line.to_lowercase();
-                        finder.find(line_lower.as_bytes())
-                    };
-
-                    if let Some(pos) = pos {
-                        matches.push((
-                            (line_num + 1) as u32,
-                            line.to_string(),
-                            pos,
-                            pos + needle.len(),
-                        ));
-                    }
+                // Match original text: Unicode folding can change byte length.
+                // Regex's case-insensitive matcher returns original UTF-8 spans.
+                if let Some(re) =
+                    get_regex_cache().get_or_compile(&format!("(?i:{})", regex::escape(needle)))
+                {
+                    return Self::find_regex_matches_static(content, &re, _doc_id);
                 }
             }
         }
@@ -1548,6 +1473,24 @@ mod tests {
     use tempfile::TempDir;
 
     /// Create a test index with multiple files for comprehensive testing
+    #[test]
+    fn unicode_literal_and_proximity_spans_use_original_bytes() {
+        for (content, needle, expected) in [
+            ("K foo", "foo", "foo"),
+            ("K foo", "k", "K"),
+            ("İ foo", "foo", "foo"),
+            ("Σ ς σ", "σ", "Σ"),
+        ] {
+            let hits = QueryExecutor::find_literal_matches_static(content, needle, false, 0);
+            assert_eq!(hits.len(), 1);
+            assert_eq!(&content[hits[0].2..hits[0].3], expected);
+            assert!(QueryExecutor::has_literal_match(content, needle));
+            let near =
+                QueryExecutor::find_proximity_matches_static(content, &[needle.into()], 0, 0);
+            assert_eq!(near, hits);
+        }
+    }
+
     fn create_test_index() -> (TempDir, PathBuf, IndexReader) {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let root_path = temp_dir.path().to_path_buf();
