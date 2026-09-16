@@ -87,10 +87,10 @@ impl CachedIndex {
 
     /// Stop the file watcher if running
     fn stop_watcher(&self) {
-        if let Ok(mut handle) = self.watcher_handle.lock() {
-            if let Some(mut h) = handle.take() {
-                h.stop();
-            }
+        if let Ok(mut handle) = self.watcher_handle.lock()
+            && let Some(mut h) = handle.take()
+        {
+            h.stop();
         }
     }
 }
@@ -294,10 +294,10 @@ impl IndexServer {
             pending.remove(root_path).map(|p| p.batch)
         };
 
-        if let Some(batch) = batch {
-            if !batch.is_empty() {
-                self.handle_changes(root_path.clone(), batch);
-            }
+        if let Some(batch) = batch
+            && !batch.is_empty()
+        {
+            self.handle_changes(root_path.clone(), batch);
         }
     }
 
@@ -454,10 +454,10 @@ impl IndexServer {
 
         // Store the handle
         let indexes = self.indexes.read().unwrap();
-        if let Some(cached) = indexes.get(root_path) {
-            if let Ok(mut watcher_handle) = cached.watcher_handle.lock() {
-                *watcher_handle = Some(handle);
-            }
+        if let Some(cached) = indexes.get(root_path)
+            && let Ok(mut watcher_handle) = cached.watcher_handle.lock()
+        {
+            *watcher_handle = Some(handle);
         }
     }
 
@@ -946,7 +946,7 @@ impl IndexServer {
                 // must be picked up by one incremental scan or the index
                 // would stay stale until a manual `fxi index`
                 eprintln!("fxid: reconciling index for {}", root_path.display());
-                let _lock = crate::utils::IndexLock::acquire(root_path);
+                let _lock = crate::utils::IndexLock::acquire(root_path)?;
                 match crate::index::build::update_index(root_path) {
                     Ok(_) => {
                         // Swap in a fresh reader in case the scan changed it
@@ -1051,13 +1051,14 @@ fn run_watcher_thread(
         }
 
         // Check if we should flush the debouncer
-        if debouncer.has_pending() && debouncer.is_ready() {
-            if let Some(batch) = debouncer.flush() {
-                let _ = tx.send(WatcherMessage::ChangesReady {
-                    root_path: root_path.clone(),
-                    batch,
-                });
-            }
+        if debouncer.has_pending()
+            && debouncer.is_ready()
+            && let Some(batch) = debouncer.flush()
+        {
+            let _ = tx.send(WatcherMessage::ChangesReady {
+                root_path: root_path.clone(),
+                batch,
+            });
         }
     }
 
