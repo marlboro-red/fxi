@@ -44,18 +44,34 @@ pub fn is_known_binary_ext(ext: &str) -> bool {
 }
 
 /// Result of processing a single file (computed in parallel)
-pub struct ProcessedFile {
+pub struct ProcessedFile<T = Vec<String>> {
     pub rel_path: PathBuf,
     pub mtime: u64,
     pub size: u64,
     pub language: Language,
     pub flags: DocFlags,
     pub trigrams: Vec<u32>,
-    pub tokens: Vec<String>,
+    pub tokens: T,
     pub line_offsets: Vec<u32>,
     /// Token positions for positional phrase queries:
     /// (index into `tokens`, word_position)
     pub token_positions: Vec<(u32, u32)>,
+}
+
+impl ProcessedFile {
+    fn pack_tokens(self) -> ProcessedFile<crate::utils::PackedTokens> {
+        ProcessedFile {
+            rel_path: self.rel_path,
+            mtime: self.mtime,
+            size: self.size,
+            language: self.language,
+            flags: self.flags,
+            trigrams: self.trigrams,
+            tokens: self.tokens.into(),
+            line_offsets: self.line_offsets,
+            token_positions: self.token_positions,
+        }
+    }
 }
 
 /// Process a single file's content (can run in parallel)
@@ -322,7 +338,7 @@ pub fn build_index_with_options(
         let rejected_files_clone = rejected_files.clone();
 
         // Process chunk files in parallel
-        let processed_files: Vec<ProcessedFile> = chunk
+        let processed_files: Vec<ProcessedFile<crate::utils::PackedTokens>> = chunk
             .par_iter()
             .filter_map(|(full_path, rel_path)| {
                 // Fast-path for known binary extensions - skip reading content entirely
@@ -402,7 +418,8 @@ pub fn build_index_with_options(
                     .unwrap_or(0);
 
                 // Process file content (trigrams, tokens, line map)
-                let result = process_file_content(rel_path.clone(), &content, mtime);
+                let result = process_file_content(rel_path.clone(), &content, mtime)
+                    .map(ProcessedFile::pack_tokens);
 
                 if result.is_some() {
                     total_processed_clone.fetch_add(1, Ordering::Relaxed);
@@ -439,7 +456,7 @@ pub fn build_index_with_options(
         }
 
         // Write this chunk as a segment
-        chunked_writer.write_chunk(segment_id, processed_files)?;
+        chunked_writer.write_packed_chunk(segment_id, processed_files)?;
 
         // Memory freed here - processed_files dropped
     }

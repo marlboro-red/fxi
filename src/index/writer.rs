@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 struct AssignedFile {
     doc_id: DocId,
     trigrams: Vec<u32>,
-    tokens: Vec<String>,
+    tokens: crate::utils::PackedTokens,
     line_offsets: Vec<u32>,
     /// (index into `tokens`, word_position)
     token_positions: Vec<(u32, u32)>,
@@ -44,9 +44,14 @@ fn invert_token_postings(files: &mut [AssignedFile]) -> InvertedTokens {
     let mut local_ids = Vec::with_capacity(files.len());
     for file in files.iter_mut() {
         let mut local = Vec::with_capacity(file.tokens.len());
-        for token in std::mem::take(&mut file.tokens) {
+        for token in std::mem::take(&mut file.tokens).iter() {
             let next = ids.len() as u32;
-            let id = *ids.entry(token).or_insert(next);
+            let id = if let Some(&id) = ids.get(token) {
+                id
+            } else {
+                ids.insert(token.to_owned(), next);
+                next
+            };
             if id == next {
                 counts.push(0);
                 position_counts.push(0);
@@ -255,10 +260,27 @@ impl ChunkedIndexWriter {
     /// Write a chunk of processed files as a segment.
     /// This only assigns IDs and builds Document entries synchronously,
     /// then dispatches all heavy work to a background thread.
+    #[allow(dead_code)] // Public Vec<String> ingestion API; bulk build uses packed tokens.
     pub fn write_chunk(
         &mut self,
         segment_id: SegmentId,
         processed_files: Vec<ProcessedFile>,
+    ) -> Result<()> {
+        self.write_chunk_impl(segment_id, processed_files)
+    }
+
+    pub(crate) fn write_packed_chunk(
+        &mut self,
+        segment_id: SegmentId,
+        processed_files: Vec<ProcessedFile<crate::utils::PackedTokens>>,
+    ) -> Result<()> {
+        self.write_chunk_impl(segment_id, processed_files)
+    }
+
+    fn write_chunk_impl<T: Into<crate::utils::PackedTokens>>(
+        &mut self,
+        segment_id: SegmentId,
+        processed_files: Vec<ProcessedFile<T>>,
     ) -> Result<()> {
         if processed_files.is_empty() {
             return Ok(());
@@ -291,7 +313,7 @@ impl ChunkedIndexWriter {
             assigned_files.push(AssignedFile {
                 doc_id,
                 trigrams: processed.trigrams,
-                tokens: processed.tokens,
+                tokens: processed.tokens.into(),
                 line_offsets: processed.line_offsets,
                 token_positions: processed.token_positions,
             });
@@ -1190,27 +1212,31 @@ mod tests {
                 files.push(AssignedFile {
                     doc_id: doc * 131,
                     trigrams: vec![],
-                    tokens,
+                    tokens: tokens.into(),
                     line_offsets: vec![],
                     token_positions,
                 });
             }
             let mut symbols: Vec<String> = files
                 .iter()
-                .flat_map(|f| f.tokens.iter().cloned())
+                .flat_map(|f| f.tokens.iter().map(str::to_owned))
                 .collect();
             symbols.sort();
             symbols.dedup();
             let mut expected_pairs = Vec::new();
             let mut expected_positions = Vec::new();
             for file in &files {
-                for token in &file.tokens {
-                    expected_pairs
-                        .push((symbols.binary_search(token).unwrap() as u32, file.doc_id));
+                for token in file.tokens.iter() {
+                    expected_pairs.push((
+                        symbols.binary_search_by(|s| s.as_str().cmp(token)).unwrap() as u32,
+                        file.doc_id,
+                    ));
                 }
                 for &(idx, pos) in &file.token_positions {
                     expected_positions.push((
-                        symbols.binary_search(&file.tokens[idx as usize]).unwrap() as u32,
+                        symbols
+                            .binary_search_by(|s| s.as_str().cmp(&file.tokens[idx as usize]))
+                            .unwrap() as u32,
                         file.doc_id,
                         pos,
                     ));
