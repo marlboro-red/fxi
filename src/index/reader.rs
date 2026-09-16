@@ -673,7 +673,7 @@ impl IndexReader {
         // The inner join runs paths and segments loading in parallel
         // The outer join runs docs loading in parallel with the inner join
         let (documents_result, (paths_result, segments)) = rayon::join(
-            || read_documents(index_path_ref),
+            || read_documents_version(index_path_ref, meta.version),
             || {
                 rayon::join(
                     || read_paths(index_path_ref),
@@ -1174,98 +1174,67 @@ fn validate_disk_count(
     Ok(bytes)
 }
 
-/// Read documents from docs.bin
+/// Read documents from an immutable index generation.
 pub fn read_documents(index_path: &Path) -> Result<Vec<Document>> {
     let meta: IndexMeta = serde_json::from_reader(File::open(index_path.join("meta.json"))?)?;
-
-    let docs_path = index_path.join("docs.bin");
-    let mut file = BufReader::new(File::open(&docs_path)?);
-
-    let mut buf4 = [0u8; 4];
-    let mut buf8 = [0u8; 8];
-    let mut buf2 = [0u8; 2];
-
-    // Read count
-    file.read_exact(&mut buf4)?;
-    let count = u32::from_le_bytes(buf4) as usize;
-
-    validate_disk_count(&file, count, 4, 30)?;
-    let mut documents = Vec::with_capacity(count);
-
-    for _ in 0..count {
-        file.read_exact(&mut buf4)?;
-        let doc_id = u32::from_le_bytes(buf4);
-
-        file.read_exact(&mut buf4)?;
-        let path_id = u32::from_le_bytes(buf4);
-
-        file.read_exact(&mut buf8)?;
-        let size = u64::from_le_bytes(buf8);
-
-        file.read_exact(&mut buf8)?;
-        let raw_mtime = u64::from_le_bytes(buf8);
-        // Legacy full builds used seconds, but legacy watcher deltas already
-        // used nanoseconds. Normalize both when importing that mixed format.
-        let mtime = if meta.version == 1 && raw_mtime < 1_000_000_000_000 {
-            raw_mtime.saturating_mul(1_000_000_000)
-        } else {
-            raw_mtime
-        };
-
-        file.read_exact(&mut buf2)?;
-        let lang_val = u16::from_le_bytes(buf2);
-        let language = Language::try_from(lang_val).unwrap_or(Language::Unknown);
-
-        file.read_exact(&mut buf2)?;
-        let flags = DocFlags(u16::from_le_bytes(buf2));
-
-        file.read_exact(&mut buf2)?;
-        let segment_id = u16::from_le_bytes(buf2);
-
-        documents.push(Document {
-            doc_id,
-            path_id,
-            size,
-            mtime,
-            language,
-            flags,
-            segment_id,
-        });
-    }
-
-    Ok(documents)
+    read_documents_version(index_path, meta.version)
 }
 
-/// Read paths from paths.bin
+fn read_documents_version(index_path: &Path, version: u32) -> Result<Vec<Document>> {
+    let data = MappedBytes::open(&index_path.join("docs.bin"))?;
+    anyhow::ensure!(data.len() >= 4, "Truncated document header");
+    let count = le32(&data) as usize;
+    anyhow::ensure!(
+        count <= (data.len() - 4) / 30,
+        "Index count exceeds file bounds"
+    );
+    Ok(data[4..]
+        .chunks_exact(30)
+        .take(count)
+        .map(|record| {
+            let raw_mtime = le64(&record[16..]);
+            // Legacy generations contain both second and nanosecond timestamps.
+            let mtime = if version == 1 && raw_mtime < 1_000_000_000_000 {
+                raw_mtime.saturating_mul(1_000_000_000)
+            } else {
+                raw_mtime
+            };
+            Document {
+                doc_id: le32(record),
+                path_id: le32(&record[4..]),
+                size: le64(&record[8..]),
+                mtime,
+                language: Language::try_from(u16::from_le_bytes([record[24], record[25]]))
+                    .unwrap_or(Language::Unknown),
+                flags: DocFlags(u16::from_le_bytes([record[26], record[27]])),
+                segment_id: u16::from_le_bytes([record[28], record[29]]),
+            }
+        })
+        .collect())
+}
+
+/// Read paths with one owned allocation per path, after validating bounds in
+/// the immutable mapping. No temporary per-path byte buffers are required.
 pub fn read_paths(index_path: &Path) -> Result<Vec<PathBuf>> {
-    let paths_path = index_path.join("paths.bin");
-    let mut file = BufReader::new(File::open(&paths_path)?);
-
-    let mut buf4 = [0u8; 4];
-
-    // Read count
-    file.read_exact(&mut buf4)?;
-    let count = u32::from_le_bytes(buf4) as usize;
-
-    let mut remaining = validate_disk_count(&file, count, 4, 4)?;
+    let data = MappedBytes::open(&index_path.join("paths.bin"))?;
+    anyhow::ensure!(data.len() >= 4, "Truncated path header");
+    let count = le32(&data) as usize;
+    anyhow::ensure!(
+        count <= (data.len() - 4) / 4,
+        "Index count exceeds file bounds"
+    );
     let mut paths = Vec::with_capacity(count);
-
+    let mut cursor = 4;
     for _ in 0..count {
-        // Read length
-        file.read_exact(&mut buf4)?;
-        let len = u32::from_le_bytes(buf4) as usize;
-
-        remaining = remaining.checked_sub(4).context("Truncated path record")?;
-        anyhow::ensure!(len as u64 <= remaining, "Path length exceeds file bounds");
-        remaining -= len as u64;
-        // Read path bytes
-        let mut path_bytes = vec![0u8; len];
-        file.read_exact(&mut path_bytes)?;
-
-        let path_str = String::from_utf8_lossy(&path_bytes);
-        paths.push(PathBuf::from(path_str.as_ref()));
+        let remaining = &data[cursor..];
+        anyhow::ensure!(remaining.len() >= 4, "Truncated path record");
+        let len = le32(remaining) as usize;
+        let bytes = remaining[4..]
+            .get(..len)
+            .context("Path length exceeds file bounds")?;
+        paths.push(PathBuf::from(String::from_utf8_lossy(bytes).into_owned()));
+        cursor += 4 + len;
     }
-
     Ok(paths)
 }
 
@@ -1446,6 +1415,55 @@ mod tests {
     fn test_index_reader_open_nonexistent() {
         let result = IndexReader::open(&PathBuf::from("/nonexistent/path"));
         assert!(result.is_err(), "Should fail for nonexistent path");
+    }
+
+    #[test]
+    fn mapped_metadata_decoding_checks_every_truncation_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut docs = 1u32.to_le_bytes().to_vec();
+        docs.extend_from_slice(&123u32.to_le_bytes());
+        docs.extend_from_slice(&456u32.to_le_bytes());
+        docs.extend_from_slice(&u64::MAX.to_le_bytes());
+        docs.extend_from_slice(&123u64.to_le_bytes());
+        docs.extend_from_slice(&u16::MAX.to_le_bytes());
+        docs.extend_from_slice(&0xa5a5u16.to_le_bytes());
+        docs.extend_from_slice(&u16::MAX.to_le_bytes());
+        for len in 0..docs.len() {
+            fs::write(dir.path().join("docs.bin"), &docs[..len]).unwrap();
+            assert!(
+                read_documents_version(dir.path(), 2).is_err(),
+                "doc length {len}"
+            );
+        }
+        fs::write(dir.path().join("docs.bin"), &docs).unwrap();
+        let decoded = read_documents_version(dir.path(), 2).unwrap();
+        let doc = &decoded[0];
+        assert_eq!(
+            (doc.doc_id, doc.path_id, doc.size, doc.mtime),
+            (123, 456, u64::MAX, 123)
+        );
+        assert_eq!(doc.language, Language::Unknown);
+        assert_eq!(doc.flags.0, 0xa5a5);
+        assert_eq!(doc.segment_id, u16::MAX);
+        assert_eq!(
+            read_documents_version(dir.path(), 1).unwrap()[0].mtime,
+            123_000_000_000
+        );
+        let names: [&[u8]; 3] = [b"", "space/K.rs".as_bytes(), b"invalid\xff"];
+        let mut paths = (names.len() as u32).to_le_bytes().to_vec();
+        for name in names {
+            paths.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            paths.extend_from_slice(name);
+        }
+        for len in 0..paths.len() {
+            fs::write(dir.path().join("paths.bin"), &paths[..len]).unwrap();
+            assert!(read_paths(dir.path()).is_err(), "path length {len}");
+        }
+        fs::write(dir.path().join("paths.bin"), &paths).unwrap();
+        assert_eq!(
+            read_paths(dir.path()).unwrap(),
+            names.map(|name| PathBuf::from(String::from_utf8_lossy(name).as_ref()))
+        );
     }
 
     #[test]
