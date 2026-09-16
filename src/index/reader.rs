@@ -219,16 +219,47 @@ impl GramQuery {
     }
 }
 
+struct TokenIndex {
+    dictionary: TokenDict,
+    postings: MappedBytes,
+    positions: Option<MappedBytes>,
+}
+
+impl TokenIndex {
+    fn open(segment_path: &Path, required_positions: bool) -> Result<Self> {
+        let positions_path = segment_path.join("tokens.positions");
+        anyhow::ensure!(
+            !required_positions || positions_path.is_file(),
+            "Missing position index; rebuild the index"
+        );
+        let has_positions = positions_path.exists();
+        let postings = MappedBytes::open(&segment_path.join("tokens.postings"))?;
+        let positions = if has_positions {
+            Some(MappedBytes::open(&positions_path)?)
+        } else {
+            None
+        };
+        let dictionary = read_token_dict(
+            segment_path,
+            postings.len(),
+            positions.as_ref().map(|data| data.len()),
+        )?;
+        Ok(Self {
+            dictionary,
+            postings,
+            positions,
+        })
+    }
+}
+
 /// Reader for a single segment
 struct SegmentReader {
     #[allow(dead_code)]
     segment_id: SegmentId,
     trigram_dict: TrigramDict,
     trigram_postings: MappedBytes,
-    token_dict: TokenDict,
-    token_postings: MappedBytes,
-    /// Memory-mapped token positions file (optional for backwards compat)
-    token_positions: Option<MappedBytes>,
+    tokens: OnceLock<std::result::Result<TokenIndex, String>>,
+    required_positions: bool,
     /// Lazily loaded line maps - only loaded when first accessed
     line_maps: OnceLock<HashMap<DocId, Vec<u32>>>,
     /// Path to segment directory for lazy loading
@@ -248,28 +279,17 @@ impl SegmentReader {
     }
 
     /// Open a segment from disk (lazy loading for line maps)
-    fn open(segment_path: &Path, segment_id: SegmentId, _index_path: &Path) -> Result<Self> {
+    fn open(
+        segment_path: &Path,
+        segment_id: SegmentId,
+        required_positions: bool,
+        load_tokens: bool,
+    ) -> Result<Self> {
         // Read trigram dictionary (already sorted from BTreeMap write)
         let trigram_dict = read_trigram_dict(segment_path)?;
 
         let trigram_postings = MappedBytes::open(&segment_path.join("grams.postings"))?;
 
-        // Check if positions file exists (determines dict format)
-        let positions_path = segment_path.join("tokens.positions");
-        let has_positions = positions_path.exists();
-
-        let token_postings = MappedBytes::open(&segment_path.join("tokens.postings"))?;
-        let token_positions = if has_positions {
-            Some(MappedBytes::open(&positions_path)?)
-        } else {
-            None
-        };
-
-        let token_dict = read_token_dict(
-            segment_path,
-            token_postings.len(),
-            token_positions.as_ref().map(|positions| positions.len()),
-        )?;
         // Validate each immutable gram record once.
         let mut previous_gram = None;
         for entry in trigram_dict.iter() {
@@ -288,17 +308,41 @@ impl SegmentReader {
         // Load bloom filter if it exists (optional for backwards compat)
         let bloom_filter = read_bloom_filter(segment_path).ok();
 
-        Ok(Self {
+        let reader = Self {
             segment_id,
             trigram_dict,
             trigram_postings,
-            token_dict,
-            token_postings,
-            token_positions,
+            tokens: OnceLock::new(),
+            required_positions,
             line_maps: OnceLock::new(),
             segment_path: segment_path.to_path_buf(),
             bloom_filter,
-        })
+        };
+        if load_tokens {
+            reader.ensure_tokens()?;
+        }
+        Ok(reader)
+    }
+
+    fn ensure_tokens(&self) -> Result<()> {
+        self.tokens
+            .get_or_init(|| {
+                TokenIndex::open(&self.segment_path, self.required_positions)
+                    .map_err(|error| format!("{error:#}"))
+            })
+            .as_ref()
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
+    /// Public reader constructors eagerly establish this invariant. Internal
+    /// query-only readers must cross the fallible ensure_tokens barrier first.
+    fn tokens(&self) -> &TokenIndex {
+        self.tokens
+            .get()
+            .expect("token access requires ensure_tokens")
+            .as_ref()
+            .expect("token access requires successful validation")
     }
 
     fn intersect_trigrams(&self, trigrams: &[Trigram]) -> RoaringBitmap {
@@ -355,12 +399,12 @@ impl SegmentReader {
 
     /// Get documents matching a token in this segment as a RoaringBitmap
     fn get_token_docs(&self, token: &str) -> RoaringBitmap {
-        if let Some(entry) = self.token_dict.lookup(token) {
+        if let Some(entry) = self.tokens().dictionary.lookup(token) {
             let start = entry.offset as usize;
             let end = start + entry.length as usize;
 
-            if end <= self.token_postings.len() {
-                return delta_decode_bitmap(&self.token_postings[start..end]);
+            if end <= self.tokens().postings.len() {
+                return delta_decode_bitmap(&self.tokens().postings[start..end]);
             }
         }
         RoaringBitmap::new()
@@ -375,12 +419,12 @@ impl SegmentReader {
         let finder = memmem::Finder::new(needle.as_bytes());
 
         let mut result = RoaringBitmap::new();
-        for entry in self.token_dict.iter() {
+        for entry in self.tokens().dictionary.iter() {
             if entry.token.len() >= needle.len() && finder.find(entry.token.as_bytes()).is_some() {
                 let start = entry.offset as usize;
                 let end = start + entry.length as usize;
-                if end <= self.token_postings.len() {
-                    result |= delta_decode_bitmap(&self.token_postings[start..end]);
+                if end <= self.tokens().postings.len() {
+                    result |= delta_decode_bitmap(&self.tokens().postings[start..end]);
                 }
             }
         }
@@ -397,8 +441,8 @@ impl SegmentReader {
         token: &str,
         filter: Option<&RoaringBitmap>,
     ) -> Option<Vec<(u32, Vec<u32>)>> {
-        let positions_mmap = self.token_positions.as_ref()?;
-        let entry = self.token_dict.lookup(token)?;
+        let positions_mmap = self.tokens().positions.as_ref()?;
+        let entry = self.tokens().dictionary.lookup(token)?;
         if entry.pos_length == 0 {
             return None;
         }
@@ -616,6 +660,7 @@ pub struct IndexReader {
 impl IndexReader {
     /// Open an existing index with parallel loading for maximum startup speed
     /// One-shot callers cannot reuse content admitted during their search.
+    #[allow(dead_code)] // Public library API; the CLI uses dependency-aware loading.
     pub fn open_uncached(root: &Path) -> Result<Self> {
         let mut reader = Self::open(root)?;
         reader.content_cache_enabled = false;
@@ -623,6 +668,32 @@ impl IndexReader {
     }
 
     pub fn open(root_path: &Path) -> Result<Self> {
+        Self::open_with_tokens(root_path, true)
+    }
+
+    /// Internal one-shot search constructor. Only QueryExecutor should perform
+    /// token operations on this reader, using its fallible dependency barrier.
+    /// The public constructors retain eager validation of the complete index.
+    #[allow(dead_code)] // Used by the CLI crate; intentionally not a public library API.
+    pub(crate) fn open_for_search_uncached(root: &Path) -> Result<Self> {
+        let mut reader = Self::open_with_tokens(root, false)?;
+        reader.content_cache_enabled = false;
+        Ok(reader)
+    }
+
+    pub(crate) fn ensure_tokens(&self) -> Result<()> {
+        if self.segments.len() <= 4 {
+            self.segments
+                .iter()
+                .try_for_each(SegmentReader::ensure_tokens)
+        } else {
+            self.segments
+                .par_iter()
+                .try_for_each(SegmentReader::ensure_tokens)
+        }
+    }
+
+    fn open_with_tokens(root_path: &Path, load_tokens: bool) -> Result<Self> {
         let root_path = root_path.canonicalize()?;
         let (index_path, generation_lease) = crate::index::generation::pin(&root_path)?;
 
@@ -668,11 +739,15 @@ impl IndexReader {
                                 let segment_path = index_path_ref
                                     .join("segments")
                                     .join(format!("seg_{:04}", seg_id));
-                                if meta.has_positions && !segment_path.join("tokens.positions").is_file() {
-                                    anyhow::bail!("Missing position index in segment {seg_id}; rebuild the index");
-                                }
-                                SegmentReader::open(&segment_path, seg_id, index_path_ref)
-                                    .with_context(|| format!("Cannot open segment {seg_id}; rebuild the index"))
+                                SegmentReader::open(
+                                    &segment_path,
+                                    seg_id,
+                                    meta.has_positions,
+                                    load_tokens,
+                                )
+                                .with_context(|| {
+                                    format!("Cannot open segment {seg_id}; rebuild the index")
+                                })
                             })
                             .collect::<Result<Vec<_>>>()
                     },
@@ -930,7 +1005,7 @@ impl IndexReader {
         }
 
         // Check all segments have position data
-        if self.segments.iter().any(|s| s.token_positions.is_none()) {
+        if self.segments.iter().any(|s| s.tokens().positions.is_none()) {
             return None;
         }
 
@@ -1401,6 +1476,49 @@ mod tests {
         crate::index::build::build_index(&root_path, false).expect("Failed to build index");
 
         (temp_dir, root_path)
+    }
+
+    #[test]
+    fn internal_search_readers_load_complete_token_data_on_demand() {
+        let (_temp, root) = create_test_index();
+        let full = IndexReader::open(&root).unwrap();
+        let expected_docs = full.get_token_docs("main");
+        let phrase = vec![("fn".into(), 0), ("main".into(), 1)];
+        let expected_positions = full.resolve_phrase_positional(&phrase, None);
+        drop(full);
+        let core = IndexReader::open_for_search_uncached(&root).unwrap();
+        assert!(
+            core.segments
+                .iter()
+                .all(|segment| segment.tokens.get().is_none())
+        );
+        let query = crate::query::parse_query("re:/main/");
+        assert_eq!(
+            crate::query::QueryExecutor::new(&core)
+                .execute_files_only(&query, 0)
+                .unwrap(),
+            vec![PathBuf::from("test.rs")]
+        );
+        assert!(
+            core.segments
+                .iter()
+                .all(|segment| segment.tokens.get().is_none())
+        );
+        (0..16)
+            .into_par_iter()
+            .for_each(|_| core.ensure_tokens().unwrap());
+        assert!(
+            core.segments
+                .iter()
+                .all(|segment| segment.tokens.get().unwrap().is_ok())
+        );
+        assert_eq!(core.get_token_docs("main"), expected_docs);
+        assert_eq!(
+            core.resolve_phrase_positional(&phrase, None),
+            expected_positions
+        );
+        drop(core);
+        crate::utils::remove_index(&root).unwrap();
     }
 
     #[test]

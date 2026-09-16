@@ -820,6 +820,7 @@ impl<'a> QueryExecutor<'a> {
                 }
 
                 PlanStep::TokenLookup(token) => {
+                    self.reader.ensure_tokens()?;
                     let docs = self.reader.get_token_docs(token);
 
                     candidates = Some(match candidates {
@@ -833,6 +834,7 @@ impl<'a> QueryExecutor<'a> {
                     sub_tokens,
                     trigrams,
                 } => {
+                    self.reader.ensure_tokens()?;
                     let mut docs = self.reader.get_token_docs(token);
 
                     // Trigram side is a best-effort substring-recall
@@ -916,6 +918,7 @@ impl<'a> QueryExecutor<'a> {
                 }
 
                 PlanStep::PositionalPhrase(phrase_tokens) => {
+                    self.reader.ensure_tokens()?;
                     // Use positional index to resolve phrase adjacency,
                     // decoding positions only for already-narrowed candidates
                     if let Some(positional_docs) = self
@@ -1846,6 +1849,56 @@ def format_warning(msg: str) -> str:
         let reader = IndexReader::open(&root_path).expect("Failed to open index");
 
         (temp_dir, root_path, reader)
+    }
+
+    #[test]
+    fn lazy_token_failures_propagate_through_dependent_plans() {
+        let (_temp, root, full) = create_test_index();
+        let query = parse_query("re:/main/");
+        let expected = QueryExecutor::new(&full)
+            .execute_files_only(&query, 0)
+            .unwrap();
+        let index = crate::utils::get_index_dir(&root).unwrap();
+        drop(full);
+        let dict = index.join("segments/seg_0001/tokens.dict");
+        let mut bytes = fs::read(&dict).unwrap();
+        bytes[6] = 0xff;
+        fs::write(dict, bytes).unwrap();
+        assert!(IndexReader::open(&root).is_err());
+        let core = IndexReader::open_for_search_uncached(&root).unwrap();
+        let executor = QueryExecutor::new(&core);
+        // Unused auxiliary corruption cannot change a gram/content answer.
+        assert_eq!(executor.execute_files_only(&query, 0).unwrap(), expected);
+        for kind in 0..3 {
+            let step = || match kind {
+                0 => PlanStep::TokenLookup("main".into()),
+                1 => PlanStep::TokenOrTrigram {
+                    token: "main".into(),
+                    sub_tokens: vec![],
+                    trigrams: vec![],
+                },
+                _ => PlanStep::PositionalPhrase(vec![("fn".into(), 0), ("main".into(), 1)]),
+            };
+            let inner = || {
+                let mut plan = QueryPlan::from_query(&query);
+                plan.steps = vec![step()];
+                plan
+            };
+            for outer in [
+                step(),
+                PlanStep::Union(vec![inner()]),
+                PlanStep::Intersect(vec![inner()]),
+                PlanStep::Exclude(Box::new(inner())),
+            ] {
+                let mut plan = QueryPlan::from_query(&query);
+                plan.steps.push(outer);
+                assert!(executor.execute_plan(&plan).is_err(), "{plan:?}");
+            }
+        }
+        drop(core);
+        fs::write(index.join("segments/seg_0001/grams.postings"), []).unwrap();
+        assert!(IndexReader::open_for_search_uncached(&root).is_err());
+        crate::utils::remove_index(&root).unwrap();
     }
 
     #[test]

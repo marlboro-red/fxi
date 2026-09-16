@@ -479,7 +479,7 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
                 Err(e) => eprintln!("Daemon search failed, falling back to direct search: {e}"),
             }
         }
-        let reader = index::reader::IndexReader::open_uncached(&root)?;
+        let reader = index::reader::IndexReader::open_for_search_uncached(&root)?;
         warn_if_stale(&reader, &root);
         let mut parsed = query::parse_query(&combined_pattern);
         parsed.options.case_insensitive = opts.ignore_case;
@@ -639,7 +639,7 @@ fn do_direct_content_search(
     use crate::query::{QueryExecutor, parse_query};
 
     // Load index
-    let reader = IndexReader::open_uncached(root)?;
+    let reader = IndexReader::open_for_search_uncached(root)?;
     warn_if_stale(&reader, root);
 
     // Case-insensitivity is applied at the plan level: the planner narrows

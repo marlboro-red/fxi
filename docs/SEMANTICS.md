@@ -159,3 +159,14 @@ limit retained text to 1 GiB and entries to 131,072; `FXI_CACHE_MIB` accepts
 0–4096 MiB (0 disables admission). One-shot CLI readers bypass admission.
 Cached snapshots are validated against file metadata before each reuse.
 Concurrent queries can keep additional snapshots alive beyond those cache bounds.
+
+
+## Index loading and validation
+
+Public `IndexReader::open` and `open_uncached` validate gram and token dictionary
+structure and posting ranges when opening an index. One-shot CLI searches load
+token dictionaries, token postings and positions only if their query plan needs
+them. Loading then performs the same validation and propagates errors through
+the query, including nested plans. A gram-only query can therefore succeed when
+unused token data is damaged; this is not a complete index integrity check.
+Immutable generation leases keep deferred files available for the reader's lifetime.
