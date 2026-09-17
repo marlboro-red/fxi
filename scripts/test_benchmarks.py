@@ -21,19 +21,23 @@ class StartupHarnessTests(unittest.TestCase):
             binary = base / 'fake-fxi'
             binary.write_text('#!/usr/bin/env python3\nimport json, os\n'
                               'with open(os.environ["BENCH_TEST_LOG"], "a") as out:\n'
-                              '    out.write(json.dumps(os.environ["FXI_INDEXES"]) + "\\n")\n')
+                              '    out.write(json.dumps({k: os.environ.get(k) for k in ["FXI_INDEXES", "RAYON_NUM_THREADS", "FXI_SEARCH_PARALLELISM"]}) + "\\n")\n')
             binary.chmod(0o755)
             before, after = base / 'before', base / 'after'
             command = [sys.executable, str(Path(__file__).with_name('compare-startup.py')),
                        '--corpus', str(corpus), '--indexes', str(before),
                        '--candidate-indexes', str(after), '--baseline', str(binary),
                        '--candidate', str(binary), '--repetitions', '3',
+                       '--before-threads', '2', '--after-threads', '8',
+                       '--before-search-parallelism', '4', '--after-search-parallelism', '12',
                        '--patterns', 'definitelyAbsentNeedle', '--output', str(base / 'result.json')]
             subprocess.run(command, env={**os.environ, 'BENCH_TEST_LOG': str(log)},
                            check=True, capture_output=True, timeout=30)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
-            self.assertEqual(calls.count(str(before.resolve())), 4)
-            self.assertEqual(calls.count(str(after.resolve())), 4)
+            self.assertEqual(calls.count({'FXI_INDEXES': str(before.resolve()),
+                'RAYON_NUM_THREADS': '2', 'FXI_SEARCH_PARALLELISM': '4'}), 4)
+            self.assertEqual(calls.count({'FXI_INDEXES': str(after.resolve()),
+                'RAYON_NUM_THREADS': '8', 'FXI_SEARCH_PARALLELISM': '12'}), 4)
 
 
 def load_harness(name):

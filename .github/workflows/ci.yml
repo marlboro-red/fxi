@@ -65,3 +65,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked --all-targets
+
+  benchmark-harness:
+    name: benchmark harness regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - run: python3 scripts/test_benchmarks.py

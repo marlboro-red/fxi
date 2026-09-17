@@ -28,12 +28,16 @@ parser.add_argument('--literal', action='store_true', help='Compare plain FXI id
 parser.add_argument('--patterns', nargs='+')
 parser.add_argument('--before-threads', type=int)
 parser.add_argument('--after-threads', type=int)
+parser.add_argument('--before-search-parallelism', type=int)
+parser.add_argument('--after-search-parallelism', type=int)
 args = parser.parse_args()
 if args.repetitions < 1:
     parser.error('repetitions must be positive')
-if any(value is not None and value < 1 for value in [args.before_threads, args.after_threads]):
+if any(value is not None and value < 1 for value in [args.before_threads, args.after_threads,
+       args.before_search_parallelism, args.after_search_parallelism]):
     parser.error('Thread counts must be positive')
 threads = {'before': args.before_threads, 'after': args.after_threads}
+search_parallelism = {'before': args.before_search_parallelism, 'after': args.after_search_parallelism}
 root = args.corpus.resolve()
 runtime = P.Path(tempfile.mkdtemp(prefix='fxi-startup-comparison-'))
 env = {**os.environ, 'FXI_INDEXES': str(args.indexes.resolve()),
@@ -42,13 +46,15 @@ binaries = {'before': args.baseline.resolve(), 'after': args.candidate.resolve()
 if args.tgrep:
     binaries['tgrep'] = args.tgrep.resolve()
 
-def run(command, thread_count=None, indexes=None):
+def run(command, thread_count=None, indexes=None, search_tasks=None):
     start = time.perf_counter_ns()
     child_env = dict(env)
     if thread_count is not None:
         child_env['RAYON_NUM_THREADS'] = str(thread_count)
     if indexes is not None:
         child_env['FXI_INDEXES'] = str(indexes.resolve())
+    if search_tasks is not None:
+        child_env['FXI_SEARCH_PARALLELISM'] = str(search_tasks)
     result = sp.run(command, cwd=root, env=child_env, capture_output=True, timeout=120)
     elapsed = (time.perf_counter_ns() - start) / 1e6
     valid_codes = (0,) if command[0] in {str(binaries['before']), str(binaries['after'])} else (0, 1)
@@ -73,13 +79,15 @@ for label, pattern in queries:
                       [str(binary), output_flag, '--color=never', fxi_pattern, '-p', str(root)])
                 for name, binary in binaries.items()}
     for name, command in commands.items():
-        assert run(command, threads.get(name), args.candidate_indexes if name == 'after' else None)[1] == expected
+        assert run(command, threads.get(name), args.candidate_indexes if name == 'after' else None,
+                   search_parallelism.get(name))[1] == expected
     samples = {name: [] for name in commands}
     for rep in range(args.repetitions):
         order = list(commands)
         random.Random(1729 + rep).shuffle(order)
         for name in order:
-            elapsed, paths = run(commands[name], threads.get(name), args.candidate_indexes if name == 'after' else None)
+            elapsed, paths = run(commands[name], threads.get(name), args.candidate_indexes if name == 'after' else None,
+                                 search_parallelism.get(name))
             assert paths == expected, (label, name, paths ^ expected)
             samples[name].append(elapsed)
     row = {'query': label, 'pattern': pattern, 'files': len(expected),
@@ -87,7 +95,7 @@ for label, pattern in queries:
                      for name, values in samples.items()}}
     rows.append(row)
     print(label, {name: data['median_ms'] for name, data in row['tools'].items()}, flush=True)
-result = {'harness_sha256': hashlib.sha256(P.Path(__file__).read_bytes()).hexdigest(), 'candidate_indexes': str(args.candidate_indexes.resolve()) if args.candidate_indexes else None, 'rayon_threads': threads, 'corpus': str(root), 'indexes': str(args.indexes.resolve()), 'mode': 'direct', 'output_mode': 'count' if args.count else 'files', 'query_syntax': 'plain' if args.literal else 'regex',
+result = {'harness_sha256': hashlib.sha256(P.Path(__file__).read_bytes()).hexdigest(), 'candidate_indexes': str(args.candidate_indexes.resolve()) if args.candidate_indexes else None, 'rayon_threads': threads, 'search_parallelism': search_parallelism, 'corpus': str(root), 'indexes': str(args.indexes.resolve()), 'mode': 'direct', 'output_mode': 'count' if args.count else 'files', 'query_syntax': 'plain' if args.literal else 'regex',
           'binaries': {name: {'path': str(binary), 'sha256': hashlib.sha256(binary.read_bytes()).hexdigest()}
                        for name, binary in binaries.items()}, 'rows': rows}
 args.output.write_text(json.dumps(result, indent=2))
