@@ -1,0 +1,17 @@
+{
+  "linux-source-pack-lab.json": {
+    "binary_sha256": "0c97cedcaf2939dd6a906a87a9f5cbf98d807b6923c5f42a28cbcd824248b4bb",
+    "source_sha256": "60eb1b1d87b63d82292f815c0cd11dfe30fe912540eac433bc88ca5ab5cd1f0c",
+    "indexes": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-4rmtodjl/after/indexes"
+  },
+  "linux-position-residue-lab.json": {
+    "binary_sha256": "d193a06d50ceaa98284c0fe711012f1d7a1903852618657e2b689a237c100d02",
+    "source_sha256": "62f161b57e6f344b17ea8c27ceaf4f1b41088c1e7a2e9fa236b90d5c5b14b359",
+    "indexes": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-4rmtodjl/after/indexes"
+  },
+  "linux-metadata-stage-profile.json": {
+    "binary_sha256": "4b7db4a0c9bc21983c65a085c565b32885e7705f8873585e220ae68ba5f7c694",
+    "source_sha256": "488a6cd1c7a0e916b597f950dda5fc6188599ea0dd43e72896776a6708dfa43f",
+    "indexes": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-4rmtodjl/after/indexes"
+  }
+}

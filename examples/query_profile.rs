@@ -3,6 +3,7 @@
 use fxi::index::reader::IndexReader;
 use fxi::query::planner::PlanStep;
 use fxi::query::{QueryExecutor, QueryPlan, parse_query};
+use rayon::prelude::*;
 use roaring::RoaringBitmap;
 use std::time::Instant;
 
@@ -64,9 +65,18 @@ fn main() -> anyhow::Result<()> {
             .map(|d| d.size)
             .sum();
         let expected = executor.execute_files_only(&query, 0)?;
+        let paths: Vec<_> = docs
+            .iter()
+            .map(|id| {
+                reader
+                    .get_full_path(reader.get_document(id).unwrap())
+                    .unwrap()
+            })
+            .collect();
         let mut plans_us = Vec::new();
         let mut lookup_us = Vec::new();
         let mut total_us = Vec::new();
+        let mut metadata_us = Vec::new();
         for _ in 0..21 {
             let start = Instant::now();
             let plan = QueryPlan::from_query(&query);
@@ -77,13 +87,23 @@ fn main() -> anyhow::Result<()> {
             let start = Instant::now();
             assert_eq!(executor.execute_files_only(&query, 0)?, expected);
             total_us.push(start.elapsed().as_micros());
+            let start = Instant::now();
+            let present = paths
+                .par_iter()
+                .with_min_len((paths.len() / 4).max(1))
+                .filter(|path| std::fs::metadata(path).is_ok())
+                .count();
+            metadata_us.push(start.elapsed().as_micros());
+            assert_eq!(present, paths.len());
         }
         plans_us.sort();
         lookup_us.sort();
         total_us.sort();
+        metadata_us.sort();
         rows.push(serde_json::json!({"pattern":pattern,"candidate_files":docs.len(),"candidate_bytes":bytes,"candidate_cacheable_bytes_default":cacheable_bytes,
             "matching_files":expected.len(),"plan_median_us":plans_us[10],"lookup_median_us":lookup_us[10],
-            "engine_median_us":total_us[10],"engine_samples_us":total_us}));
+            "engine_median_us":total_us[10],"engine_samples_us":total_us,
+            "metadata_only_median_us":metadata_us[10],"metadata_only_samples_us":metadata_us}));
     }
     println!("{}", serde_json::to_string_pretty(&rows)?);
     Ok(())

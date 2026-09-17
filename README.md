@@ -392,7 +392,8 @@ Press `F1` or `?` to show help in the TUI.
 ## Performance and validation
 
 Current measurements, correctness fixes, research experiments, and remaining gaps
-are documented in [the broader comparisons and cache experiments](docs/performance-round4/NOTES.md),
+are documented in [the source verification and position experiments](docs/performance-round5/NOTES.md),
+[the broader comparisons and cache experiments](docs/performance-round4/NOTES.md),
 [the watcher and metadata experiments](docs/performance-round3/NOTES.md),
 [the indexing and query experiments](docs/performance-round2/NOTES.md), and
 [the first engineering report](docs/audit-2026-09-17/PROGRESS.md).

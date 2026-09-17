@@ -1,0 +1,146 @@
+{
+  "harness_sha256": "c7669136798bebcab502ed57bfc5ec9244168b362256c459f9ac3c87f7365ac1",
+  "candidate_indexes": null,
+  "rayon_threads": {
+    "before": null,
+    "after": null
+  },
+  "search_parallelism": {
+    "before": 4,
+    "after": 2
+  },
+  "corpus": "/private/tmp/fxi-linux-corpus",
+  "indexes": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-4rmtodjl/after/indexes",
+  "mode": "direct",
+  "output_mode": "files",
+  "query_syntax": "regex",
+  "binaries": {
+    "before": {
+      "path": "/private/tmp/fxi-round5-baseline",
+      "sha256": "f1e8065e4b07a89773d8d6c55845e2ec07ffa5990b379986d58d05efdb45aa9d"
+    },
+    "after": {
+      "path": "/private/tmp/fxi-round5-baseline",
+      "sha256": "f1e8065e4b07a89773d8d6c55845e2ec07ffa5990b379986d58d05efdb45aa9d"
+    }
+  },
+  "rows": [
+    {
+      "query": "return",
+      "pattern": "return",
+      "files": 44261,
+      "tools": {
+        "before": {
+          "median_ms": 434.748167,
+          "samples_ms": [
+            437.934334,
+            435.593833,
+            443.470875,
+            432.127167,
+            413.861,
+            437.395709,
+            434.748167,
+            430.017042,
+            434.052209,
+            436.243041,
+            429.394667
+          ]
+        },
+        "after": {
+          "median_ms": 543.370625,
+          "samples_ms": [
+            543.370625,
+            536.416833,
+            542.202292,
+            543.524791,
+            540.475416,
+            533.765917,
+            554.533917,
+            547.472917,
+            543.212125,
+            546.285625,
+            545.163458
+          ]
+        }
+      }
+    },
+    {
+      "query": "struct file_operations",
+      "pattern": "struct file_operations",
+      "files": 1240,
+      "tools": {
+        "before": {
+          "median_ms": 44.576083,
+          "samples_ms": [
+            44.075458,
+            44.041584,
+            44.283417,
+            43.613833,
+            44.576083,
+            45.076667,
+            44.869458,
+            46.68025,
+            44.583334,
+            45.245583,
+            44.361333
+          ]
+        },
+        "after": {
+          "median_ms": 59.313584,
+          "samples_ms": [
+            59.186208,
+            61.29675,
+            58.172625,
+            59.761917,
+            61.603083,
+            58.270541,
+            58.169875,
+            60.584708,
+            59.313584,
+            59.888209,
+            58.3285
+          ]
+        }
+      }
+    },
+    {
+      "query": "folio_wait_bit_common",
+      "pattern": "folio_wait_bit_common",
+      "files": 1,
+      "tools": {
+        "before": {
+          "median_ms": 13.023916,
+          "samples_ms": [
+            13.694042,
+            12.892417,
+            12.647292,
+            13.050792,
+            12.813375,
+            13.038792,
+            13.033833,
+            13.076666,
+            12.719458,
+            13.023916,
+            12.828542
+          ]
+        },
+        "after": {
+          "median_ms": 12.937416,
+          "samples_ms": [
+            13.211958,
+            14.062333,
+            12.884166,
+            12.940666,
+            12.968208,
+            13.012375,
+            12.937416,
+            12.475875,
+            12.653917,
+            12.789833,
+            12.687792
+          ]
+        }
+      }
+    }
+  ]
+}

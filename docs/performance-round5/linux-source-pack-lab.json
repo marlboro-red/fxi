@@ -1,0 +1,108 @@
+{
+  "copy_seconds": 2.046256375,
+  "files": 65287,
+  "limits": "Offline verification-stage experiment, warm filesystem, four read tasks; index opening/planning, path sorting, CLI startup and serialization excluded. Both paths verify complete UTF-8 and every sample matches ripgrep. Pack retains uncompressed source plus in-memory metadata; no serialized format, corruption checksum, incremental update/compaction integration, cold-storage result, or whole-index build-time claim. Changed stamps fall back to ordinary source reads; source races have the same point-in-time limitations as the current content cache.",
+  "root": "/private/tmp/fxi-linux-corpus",
+  "rows": [
+    {
+      "candidate_files": 44318,
+      "matching_files": 44261,
+      "ordinary_median_ms": 407.297667,
+      "ordinary_samples_ms": [
+        403.936709,
+        410.066458,
+        449.045666,
+        399.226334,
+        407.297667,
+        388.896791,
+        439.728917,
+        409.644292,
+        397.889791,
+        393.30375,
+        417.53816700000004
+      ],
+      "packed_median_ms": 38.290541,
+      "packed_samples_ms": [
+        39.925042,
+        38.510542,
+        37.5785,
+        37.430708,
+        38.426333,
+        38.50175,
+        38.160667000000004,
+        39.483708,
+        36.991292,
+        38.290541,
+        38.207166
+      ],
+      "pattern": "return"
+    },
+    {
+      "candidate_files": 3788,
+      "matching_files": 1240,
+      "ordinary_median_ms": 30.967208,
+      "ordinary_samples_ms": [
+        32.519417000000004,
+        32.149958999999996,
+        32.873332999999995,
+        33.299625,
+        29.83775,
+        28.805999999999997,
+        32.591415999999995,
+        30.634959,
+        30.967208,
+        30.433708,
+        28.971416
+      ],
+      "packed_median_ms": 6.906083000000001,
+      "packed_samples_ms": [
+        6.788209,
+        6.86625,
+        6.748375,
+        7.0885,
+        6.842333,
+        7.107958,
+        7.1440410000000005,
+        7.0987919999999995,
+        7.1159170000000005,
+        6.898834000000001,
+        6.906083000000001
+      ],
+      "pattern": "struct file_operations"
+    },
+    {
+      "candidate_files": 44,
+      "matching_files": 1,
+      "ordinary_median_ms": 0.501125,
+      "ordinary_samples_ms": [
+        0.49958299999999994,
+        0.501125,
+        0.5427500000000001,
+        0.509125,
+        0.480875,
+        0.501125,
+        0.46770900000000004,
+        0.49770900000000007,
+        0.517208,
+        0.496417,
+        0.5335840000000001
+      ],
+      "packed_median_ms": 0.197625,
+      "packed_samples_ms": [
+        0.211458,
+        0.200375,
+        0.206167,
+        0.215958,
+        0.19262500000000002,
+        0.179208,
+        0.200375,
+        0.197625,
+        0.196042,
+        0.18729200000000001,
+        0.189625
+      ],
+      "pattern": "folio_wait_bit_common"
+    }
+  ],
+  "source_pack_bytes": 1311967080
+}

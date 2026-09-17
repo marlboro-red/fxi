@@ -1,0 +1,20 @@
+{
+  "implementation_commit": "0630a9926569822ed5b93e4575ad63c1d6442e49",
+  "performance_compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "ci_lint_compiler": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "all_target_test_executions": 697,
+  "failed": 0,
+  "ignored": 0,
+  "checks": [
+    "cargo test --all-targets",
+    "cargo +1.98.0 clippy --all-targets -- -D warnings",
+    "cargo +1.88.0 check --all-targets",
+    "cargo +1.98.0 fmt --all --check",
+    "python3 scripts/test_benchmarks.py"
+  ],
+  "benchmark_harness_tests": 3,
+  "baseline_commit": "82ddc17",
+  "baseline_sha256": "548850fed391bde8822dd407d54cf0f9867b7f9bb388529c57cc8a112277bf7a",
+  "candidate_sha256": "f3f40dc80efde25392bbbe2e40761f6de572ba2762c6558c75884e0e013b1e51",
+  "ci_repair_run": "https://github.com/marlboro-red/fxi/actions/runs/35218564235"
+}

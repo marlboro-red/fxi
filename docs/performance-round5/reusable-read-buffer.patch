@@ -1,0 +1,115 @@
+diff --git a/src/index/reader.rs b/src/index/reader.rs
+index 54fb737..1f76e94 100644
+--- a/src/index/reader.rs
++++ b/src/index/reader.rs
+@@ -1193,6 +1193,26 @@ impl IndexReader {
+         self.read_file_with_cache_policy(path, cache_scan)
+     }
+ 
++    /// Reuse a worker-owned buffer when admission is disabled. The callback
++    /// cannot retain a borrow across the next read; UTF-8 and I/O errors still
++    /// reject the whole file before verification.
++    pub(crate) fn with_file_for_scan<T>(
++        &self,
++        path: &Path,
++        cache_scan: bool,
++        scratch: &mut String,
++        verify: impl FnOnce(&str) -> T,
++    ) -> Option<T> {
++        if !self.content_cache_enabled || self.file_cache.max_bytes == 0 {
++            scratch.clear();
++            File::open(path).ok()?.read_to_string(scratch).ok()?;
++            Some(verify(scratch))
++        } else {
++            self.read_file_for_scan(path, cache_scan)
++                .map(|content| verify(&content))
++        }
++    }
++
+     /// Read file content with LRU caching.
+     /// This speeds up repeated queries that access the same files.
+     /// The cache stores Arc<str>, so a hit is a refcount bump rather than a
+@@ -1795,6 +1815,38 @@ mod tests {
+         assert!(docs.is_empty(), "Should not find nonexistent token");
+     }
+ 
++    #[test]
++    fn reusable_scan_buffer_rejects_errors_and_does_not_leak_previous_content() {
++        let (_temp_dir, root) = create_test_index();
++        let reader = IndexReader::open_uncached(&root).unwrap();
++        let path = root.join("scratch.txt");
++        let mut scratch = String::new();
++        for text in ["needle".repeat(10000), "tiny café\r\n".into(), "".into()] {
++            fs::write(&path, &text).unwrap();
++            assert_eq!(
++                reader.with_file_for_scan(&path, false, &mut scratch, str::to_owned),
++                Some(text)
++            );
++        }
++        fs::write(&path, b"needle\xff").unwrap();
++        assert!(
++            reader
++                .with_file_for_scan(&path, false, &mut scratch, |_| panic!("invalid UTF-8"))
++                .is_none()
++        );
++        fs::remove_file(&path).unwrap();
++        assert!(
++            reader
++                .with_file_for_scan(&path, false, &mut scratch, |_| panic!("missing file"))
++                .is_none()
++        );
++        fs::write(&path, "fresh").unwrap();
++        assert_eq!(
++            reader.with_file_for_scan(&path, false, &mut scratch, str::to_owned),
++            Some("fresh".into())
++        );
++    }
++
+     #[test]
+     fn noncacheable_files_do_not_consume_scan_admission_budget() {
+         let (_temp_dir, root) = create_test_index();
+diff --git a/src/query/executor.rs b/src/query/executor.rs
+index 63a4bad..111ea17 100644
+--- a/src/query/executor.rs
++++ b/src/query/executor.rs
+@@ -573,16 +573,18 @@ impl<'a> QueryExecutor<'a> {
+             }
+         };
+ 
+-        let verify = |id: &DocId| {
++        let verify = |scratch: &mut String, id: &DocId| {
+             let doc = self.reader.get_document(*id)?;
+             let full_path = self.reader.get_full_path(doc)?;
+-            let content = self.reader.read_file_for_scan(&full_path, cache_scan)?;
+-            has_match(&content).then_some(*id)
++            self.reader
++                .with_file_for_scan(&full_path, cache_scan, scratch, has_match)?
++                .then_some(*id)
+         };
+         let matching_ids: Vec<DocId> = if !should_use_parallel(candidate_count) {
++            let mut scratch = String::new();
+             candidate_ids
+                 .iter()
+-                .filter_map(verify)
++                .filter_map(|id| verify(&mut scratch, id))
+                 .take(effective_limit)
+                 .collect()
+         } else if effective_limit >= candidate_count {
+@@ -590,7 +592,7 @@ impl<'a> QueryExecutor<'a> {
+             candidate_ids
+                 .par_iter()
+                 .with_min_len(search_batch_size(candidate_count))
+-                .map(verify)
++                .map_init(String::new, verify)
+                 .collect::<Vec<_>>()
+                 .into_iter()
+                 .flatten()
+@@ -599,7 +601,7 @@ impl<'a> QueryExecutor<'a> {
+             // Bound excess verification while selecting the same prefix on every run.
+             let mut matches = Vec::new();
+             for batch in candidate_ids.chunks(64) {
+-                let verified: Vec<_> = batch.par_iter().map(verify).collect();
++                let verified: Vec<_> = batch.par_iter().map_init(String::new, verify).collect();
+                 matches.extend(
+                     verified
+                         .into_iter()
