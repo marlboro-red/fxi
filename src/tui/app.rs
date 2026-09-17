@@ -1,12 +1,13 @@
 use crate::index::build::build_index_with_progress;
 use crate::index::reader::IndexReader;
 use crate::index::types::SearchMatch;
-use crate::query::{QueryExecutor, parse_query};
+use crate::query::{QueryExecutor, try_parse_query};
 use crate::server::IndexClient;
 use crate::utils::find_codebase_root;
 use anyhow::Result;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -85,6 +86,8 @@ pub struct App {
     load_state: IndexLoadState,
     /// Background search state
     search_state: SearchState,
+    /// Coalesce repeated submissions while one worker owns the client.
+    search_queued: bool,
     /// Prefetched preview content for adjacent results
     prefetch_cache: HashMap<PathBuf, String>,
 }
@@ -128,6 +131,7 @@ impl App {
                     editing: true,
                     load_state: IndexLoadState::Ready,
                     search_state: SearchState::Idle,
+                    search_queued: false,
                     prefetch_cache: HashMap::new(),
                 });
             }
@@ -176,6 +180,7 @@ impl App {
             editing: true,
             load_state,
             search_state: SearchState::Idle,
+            search_queued: false,
             prefetch_cache: HashMap::new(),
         })
     }
@@ -272,7 +277,7 @@ impl App {
                         let elapsed = start_time.elapsed();
 
                         // Only apply results if query still matches (user might have typed more)
-                        if result.query == self.query {
+                        if result.query == self.query && !self.search_queued {
                             match result.matches {
                                 Ok(matches) => {
                                     let count = matches.len();
@@ -286,7 +291,7 @@ impl App {
                                     self.selected = 0;
                                     self.update_preview();
 
-                                    // Prefetch adjacent previews in background
+                                    // Populate bounded adjacent previews.
                                     self.prefetch_adjacent_previews();
                                 }
                                 Err(e) => {
@@ -316,10 +321,21 @@ impl App {
                 // Nothing to do
             }
         }
+        if !self.is_searching() && self.search_queued {
+            self.search_queued = false;
+            self.execute_search();
+        }
     }
 
     pub fn set_query(&mut self, query: &str) {
         self.query = query.to_string();
+    }
+
+    pub fn set_initial_query(&mut self, query: &str) {
+        self.set_query(query);
+        if !self.is_loading() {
+            self.execute_search();
+        }
     }
 
     pub fn clear_query(&mut self) {
@@ -330,6 +346,15 @@ impl App {
     }
 
     pub fn execute_search(&mut self) {
+        if self.is_searching() {
+            self.search_queued = true;
+            self.status_message = "Waiting for current search; latest query queued...".to_string();
+            return;
+        }
+        if self.is_loading() {
+            return; // The latest query runs when loading/rebuilding completes.
+        }
+        self.search_queued = false;
         self.prefetch_cache.clear();
 
         if self.query.is_empty() {
@@ -349,6 +374,14 @@ impl App {
             };
             return;
         }
+
+        let parsed = match try_parse_query(&self.query) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.status_message = format!("Invalid query: {error}");
+                return;
+            }
+        };
 
         // Clear stale results immediately when starting a new search
         // This prevents showing old results if the new search fails
@@ -398,8 +431,6 @@ impl App {
                 return;
             }
         };
-
-        let parsed = parse_query(&self.query);
 
         if parsed.is_empty() {
             self.results.clear();
@@ -525,23 +556,38 @@ impl App {
             // Try to open in $EDITOR
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
 
-            // Format line number for editors that support it
-            let line_arg = format!("+{}", result.line_number);
+            let mut command = match editor_command(&editor, &full_path, result.line_number) {
+                Ok(command) => command,
+                Err(error) => {
+                    self.status_message = format!("Cannot launch editor: {error}");
+                    return;
+                }
+            };
 
             // Temporarily restore terminal before launching editor
             let _ = crossterm::terminal::disable_raw_mode();
-            let _ =
-                crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::LeaveAlternateScreen,
+                crossterm::event::DisableMouseCapture
+            );
 
-            let _ = Command::new(&editor)
-                .arg(&line_arg)
-                .arg(&full_path)
-                .status();
+            let result = command.status();
+            if let Err(error) = result {
+                self.status_message = format!("Cannot launch editor: {error}");
+            } else if let Ok(status) = result
+                && !status.success()
+            {
+                self.status_message = format!("Editor exited with {status}");
+            }
 
             // Restore TUI terminal state
             let _ = crossterm::terminal::enable_raw_mode();
-            let _ =
-                crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen);
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::EnterAlternateScreen,
+                crossterm::event::EnableMouseCapture
+            );
         }
     }
 
@@ -549,49 +595,33 @@ impl App {
         self.status_message = "Building index...".to_string();
         // Clear caches on reindex
         self.prefetch_cache.clear();
+        self.search_queued = true;
 
-        match build_index_with_progress(&self.root_path, true, true) {
-            Ok(()) => {
-                // Notify daemon to reload if we're using it
-                if self.using_daemon {
-                    if let Some(ref client) = self.client
-                        && let Ok(mut client) = client.lock()
-                    {
-                        let _ = client.reload(Some(&self.root_path));
-                    }
-                    self.status_message = "Index rebuilt (daemon notified)".to_string();
-
-                    // Re-run query if any
-                    if !self.query.is_empty() {
-                        self.execute_search();
-                    }
-                } else {
-                    // Reload reader directly
-                    match IndexReader::open(&self.root_path) {
-                        Ok(r) => {
-                            let doc_count = r.meta.doc_count;
-                            self.reader = Some(Arc::new(r));
-                            self.index_available = true;
-                            self.load_state = IndexLoadState::Ready;
-                            self.status_message = format!("Index rebuilt: {} files", doc_count);
-
-                            // Re-run query if any
-                            if !self.query.is_empty() {
-                                self.execute_search();
-                            }
-                        }
-                        Err(e) => {
-                            self.status_message = format!("Error loading index: {}", e);
-                            self.load_state = IndexLoadState::Failed;
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                self.status_message = format!("Index build failed: {}", e);
-                self.load_state = IndexLoadState::Failed;
-            }
+        if self.is_loading() {
+            return;
         }
+        let root = self.root_path.clone();
+        let client = self.client.clone();
+        let (tx, rx) = mpsc::channel();
+        self.load_state = IndexLoadState::Loading(rx);
+        thread::spawn(move || {
+            let result = (|| -> Result<IndexReader> {
+                {
+                    let _lock = crate::utils::IndexLock::acquire(&root)?;
+                    build_index_with_progress(&root, true, true)?;
+                }
+                if let Some(client) = client {
+                    let mut client = client
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("Failed to lock daemon client"))?;
+                    let (success, message) = client.reload(Some(&root))?;
+                    anyhow::ensure!(success, "Daemon reload failed: {message}");
+                }
+                IndexReader::open(&root)
+            })()
+            .map_err(|error| error.to_string());
+            let _ = tx.send(result);
+        });
     }
 
     pub fn get_selected_result(&self) -> Option<&SearchMatch> {
@@ -656,8 +686,7 @@ impl App {
         self.pending_key = None;
     }
 
-    /// Prefetch preview content for adjacent results (next/prev)
-    /// This runs in background to make navigation feel instant
+    /// Keep bounded preview content for nearby results ready for navigation.
     fn prefetch_adjacent_previews(&mut self) {
         let indices_to_prefetch: Vec<usize> = [
             self.selected.checked_sub(1),
@@ -677,9 +706,8 @@ impl App {
                 if let std::collections::hash_map::Entry::Vacant(entry) =
                     self.prefetch_cache.entry(full_path.clone())
                 {
-                    // Read and cache synchronously for now (files are usually small)
-                    // Could be made async for very large files
-                    if let Ok(content) = std::fs::read_to_string(&full_path) {
+                    // Bound I/O and allocation even for very large source files.
+                    if let Ok(content) = read_preview(&full_path) {
                         // Only cache files under 1MB
                         if content.len() < 1024 * 1024 {
                             entry.insert(content);
@@ -704,7 +732,7 @@ impl App {
             return Some(expand_tabs(content));
         }
         // Fall back to disk read
-        std::fs::read_to_string(path).ok().map(|s| expand_tabs(&s))
+        read_preview(path).ok().map(|s| expand_tabs(&s))
     }
 }
 
@@ -735,4 +763,225 @@ fn expand_tabs(s: &str) -> String {
     }
 
     result
+}
+
+/// Read a bounded UTF-8 preview; never allocate the entire large source file.
+fn read_preview(path: &Path) -> std::io::Result<String> {
+    const LIMIT: u64 = 1024 * 1024;
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(LIMIT).read_to_end(&mut bytes)?;
+    match String::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(error)
+            if error.as_bytes().len() == LIMIT as usize
+                && error.utf8_error().error_len().is_none() =>
+        {
+            let valid = error.utf8_error().valid_up_to();
+            let mut bytes = error.into_bytes();
+            bytes.truncate(valid);
+            Ok(String::from_utf8(bytes).expect("validated UTF-8 prefix"))
+        }
+        Err(error) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+    }
+}
+
+/// Parse EDITOR arguments without executing shell substitutions or operators.
+fn editor_command(editor: &str, path: &Path, line: u32) -> Result<Command> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut started = false;
+    let mut characters = editor.chars().peekable();
+    while let Some(ch) = characters.next() {
+        if escaped {
+            word.push(ch);
+            escaped = false;
+            started = true;
+        } else if ch == '\\'
+            && quote != Some('\'')
+            && characters
+                .peek()
+                .is_some_and(|next| next.is_whitespace() || matches!(next, '\\' | '\'' | '"'))
+        {
+            escaped = true;
+            started = true;
+        } else if Some(ch) == quote {
+            quote = None;
+        } else if quote.is_some() {
+            word.push(ch);
+        } else if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            started = true;
+        } else if ch.is_whitespace() {
+            if started {
+                words.push(std::mem::take(&mut word));
+                started = false;
+            }
+        } else {
+            word.push(ch);
+            started = true;
+        }
+    }
+    anyhow::ensure!(
+        quote.is_none() && !escaped,
+        "Unclosed quote or escape in EDITOR"
+    );
+    if started {
+        words.push(word);
+    }
+    let executable = words
+        .first()
+        .filter(|word| !word.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("EDITOR is empty"))?;
+    let mut command = Command::new(executable);
+    command.args(&words[1..]);
+    let name = Path::new(executable)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    match name {
+        "code" | "code-insiders" | "codium" | "cursor" => {
+            command
+                .arg("--goto")
+                .arg(format!("{}:{}", path.display(), line));
+        }
+        "subl" | "hx" | "helix" => {
+            command.arg(format!("{}:{}", path.display(), line));
+        }
+        "vi" | "vim" | "nvim" | "nano" | "emacs" | "emacsclient" => {
+            command.arg(format!("+{line}")).arg(path);
+        }
+        _ => {
+            command.arg(path);
+        }
+    }
+    Ok(command)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app() -> App {
+        App {
+            root_path: PathBuf::from("."),
+            start_path: PathBuf::from("."),
+            client: None,
+            using_daemon: false,
+            reader: None,
+            query: String::new(),
+            results: Vec::new(),
+            selected: 0,
+            mode: Mode::Search,
+            previous_mode: Mode::Search,
+            preview_scroll: 0,
+            preview_content: None,
+            preview_path: None,
+            status_message: String::new(),
+            index_available: false,
+            pending_key: None,
+            editing: true,
+            load_state: IndexLoadState::Ready,
+            search_state: SearchState::Idle,
+            search_queued: false,
+            prefetch_cache: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn initial_query_runs_when_ready_and_waits_for_loading() {
+        let mut ready = app();
+        ready.set_initial_query("needle");
+        assert_eq!(ready.status_message, "No index available");
+        let (_tx, rx) = mpsc::channel();
+        let mut loading = app();
+        loading.load_state = IndexLoadState::Loading(rx);
+        loading.set_initial_query("needle");
+        assert!(loading.status_message.is_empty());
+        assert_eq!(loading.query, "needle");
+    }
+
+    #[test]
+    fn repeated_submissions_coalesce_without_replacing_running_receiver() {
+        let mut app = app();
+        let (tx, rx) = mpsc::channel();
+        app.search_state = SearchState::Searching {
+            query: "old".into(),
+            receiver: rx,
+            start_time: Instant::now(),
+        };
+        for query in ["one", "two", "latest"] {
+            app.set_query(query);
+            app.execute_search();
+            assert!(app.is_searching());
+        }
+        assert!(app.search_queued);
+        tx.send(SearchResult {
+            query: "old".into(),
+            matches: Ok(Vec::new()),
+        })
+        .unwrap();
+        app.poll_search();
+        assert!(!app.is_searching());
+        assert!(!app.search_queued);
+        assert_eq!(app.query, "latest");
+        assert_eq!(app.status_message, "No index available");
+    }
+
+    #[test]
+    fn invalid_query_keeps_previous_results_and_reports_error() {
+        let mut app = app();
+        app.results.push(SearchMatch {
+            doc_id: 1,
+            path: "old.rs".into(),
+            line_number: 1,
+            score: 1.0,
+        });
+        app.set_query("\"unterminated");
+        app.execute_search();
+        assert_eq!(app.results.len(), 1);
+        assert!(app.status_message.starts_with("Invalid query:"));
+        assert!(!app.is_searching());
+    }
+
+    #[test]
+    fn editor_arguments_are_parsed_without_shell_execution() {
+        let path = Path::new("/tmp/a b.rs");
+        let command = editor_command("code --wait", path, 12).unwrap();
+        assert_eq!(command.get_program(), "code");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["--wait", "--goto", "/tmp/a b.rs:12"]
+        );
+        let command = editor_command("'/path with spaces/vim' -f", path, 12).unwrap();
+        assert_eq!(command.get_program(), "/path with spaces/vim");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["-f", "+12", "/tmp/a b.rs"]
+        );
+        let command = editor_command("editor '$(touch malicious)'", path, 1).unwrap();
+        assert_eq!(command.get_args().next().unwrap(), "$(touch malicious)");
+        let command =
+            editor_command(r#""C:\Program Files\Editor\editor.exe" --wait"#, path, 1).unwrap();
+        assert_eq!(command.get_program(), r"C:\Program Files\Editor\editor.exe");
+        assert!(editor_command("'unclosed", path, 1).is_err());
+        assert!(editor_command("", path, 1).is_err());
+    }
+
+    #[test]
+    fn preview_is_bounded_and_handles_split_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.txt");
+        let mut text = "x".repeat(1024 * 1024 - 1);
+        text.push_str("é remaining text");
+        std::fs::write(&path, text).unwrap();
+        let preview = read_preview(&path).unwrap();
+        assert_eq!(preview.len(), 1024 * 1024 - 1);
+        std::fs::write(&path, [0xff, 0xfe]).unwrap();
+        assert!(read_preview(&path).is_err());
+        std::fs::write(&path, [0xc3]).unwrap();
+        assert!(read_preview(&path).is_err());
+    }
 }

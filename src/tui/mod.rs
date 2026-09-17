@@ -2,7 +2,7 @@
 //!
 //! This module provides a full-featured TUI for interactive code search:
 //!
-//! - Real-time search as you type
+//! - Background searches submitted with Enter
 //! - Vim-style keybindings (j/k, Ctrl+d/u, gg/G)
 //! - Syntax-highlighted file preview
 //! - Context lines around matches
@@ -44,9 +44,25 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Restore the terminal on every return path, including failed app setup.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            crossterm::cursor::Show
+        );
+    }
+}
+
 pub fn run(path: PathBuf, initial_query: Option<String>) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
+    let _terminal_guard = TerminalGuard;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
@@ -60,9 +76,7 @@ pub fn run(path: PathBuf, initial_query: Option<String>) -> Result<()> {
 
     // Set initial query if provided (search will execute when index is ready)
     if let Some(query) = initial_query {
-        app.set_query(&query);
-        // Don't execute search here - index may not be loaded yet
-        // The query will be auto-executed when index load completes
+        app.set_initial_query(&query);
     }
 
     // Main loop
@@ -297,5 +311,87 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    #[test]
+    fn terminal_guard_restores_on_startup_error() {
+        const HELPER: &str = "FXI_TEST_TUI_TERMINAL_GUARD";
+        if std::env::var_os(HELPER).is_some() {
+            assert!(unsafe { libc::setsid() } >= 0);
+            assert_eq!(unsafe { libc::ioctl(0, libc::TIOCSCTTY as _, 0) }, 0);
+            let mut before = unsafe { std::mem::zeroed::<libc::termios>() };
+            assert_eq!(unsafe { libc::tcgetattr(0, &mut before) }, 0);
+            let directory = tempfile::tempdir().unwrap();
+            assert!(run(directory.path().join("does-not-exist"), None).is_err());
+            let mut after = unsafe { std::mem::zeroed::<libc::termios>() };
+            assert_eq!(unsafe { libc::tcgetattr(0, &mut after) }, 0);
+            let raw_flags = libc::ECHO | libc::ICANON | libc::ISIG | libc::IEXTEN;
+            assert_eq!(before.c_lflag & raw_flags, after.c_lflag & raw_flags);
+            assert_eq!(before.c_iflag, after.c_iflag);
+            assert_eq!(before.c_oflag, after.c_oflag);
+            return;
+        }
+        let mut master = -1;
+        let mut slave = -1;
+        let mut size = libc::winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::addr_of_mut!(size),
+                )
+            },
+            0
+        );
+        let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+        assert_eq!(
+            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+            0
+        );
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "tui::tests::terminal_guard_restores_on_startup_error",
+                "--nocapture",
+            ])
+            .env(HELPER, "1")
+            .stdin(slave.try_clone().unwrap())
+            .stdout(slave.try_clone().unwrap())
+            .stderr(slave.try_clone().unwrap());
+        let mut child = command.spawn().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            // A session leader can wait for PTY output to drain during exit.
+            let mut output = [0u8; 4096];
+            while master.read(&mut output).is_ok_and(|read| read > 0) {}
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                drop(master);
+                let _ = child.wait();
+                panic!("TUI terminal restoration helper timed out");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(status.success());
     }
 }
