@@ -1,49 +1,56 @@
-//! # FXI - Fast Code Search Engine
+//! # FXI — indexed code search
 //!
-//! FXI is a terminal-first, ultra-fast code search engine that achieves
-//! 100-400x faster search performance than ripgrep on large codebases
-//! through persistent indexing.
+//! FXI builds persistent indexes for local code search and provides a CLI,
+//! terminal UI and optional daemon. Performance depends on the corpus, query,
+//! output mode, cache state and update workload; measured comparisons and their
+//! limitations are recorded in the repository's performance reports.
 //!
-//! ## Architecture
+//! ## Modules
 //!
-//! The crate is organized into these main modules:
+//! - [`index`] — building, reading and compacting immutable index generations
+//! - [`query`] — bounded parsing, candidate planning, verification and ranking
+//! - [`server`] — local IPC, resident readers and optional filesystem watching
+//! - [`tui`] — interactive terminal search
+//! - [`output`] — CLI result formatting
+//! - [`utils`] — encoding, tokenization, paths and index locking
 //!
-//! - [`index`] - Index building and reading (trigram + token indexes)
-//! - [`query`] - Query parsing, planning, and execution
-//! - [`server`] - Persistent daemon for instant searches
-//! - [`tui`] - Interactive terminal UI
-//! - [`output`] - Result formatting (ripgrep-compatible)
-//! - [`utils`] - Utility functions (trigrams, encoding, bloom filters)
+//! ## Search an existing index
 //!
-//! ## Quick Start
-//!
-//! ```ignore
+//! ```no_run
 //! use fxi::index::reader::IndexReader;
-//! use fxi::query::{parse_query, QueryExecutor};
-//! use std::path::PathBuf;
+//! use fxi::query::{try_parse_query, QueryExecutor};
+//! use std::path::Path;
 //!
-//! // Open an existing index
-//! let reader = IndexReader::open(&PathBuf::from("/path/to/codebase")).unwrap();
-//!
-//! // Parse and execute a query
-//! let query = parse_query("fn main");
-//! let executor = QueryExecutor::new(&reader);
-//! let results = executor.execute(&query).unwrap();
-//!
-//! for result in results {
-//!     println!("{}:{}", result.path.display(), result.line_number);
+//! fn main() -> anyhow::Result<()> {
+//!     // Build this root first with `fxi index /path/to/codebase`.
+//!     let reader = IndexReader::open(Path::new("/path/to/codebase"))?;
+//!     // Inner quotes request one exact, case-sensitive phrase.
+//!     let query = try_parse_query(r#""fn main""#)?;
+//!     let executor = QueryExecutor::new(&reader);
+//!     for path in executor.execute_files_only(&query, 20)? {
+//!         println!("{}", path.display());
+//!     }
+//!     Ok(())
 //! }
 //! ```
 //!
-//! ## Performance
+//! Prefer [`query::try_parse_query`] to report malformed input immediately.
+//! The compatibility [`query::parse_query`] API retains an error node on failure;
+//! executors reject it rather than silently searching with a partial query.
+//! Bare literals match case-insensitive substrings, whitespace combines terms
+//! with file-level AND, and phrases/regexes have their own case semantics.
 //!
-//! FXI uses a hybrid two-tier indexing strategy:
+//! ## Indexing and freshness
 //!
-//! 1. **Trigram Index** - 3-byte substring sequences for fast candidate narrowing
-//! 2. **Token Index** - Extracted identifiers for exact word matching
+//! Conservative gram constraints narrow candidate files; source verification
+//! determines matches. Token/position data and immutable mapped segments support
+//! additional indexed operations. An existing reader does not automatically
+//! observe later generations. A stale index can miss files newly made matching,
+//! even though verification removes stale positive content matches.
 //!
-//! Combined with memory-mapped I/O, parallel processing, and LRU caching,
-//! this enables sub-100ms searches on million-file codebases.
+//! The watched daemon can expose bounded memory deltas before durable publication.
+//! Search visibility and persistence are distinct; use the documented daemon
+//! lifecycle and shutdown behavior when durable completion matters.
 
 pub mod index;
 pub mod output;

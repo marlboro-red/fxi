@@ -1,680 +1,398 @@
-# fxi Daemon Server API
+# FXI daemon API
 
-This document describes the wire protocol and API for the fxi daemon server, enabling other applications to integrate with fxi for fast code search.
+The daemon exposes indexed search and index lifecycle operations over local IPC.
+The schema lives in [`src/server/protocol.rs`](../src/server/protocol.rs); query
+behavior is defined in [search semantics](SEMANTICS.md). This document describes
+the current implementation, including limits that differ between output modes.
 
-## Transport
+## Transport and discovery
 
-### Protocol
+Each message is a four-byte **little-endian unsigned length**, followed by that
+many bytes of UTF-8 JSON. Read both the header and payload fully: a socket read
+can return fewer bytes than requested. The payload limit is **100 MiB
+(104,857,600 bytes)** in either direction. It is a byte limit, independent of
+result counts; a query below its record limit can still produce an oversized
+response. There is no pagination or streaming response protocol.
 
-The daemon uses a **length-prefixed JSON** protocol over local IPC:
+Use `fxi daemon socket-path` to discover the endpoint instead of reproducing
+platform-dependent path logic. `FXI_SOCKET` overrides the endpoint for both the
+server and clients. Without that override:
 
-```
-┌──────────────────┬──────────────────────────┐
-│ 4 bytes (u32 LE) │ N bytes (UTF-8 JSON)     │
-│ message length   │ message payload           │
-└──────────────────┴──────────────────────────┘
-```
+| Platform | Resolution order |
+|---|---|
+| Unix/macOS | `$XDG_RUNTIME_DIR/fxi.sock`, otherwise `~/.local/run/fxi.sock`, otherwise `/tmp/fxi-{uid}.sock` if no home directory is available |
+| Windows | `\\.\pipe\fxi-{USERNAME}`, otherwise `\\.\pipe\fxi` |
 
-- **Length prefix**: 4 bytes, unsigned 32-bit integer, **little-endian**
-- **Payload**: UTF-8 encoded JSON
-- **Max message size**: 100 MB
-- **I/O timeout**: 30 seconds per read/write
+These are environment/home-resolution fallbacks, not a search through existing
+socket files. Unix socket permissions are `0600`. There is no protocol-level
+authentication; named-pipe naming alone is not an authentication guarantee.
 
-### Connection
+Connections can carry multiple requests. Both platforms limit active connections
+to 64 and use approximately 30-second I/O timeouts. An idle or incomplete frame
+can cause the connection to close. These are transport timeouts, **not search
+execution deadlines**; disconnecting does not provide query cancellation.
 
-See [Socket Path Discovery](#socket-path-discovery) above for the full resolution order.
+On Unix, requests on one connection can execute concurrently and replies may
+arrive out of order. The default per-connection handler limit is 32, configurable
+with `FXI_MAX_PIPELINED`; overload returns `Error`. Windows handles requests
+sequentially on each connection. Do not depend on concurrent requests completing
+in submission order, or pipeline dependent mutations and searches.
 
-### Socket Path Discovery
+### Correlation, versions and failures
 
-Third-party clients need to know where the daemon is listening. Two mechanisms simplify this:
+Any request may include a string `request_id`; a successfully decoded request's
+response echoes it. Non-string IDs are ignored. Use distinct IDs for concurrent
+requests. Without correlation support, keep only one request outstanding rather
+than assuming FIFO on a concurrently executing server.
 
-**1. `FXI_SOCKET` environment variable** (highest priority)
+The current `protocol_version` is **2**. `Hello` reports the server's protocol and
+package versions; the server does not reject a different client version itself.
+Clients must compare versions. Optional fields and request variants have been
+added without a version increment, so version 2 alone is not a capability list
+for every older build. Older servers may ignore new option fields or reject a
+new request variant. Pin compatible builds when relying on newer semantics.
 
-If set, all path-resolution logic is skipped and this value is used directly:
+Any decoded request can return `Error` instead of its usual response. Invalid
+JSON, unknown variants, oversized frames and partial-frame failures close the
+connection; an error frame may be sent first and may lack `request_id`. An
+oversized response can likewise produce an encoding error or disconnect; do not
+assume every failure produces a decodable error response. Reduce result/context
+limits rather than retrying the same oversized query indefinitely.
 
-```bash
-export FXI_SOCKET=/tmp/custom.sock
-# All fxi commands and clients will use /tmp/custom.sock
-```
+## Root selection and search scope
 
-**2. `fxi daemon socket-path` CLI command**
+`Search`, `ContentSearch`, `Reload` and `WatchStatus` accept an optional
+`root_path`. Supply an absolute existing path:
 
-Prints the resolved socket/pipe path to stdout. Clients can shell out once at startup:
+- An indexed root selects that codebase.
+- A file or subdirectory resolves its containing codebase. For **search**
+  requests, results are also restricted to that file/subtree before limits are
+  applied. Lifecycle and watch-status operations apply to the whole root.
+- Omitting the field, or sending `null`, uses the sole loaded index. Zero loaded
+  indexes or more than one loaded index produces an error. This does not select
+  the sole index stored on disk if none is loaded.
 
-```bash
-# Shell out to get the path
-FXI_SOCKET=$(fxi daemon socket-path)
+Search can load an existing index on demand. It does not build a missing index.
+When watching is enabled, loading a root starts its watcher/reconciliation.
+Successful root-specific responses include `resolved_root`. All result paths are
+relative to **that resolved root**, including searches scoped to a subdirectory.
+A client can cache it for root identity, but must retain the original scoped path
+if it wants subsequent queries to keep the same restriction.
 
-# Python
-import subprocess
-socket_path = subprocess.check_output(["fxi", "daemon", "socket-path"]).decode().strip()
+## Query language
 
-# Node.js
-const { execSync } = require("child_process");
-const socketPath = execSync("fxi daemon socket-path").toString().trim();
-```
+Both `Search.query` and `ContentSearch.pattern` use the **FXI query language**.
+`ContentSearch.pattern` is not implicitly a raw regex. For example, use
+`re:/TODO.*@\w+/` to request regex matching.
 
-**3. Built-in fallback chains** (when `FXI_SOCKET` is not set)
+| Query text | Meaning |
+|---|---|
+| `foo bar` | Both case-insensitive substrings occur somewhere in the same file |
+| `"foo bar"` | Exact, case-sensitive phrase on one line |
+| `foo-bar` | One substring containing a literal hyphen |
+| `(foo \| bar) -debug` | Boolean grouping and file-level exclusion |
+| `re:/foo\/bar/` | Regex matching `foo/bar`; the slash delimiter is escaped |
+| `near:foo,bar,5` | Terms fit in a shared window whose largest line difference is at most 5 |
+| `ext:rs (foo \| bar)` | Global extension filter plus a grouped content expression |
+| `file:main.rs` / `file:*.rs` | Case-insensitive exact basename / basename glob |
+| `path:src/*.rs` | Root-relative path glob; `*` does not cross separators |
+| `line:10-20 foo` | Return positive matching lines in the inclusive range |
+| `size:>1000` / `size:<1000` | Strict byte-size comparisons |
+| `mtime:2026-09-18` | UTC calendar day, ending before the next midnight |
+| `^3:needle top:20` | Boost and explicit limit for ranked `Search` |
 
-Unix / macOS — Unix domain socket, checked in order:
+Malformed input returns an error. Source queries are limited to 64 KiB, 1,024
+parsed terms and 32 nested groups; public AST execution has additional traversal
+checks. Boosts must be finite and non-negative. Dates and numeric ranges are
+validated. Filters cannot be negated, placed inside groups, or mixed into an
+ungrouped OR. Duplicate fields are rejected, except compatible opposite numeric
+bounds. Write `ext:rs (foo | bar)`, not `ext:rs foo | bar`.
 
-| Priority | Path |
-|----------|------|
-| 1 | `$FXI_SOCKET` (env var override) |
-| 2 | `$XDG_RUNTIME_DIR/fxi.sock` |
-| 3 | `~/.local/run/fxi.sock` |
-| 4 | `/tmp/fxi-{uid}.sock` |
+Positive Boolean matches are deduplicated by line. NOT tests file-level truth
+without inventing a positive source line. A filter-only or pure-negative result
+can be represented as a file-level record with line number 1, empty content and
+zero-length span; that is not a claim that source line 1 matched.
 
-Windows — Named pipe:
+Candidates are verified against source content or validated source snapshots.
+A stale index can still miss newly matching files until it is updated. Watched
+roots can expose small updates before durable publication. Neither `Ping` nor
+`WatchStatus.pending_changes == 0` is a filesystem freshness barrier. See
+[Freshness](SEMANTICS.md#freshness) for the visibility/persistence contract.
 
-| Priority | Name |
-|----------|------|
-| 1 | `$FXI_SOCKET` (env var override) |
-| 2 | `\\.\pipe\fxi-{USERNAME}` |
-| 3 | `\\.\pipe\fxi` |
+## Requests and responses
 
-### Path Resolution
+Every message has a top-level `type`. All examples below show JSON payloads;
+add the length prefix when transmitting them. Optional `request_id` is omitted
+from some examples for readability. Integer fields must be non-negative and fit
+their Rust protocol types; context and line numbers are `u32`.
 
-The `root_path` field in `Search`, `ContentSearch`, and `Reload` requests is **optional**. The daemon resolves which index to use via three strategies, tried in order:
-
-1. **Exact root path** — If `root_path` matches a loaded (or loadable) index root exactly, it is used directly. This is the original behavior.
-
-2. **Subdirectory path** — If `root_path` points to a subdirectory of an indexed codebase, the daemon walks up to find the codebase root (`.git` directory or indexed parent). For example, sending `root_path: "/home/user/project/src/utils"` resolves to `/home/user/project`.
-
-3. **Omitted** — If `root_path` is omitted (or `null`), the daemon checks how many indexes are loaded:
-   - **Exactly one** — uses that index automatically.
-   - **Zero** — returns an error: `"No indexes loaded; root_path is required"`.
-   - **Two or more** — returns an error listing the loaded roots: `"Ambiguous: 2 indexes loaded; specify root_path. Loaded: /home/user/project1, /home/user/project2"`.
-
-All three search/reload responses include a `resolved_root` field containing the absolute path the daemon resolved to. Clients can cache this value to avoid repeated resolution.
-
-### Authentication
-
-None. Access is controlled by filesystem permissions (socket is `0o600` on Unix, per-user pipe on Windows).
-
-### Connection Lifecycle
-
-The connection is persistent — multiple request/response pairs can be sent over the same connection. Clients may **pipeline** multiple requests without waiting for responses; the server processes them concurrently and may respond out of order (see [Request Correlation and Pipelining](#request-correlation-and-pipelining)).
-
-```
-Client                              Server
-  │                                   │
-  ├─── connect ──────────────────────►│
-  │                                   │
-  │  ┌─ Hello (optional) ───────────►│
-  │  │◄── Hello ─────────────────────┤
-  │  │                                │
-  │  │─ request A ──────────────────►│
-  │  │─ request B ──────────────────►│
-  │  │─ request C ──────────────────►│
-  │  │◄── response B ────────────────┤  (out-of-order)
-  │  │◄── response A ────────────────┤
-  │  │◄── response C ────────────────┤
-  │  └                                │
-  │                                   │
-  └─── disconnect ───────────────────►│
-```
-
-### Protocol Versioning
-
-The protocol uses a single integer version number (`PROTOCOL_VERSION`, currently `2`). The version is bumped only on **breaking** changes (field removal/rename, semantic changes, wire format changes). Adding new optional fields or new request types does **not** require a bump.
-
-Two mechanisms expose the version:
-
-1. **Hello handshake** — optional first message after connect. Client sends its protocol version, server responds with its version + software version. Lets clients fail fast on mismatch.
-2. **StatusResponse fields** — `protocol_version` and `server_version` are included in every Status response.
-
-#### Backwards Compatibility
-
-| Scenario | Behavior |
-|----------|----------|
-| Old client + New server | No Hello sent, works as before. New StatusResponse fields ignored by client. |
-| New client + Old server | Hello returns Error (unknown variant), client knows it's pre-versioning. StatusResponse version fields default to `0`/`""`. |
-| New client + New server | Hello succeeds, versions compared. |
-
-### Request Correlation and Pipelining
-
-All requests and responses support an optional `request_id` field (JSON string). When a client includes `request_id` in a request, the server echoes it in the corresponding response. This lets clients send multiple requests on a single connection and match responses by ID, even if the server responds out of order.
-
-**Wire format**: `request_id` is a sibling of the `type` discriminator at the top level of the JSON object:
+### Hello and Ping
 
 ```json
-{"type": "Search", "query": "main", "limit": 10, "request_id": "c-42"}
-{"type": "Search", "matches": [...], "duration_ms": 5.2, "cached": false, "request_id": "c-42"}
+{"type":"Hello","protocol_version":2,"request_id":"hello-1"}
 ```
-
-**Rules:**
-- `request_id` is **optional**. Omitting it is fully supported (backward compatible).
-- The value must be a JSON **string**. Non-string values are ignored by the server.
-- The server echoes the exact `request_id` from the request in its response.
-- Clients may use any string format: counters (`"0"`, `"1"`, ...), UUIDs, etc.
-
-**Concurrency limit**: The server processes up to **32** concurrent requests per connection by default. Excess requests receive an `Error` response with the `request_id` preserved. The limit is configurable via the `FXI_MAX_PIPELINED` environment variable.
-
-**Backward compatibility:**
-
-| Scenario | Behavior |
-|----------|----------|
-| Old client + New server | No `request_id` sent. Server responds without `request_id`. Works as before. |
-| New client + Old server | Client sends `request_id`. Old server ignores it (unknown field). Response has no `request_id`. Client falls back to FIFO matching. |
-| New client + New server | Full pipelining with `request_id` correlation. |
-
----
-
-## Message Format
-
-All requests and responses are JSON objects with a `"type"` discriminator field (serde tagged enum).
-
-### Requests
-
-```typescript
-type Request =
-  | { type: "Search";        query: string; root_path?: string; limit: number; request_id?: string }
-  | { type: "ContentSearch"; pattern: string; root_path?: string; limit: number; options: ContentSearchOptions; request_id?: string }
-  | { type: "Status";        request_id?: string }
-  | { type: "Reload";        root_path?: string; request_id?: string }
-  | { type: "Shutdown";      request_id?: string }
-  | { type: "Ping";          request_id?: string }
-  | { type: "Hello";         protocol_version: number; request_id?: string }
-```
-
-### Responses
-
-```typescript
-type Response =
-  | { type: "Search";        matches: SearchMatchData[]; duration_ms: number; cached: boolean; resolved_root?: string; request_id?: string }
-  | { type: "ContentSearch"; matches: ContentMatch[]; duration_ms: number; files_with_matches: number; resolved_root?: string; request_id?: string }
-  | { type: "Status";        uptime_secs: number; indexes_loaded: number; total_docs: number; queries_served: number; cache_hit_rate: number; memory_bytes: number; loaded_roots: string[]; protocol_version?: number; server_version?: string; request_id?: string }
-  | { type: "Reloaded";      success: boolean; message: string; resolved_root?: string; request_id?: string }
-  | { type: "ShuttingDown";  request_id?: string }
-  | { type: "Pong";          request_id?: string }
-  | { type: "Error";         message: string; request_id?: string }
-  | { type: "Hello";         protocol_version: number; server_version: string; request_id?: string }
-```
-
-Any request can return an `Error` response.
-
----
-
-## API Reference
-
-### Search
-
-Index-based full-text search using the fxi query syntax (supports AND, OR, NOT, phrase matching, proximity, regex, file/path/extension filters, etc.).
-
-**Request**
 
 ```json
-{
-  "type": "Search",
-  "query": "fn main",
-  "root_path": "/home/user/project",
-  "limit": 100
-}
+{"type":"Hello","protocol_version":2,"server_version":"0.1.0","request_id":"hello-1"}
 ```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `query` | string | fxi query string (see [Query Syntax](#query-syntax)) |
-| `root_path` | string? | Absolute path to the indexed codebase root (optional — see [Path Resolution](#path-resolution)) |
-| `limit` | number | Max results to return. `0` = use the query's `top:N` limit or server default |
-
-**Response**
 
 ```json
-{
-  "type": "Search",
-  "matches": [
-    {
-      "path": "src/main.rs",
-      "line_number": 10,
-      "score": 2.5
-    }
-  ],
-  "duration_ms": 12.3,
-  "cached": false,
-  "resolved_root": "/home/user/project",
-  "request_id": "c-42"
-}
+{"type":"Ping","request_id":"ping-1"}
 ```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `matches` | SearchMatchData[] | Array of matches |
-| `matches[].path` | string | File path relative to `root_path` |
-| `matches[].line_number` | number (u32) | 1-based line number |
-| `matches[].score` | number (f32) | Relevance score (higher = better) |
-| `duration_ms` | number (f64) | Server-side search time in milliseconds |
-| `cached` | boolean | `true` if result was served from cache |
-| `resolved_root` | string? | Absolute path of the codebase root the server resolved to |
-
----
-
-### ContentSearch
-
-Regex/literal pattern search with context lines (ripgrep-like). Searches file contents directly using the index for acceleration.
-
-**Request**
 
 ```json
-{
-  "type": "ContentSearch",
-  "pattern": "TODO.*@\\w+",
-  "root_path": "/home/user/project",
-  "limit": 50,
-  "options": {
-    "context_before": 2,
-    "context_after": 2,
-    "case_insensitive": false,
-    "files_only": false
-  }
-}
+{"type":"Pong","request_id":"ping-1"}
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `pattern` | string | Search pattern (regex or literal) |
-| `root_path` | string? | Absolute path to the indexed codebase root (optional — see [Path Resolution](#path-resolution)) |
-| `limit` | number | Max results. `0` = up to 10,000,000 (server cap) |
-| `options.context_before` | number (u32) | Lines of context before each match |
-| `options.context_after` | number (u32) | Lines of context after each match |
-| `options.case_insensitive` | boolean | Case-insensitive matching |
-| `options.files_only` | boolean | Only return first match per file (optimized path, for `-l` mode) |
+`Pong` tests protocol responsiveness, not index freshness or persistence.
 
-**Response**
+### Search: ranked results
 
 ```json
-{
-  "type": "ContentSearch",
-  "matches": [
-    {
-      "path": "src/main.rs",
-      "line_number": 42,
-      "line_content": "  // TODO @alice fix this",
-      "match_start": 5,
-      "match_end": 19,
-      "context_before": [[40, "fn process() {"], [41, "  let x = 1;"]],
-      "context_after": [[43, "  println!(\"done\");"], [44, "}"]]
-    }
-  ],
-  "duration_ms": 25.5,
-  "files_with_matches": 3
-}
+{"type":"Search","query":"fn main","root_path":"/work/project/src","limit":10,"request_id":"search-1"}
 ```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `matches` | ContentMatch[] | Array of content matches |
-| `matches[].path` | string | File path relative to `root_path` |
-| `matches[].line_number` | number (u32) | 1-based line number of the match |
-| `matches[].line_content` | string | Full text of the matching line |
-| `matches[].match_start` | number | Byte offset of match start within the line |
-| `matches[].match_end` | number | Byte offset of match end within the line |
-| `matches[].context_before` | [number, string][] | Context lines before: `[line_number, content]` tuples |
-| `matches[].context_after` | [number, string][] | Context lines after: `[line_number, content]` tuples |
-| `duration_ms` | number (f64) | Server-side search time in milliseconds |
-| `files_with_matches` | number | Count of unique files containing matches |
-| `resolved_root` | string? | Absolute path of the codebase root the server resolved to |
-
----
-
-### Status
-
-Health check and server statistics.
-
-**Request**
 
 ```json
-{ "type": "Status" }
+{"type":"Search","matches":[{"path":"src/main.rs","line_number":10,"score":2.5}],"duration_ms":4.2,"cached":false,"resolved_root":"/work/project","request_id":"search-1"}
 ```
 
-**Response**
+`query` and `limit` are required. Results contain a relative `path`, a 1-based
+`line_number` and finite numeric `score`. Ranked mode can include filename
+fallback matches; files-only/content/count modes do not. Ranking evaluates the
+verified result set before applying its limit.
+
+| Wire `limit` | Query limit | Effective ranked limit |
+|---|---|---|
+| `N > 0` | No `top:`, or `top:0` | `N` |
+| `0` | No `top:`, or `top:0` | Unlimited by record count |
+| `0` | `top:M`, `M > 0` | `M` |
+| `N > 0` | `top:M`, `M > 0` | `min(N, M)` |
+
+There is no hidden 100-result default on this wire operation. The 100 MiB frame
+limit still applies. `sort:path` and `sort:recency` select alternate ranked-output
+orders. `duration_ms` is server-side elapsed handling time, not client latency.
+`cached` is currently always `false`: full query responses are not cached.
+Source and index caches may still be used internally.
+
+### ContentSearch: lines, files or counts
 
 ```json
-{
-  "type": "Status",
-  "uptime_secs": 3600,
-  "indexes_loaded": 2,
-  "total_docs": 150000,
-  "queries_served": 1250,
-  "cache_hit_rate": 0.756,
-  "memory_bytes": 10485760,
-  "loaded_roots": ["/home/user/project1", "/home/user/project2"],
-  "protocol_version": 2,
-  "server_version": "0.1.0"
-}
+{"type":"ContentSearch","pattern":"re:/TODO.*@\\w+/","root_path":"/work/project","limit":50,"options":{"context_before":1,"context_after":1,"case_insensitive":false,"files_only":false,"compact_files":false,"counts_only":false,"word_regexp":false},"request_id":"content-1"}
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `uptime_secs` | number (u64) | Seconds since daemon started |
-| `indexes_loaded` | number | Number of indexes currently in memory |
-| `total_docs` | number (u32) | Total documents across all loaded indexes |
-| `queries_served` | number (u64) | Total queries handled since start |
-| `cache_hit_rate` | number (f32) | Cache hit rate, `0.0` to `1.0` |
-| `memory_bytes` | number (u64) | Approximate memory usage in bytes |
-| `loaded_roots` | string[] | Absolute paths of all loaded codebase roots |
-| `protocol_version` | number (u32) | Protocol version (`0` if server predates versioning) |
-| `server_version` | string | Server software version (empty if server predates versioning) |
+`pattern`, `limit` and `options` are required. Within `options`, the first three
+fields below are required; the remaining booleans default to `false` when absent.
 
----
+| Option | Meaning |
+|---|---|
+| `context_before`, `context_after` | Context lines per content match (`u32`) |
+| `case_insensitive` | Ignore case for phrases/regexes; bare literals already ignore case |
+| `files_only` | Return each matching file once; takes precedence over `counts_only` |
+| `compact_files` | With `files_only`, return paths in `file_paths` instead of placeholder content records |
+| `counts_only` | Return `[path, count]` pairs in `file_counts` |
+| `word_regexp` | Apply Unicode regex word boundaries structurally, preserving leaf case behavior; boosts and `near:` are rejected in this mode |
 
-### Reload
+Content output is path/line ordered; files and counts are path ordered.
+`sort:` and `top:` do not control this operation: use its wire `limit`.
 
-Force the daemon to reload the index for a codebase from disk. Clears the query cache for that index.
+| Mode | Limit and payload |
+|---|---|
+| Full content | `limit` caps returned records globally; `0` means up to the 10,000,000-record cap. Payload uses `matches`. |
+| Files only | `limit` caps files, with the same 10,000,000 cap. With `compact_files:true`, `matches` is empty and `file_paths` contains the paths; otherwise each file gets an empty-content placeholder in `matches`. |
+| Counts only | `limit` caps the total counted matches across path-ordered files, **not per-file counts**; `0` is unlimited by count. `matches` is empty and `file_counts` contains pairs. This path does not apply the 10,000,000-record cap. |
 
-**Request**
+All modes remain subject to the frame byte limit. Compact/count fields are
+optional: clients should tolerate their absence from older servers. Empty
+queries currently return empty `matches` without either optional field.
+
+A full-content response has this shape:
 
 ```json
-{
-  "type": "Reload",
-  "root_path": "/home/user/project"
-}
+{"type":"ContentSearch","matches":[{"path":"src/main.rs","line_number":2,"line_content":"TODO fix","match_start":0,"match_end":4,"context_before":[[1,"fn main() {"]],"context_after":[[3,"}"]]}],"duration_ms":3.1,"files_with_matches":1,"resolved_root":"/work/project"}
 ```
 
-`root_path` is optional — see [Path Resolution](#path-resolution).
+`match_start` is inclusive and `match_end` exclusive, both **UTF-8 byte offsets**
+within `line_content`. JavaScript/UTF-16 clients must convert them before slicing.
+The current schema retains one positive span per matching line, not every
+occurrence. Context arrays contain `[line_number, text]` pairs and can overlap
+between records; presentation clients should merge overlapping context intervals.
 
-**Response**
+`files_with_matches` counts all verified matching files **before** truncation in
+full-content mode. In files/count modes it counts the files represented in the
+returned payload. Do not infer the same completeness meaning across these modes.
+
+### Status and WatchStatus
 
 ```json
-{
-  "type": "Reloaded",
-  "success": true,
-  "message": "Reloaded 150000 files",
-  "resolved_root": "/home/user/project"
-}
+{"type":"Status"}
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `success` | boolean | Whether the reload succeeded |
-| `message` | string | Human-readable status message |
-| `resolved_root` | string? | Absolute path of the codebase root the server resolved to |
+The response has `type:"Status"` and these fields:
 
----
+| Field | Meaning and limits |
+|---|---|
+| `uptime_secs` | Seconds since daemon construction |
+| `indexes_loaded`, `loaded_roots` | Number and absolute paths of resident roots; root order is unspecified |
+| `total_docs` | Live indexed documents across loaded readers (`u32`) |
+| `queries_served` | Recorded successful nonempty-query searches; not every request or error |
+| `protocol_version`, `server_version` | Wire protocol and package versions |
+| `watch_enabled` | Whether this daemon was started with watching enabled |
+| `watched_roots` | Roots currently reported as having running watcher handles |
+| `cache_hit_rate` | Legacy query-response-cache metric; currently zero, not the source-cache hit rate |
+| `memory_bytes` | Legacy heuristic: roughly stored document count × 100 bytes plus 1 MiB per root. **Not RSS, allocated bytes, or a memory-budget guarantee.** |
+
+Use operating-system measurements for memory comparisons. `watch_enabled` does
+not mean every stored index is loaded/watched, and a running watcher handle is
+not an end-to-end freshness check.
+
+```json
+{"type":"WatchStatus","root_path":"/work/project"}
+```
+
+```json
+{"type":"WatchStatus","watching":true,"pending_changes":2,"resolved_root":"/work/project"}
+```
+
+`WatchStatus` does not load an unloaded root. `pending_changes` is the count in
+the daemon's accumulated pending batch, not every event in the OS, debouncer or
+channel. Pending paths may already be searchable through a memory snapshot while
+awaiting persistence; zero does not prove that the root is fully up to date.
+
+### Reload and Remove
+
+```json
+{"type":"Reload","root_path":"/work/project"}
+```
+
+```json
+{"type":"Reloaded","success":true,"message":"Reloaded current generation","resolved_root":"/work/project"}
+```
+
+`Reload` opens the current durable generation and replaces the resident reader,
+or loads the root if needed. It does not scan/rebuild source files itself and is
+not a “flush visible changes” request. Check both the response type and
+`success`; reload failure can return `Reloaded` with `success:false`, while root
+resolution can return `Error`. New searches use the replaced reader; already
+running searches may retain their original immutable snapshot.
+
+```json
+{"type":"Remove","root_path":"/work/project"}
+```
+
+```json
+{"type":"Reloaded","success":true,"message":"Removed index and unloaded daemon reader","resolved_root":"/work/project"}
+```
+
+`Remove.root_path` is required. Removal stops the root's watcher, unloads its
+resident reader, discards its pending batch and removes its stored index under
+the index writer lock. Source files are not deleted. The response deliberately
+reuses `Reloaded`; there is no `Removed` variant. Failures return `Error`.
+Already-running searches may still finish using a retained snapshot; a subsequent
+new search cannot silently use an unloaded reader.
 
 ### Shutdown
 
-Graceful shutdown. The server flushes pending changes, closes file watchers, cleans up the socket/pipe and PID file, then exits.
-
-**Request**
-
 ```json
-{ "type": "Shutdown" }
+{"type":"Shutdown","request_id":"stop-1"}
 ```
 
-**Response**
-
 ```json
-{ "type": "ShuttingDown" }
+{"type":"ShuttingDown","request_id":"stop-1"}
 ```
 
----
+Despite its name, `ShuttingDown` is sent **after the pending-update persistence
+phase reports success**. The daemon stops and joins watcher producers, drains
+final batches, reconciles watched roots and persists pending work. The update
+loop retries pending work for up to approximately 20 seconds; the request waits
+up to 25 seconds for its result. These are retry/wait bounds, not guaranteed
+upper bounds on a filesystem operation already running.
 
-### Ping
+If persistence fails or the wait expires, the response is `Error`, not a success
+acknowledgment. The daemon is still shutting down; an error or lost connection
+must not be treated as proof of durability. Resolve read/writer-lock problems
+and restart with `--watch` or run an index update to reconcile. Successful
+acknowledgment also does not mean socket/PID cleanup or process exit has already
+completed. Stop editing during shutdown if a final on-disk snapshot matters;
+writes made after watchers stop are outside that snapshot.
 
-Lightweight connection test with no payload.
+After shutdown begins, new search/reload/remove/watch/hello requests are rejected.
+Ping, Status and repeated Shutdown requests are allowed while the endpoint is
+still available. Do not use a shutdown request to wait for every pipelined search
+on other connections to finish.
 
-**Request**
+## Minimal sequential Python client (Unix)
 
-```json
-{ "type": "Ping" }
-```
-
-**Response**
-
-```json
-{ "type": "Pong" }
-```
-
----
-
-### Hello
-
-Optional protocol version handshake. Should be the first message after connecting. If the server does not support Hello (pre-versioning), it returns an Error response with "unknown variant" — the client should treat this as protocol version 0.
-
-**Request**
-
-```json
-{
-  "type": "Hello",
-  "protocol_version": 2
-}
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `protocol_version` | number (u32) | Client's protocol version |
-
-**Response**
-
-```json
-{
-  "type": "Hello",
-  "protocol_version": 2,
-  "server_version": "0.1.0"
-}
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `protocol_version` | number (u32) | Server's protocol version |
-| `server_version` | string | Server software version (e.g. `"0.1.0"`) |
-
----
-
-### Error
-
-Any request can produce an error response instead of the expected response type.
-
-```json
-{
-  "type": "Error",
-  "message": "Invalid path: No such file or directory"
-}
-```
-
-Common error causes:
-- Path does not exist or is not canonicalizable
-- Index not found for the given `root_path`
-- Query parse error (malformed query syntax)
-- Search execution failure
-- Message exceeds 100 MB size limit
-- Malformed JSON payload
-
----
-
-## Query Syntax
-
-The `query` field in `Search` requests supports fxi's full query syntax:
-
-| Syntax | Description | Example |
-|--------|-------------|---------|
-| `foo bar` | AND — both terms must match | `"error handler"` |
-| `"exact phrase"` | Phrase match | `"\"fn main\""` |
-| `foo \| bar` | OR — either term | `"TODO \| FIXME"` |
-| `-foo` | NOT — exclude term | `"error -debug"` |
-| `(a \| b) c` | Grouping | `"(read \| write) file"` |
-| `near:a,b,N` | Proximity — terms within N lines | `"near:async,await,5"` |
-| `re:/pattern/` | Regex | `"re:/fn\\s+\\w+/"` |
-| `file:name` | File name contains | `"file:config"` |
-| `file:*.ext` | File name glob | `"file:*.json"` |
-| `ext:rs` | File extension | `"ext:rs"` |
-| `path:glob` | Path glob | `"path:src/utils/*"` |
-| `lang:name` | Language filter | `"lang:rust"` |
-| `size:>N` | File size filter (bytes) | `"size:>1000"` |
-| `line:A-B` | Line range filter | `"line:100-200"` |
-| `mtime:>date` | Modified time filter | `"mtime:>2024-01-01"` |
-| `sort:recency` | Sort by modification time | `"sort:recency"` |
-| `top:N` | Limit results | `"top:100"` |
-
----
-
-## Example: Python Client
+This example discovers the actual endpoint, validates framing, correlates replies
+and fails explicitly on protocol errors. Replace the example root with an
+existing indexed root. It neither builds an index nor starts/stops the daemon.
 
 ```python
+import json
 import socket
 import struct
-import json
-import os
-import threading
+import subprocess
 
-def get_socket_path():
-    # Highest priority: FXI_SOCKET env var override
-    override = os.environ.get("FXI_SOCKET")
-    if override:
-        return override
-    xdg = os.environ.get("XDG_RUNTIME_DIR")
-    if xdg:
-        return os.path.join(xdg, "fxi.sock")
-    home = os.path.expanduser("~")
-    return os.path.join(home, ".local", "run", "fxi.sock")
+MAX_FRAME = 100 * 1024 * 1024
 
-def send_request(sock, request):
-    payload = json.dumps(request).encode("utf-8")
-    sock.sendall(struct.pack("<I", len(payload)))
-    sock.sendall(payload)
 
-def read_response(sock):
-    length_bytes = sock.recv(4)
-    if len(length_bytes) < 4:
-        raise ConnectionError("Connection closed")
-    length = struct.unpack("<I", length_bytes)[0]
-    data = b""
+def read_exact(stream, length):
+    data = bytearray()
     while len(data) < length:
-        chunk = sock.recv(length - len(data))
+        chunk = stream.recv(length - len(data))
         if not chunk:
-            raise ConnectionError("Connection closed")
-        data += chunk
-    return json.loads(data.decode("utf-8"))
+            raise ConnectionError("Daemon closed the connection")
+        data.extend(chunk)
+    return bytes(data)
 
-# Connect
-sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-sock.settimeout(30)
-sock.connect(get_socket_path())
 
-# Hello (optional version handshake)
-send_request(sock, {"type": "Hello", "protocol_version": 2, "request_id": "0"})
-hello = read_response(sock)
-if hello["type"] == "Hello":
-    print(f"Server protocol: v{hello['protocol_version']}, version: {hello['server_version']}")
-else:
-    print("Server predates protocol versioning")
+def request(stream, payload, request_id):
+    payload = dict(payload, request_id=request_id)
+    encoded = json.dumps(payload).encode("utf-8")
+    if len(encoded) > MAX_FRAME:
+        raise ValueError("Request exceeds frame limit")
+    stream.sendall(struct.pack("<I", len(encoded)) + encoded)
+    length = struct.unpack("<I", read_exact(stream, 4))[0]
+    if length > MAX_FRAME:
+        raise ValueError("Response exceeds frame limit")
+    response = json.loads(read_exact(stream, length))
+    if response.get("request_id") != request_id:
+        raise RuntimeError("Missing or unexpected request_id; close this connection")
+    if response["type"] == "Error":
+        raise RuntimeError(response["message"])
+    return response
 
-# Ping
-send_request(sock, {"type": "Ping", "request_id": "1"})
-print(read_response(sock))  # {"type": "Pong", "request_id": "1"}
 
-# Sequential search (root_path is optional — omit if only one index is loaded)
-send_request(sock, {
-    "type": "Search",
-    "query": "fn main",
-    "root_path": "/home/user/project",
-    "limit": 10,
-    "request_id": "2"
-})
-result = read_response(sock)
-print(f"Resolved root: {result.get('resolved_root', 'N/A')}")
-for match in result["matches"]:
-    print(f"{match['path']}:{match['line_number']} (score: {match['score']})")
-
-# Pipelining: send multiple requests, collect responses by request_id
-queries = ["fn main", "struct Config", "impl Display"]
-for i, q in enumerate(queries):
-    send_request(sock, {
-        "type": "Search", "query": q, "limit": 5, "request_id": f"batch-{i}"
-    })
-
-results = {}
-for _ in queries:
-    resp = read_response(sock)
-    rid = resp.get("request_id", "unknown")
-    results[rid] = resp
-    print(f"Got response for {rid}: {len(resp.get('matches', []))} matches")
-
-sock.close()
+endpoint = subprocess.check_output(
+    ["fxi", "daemon", "socket-path"], text=True
+).strip()
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
+    stream.settimeout(30)
+    stream.connect(endpoint)
+    hello = request(stream, {"type": "Hello", "protocol_version": 2}, "hello")
+    if hello.get("type") != "Hello" or hello.get("protocol_version") != 2:
+        raise RuntimeError("Unsupported daemon protocol")
+    result = request(stream, {
+        "type": "ContentSearch",
+        "pattern": '"fn main"',
+        "root_path": "/path/to/repository",
+        "limit": 20,
+        "options": {
+            "context_before": 0,
+            "context_after": 0,
+            "case_insensitive": False,
+            "files_only": True,
+            "compact_files": True,
+        },
+    }, "search")
+    if result["type"] != "ContentSearch":
+        raise RuntimeError("Unexpected response type")
+    paths = result.get("file_paths")
+    if paths is None:  # Legacy noncompact reply, or an empty query.
+        paths = [match["path"] for match in result["matches"]]
+    for path in paths:
+        print(path)
 ```
 
-## Example: Node.js Client
-
-```javascript
-const net = require("net");
-const path = require("path");
-const os = require("os");
-
-function getSocketPath() {
-  // Highest priority: FXI_SOCKET env var override
-  const override = process.env.FXI_SOCKET;
-  if (override) return override;
-  const xdg = process.env.XDG_RUNTIME_DIR;
-  if (xdg) return path.join(xdg, "fxi.sock");
-  return path.join(os.homedir(), ".local", "run", "fxi.sock");
-}
-
-function createClient() {
-  const sock = net.createConnection(getSocketPath());
-  let buffer = Buffer.alloc(0);
-  const pending = new Map(); // request_id -> { resolve, reject }
-  let counter = 0;
-
-  sock.on("data", (chunk) => {
-    buffer = Buffer.concat([buffer, chunk]);
-    while (buffer.length >= 4) {
-      const length = buffer.readUInt32LE(0);
-      if (buffer.length < 4 + length) break;
-      const payload = buffer.subarray(4, 4 + length);
-      buffer = buffer.subarray(4 + length);
-      const response = JSON.parse(payload.toString("utf-8"));
-      const id = response.request_id;
-      if (id && pending.has(id)) {
-        const { resolve } = pending.get(id);
-        pending.delete(id);
-        resolve(response);
-      }
-    }
-  });
-
-  function send(request) {
-    return new Promise((resolve, reject) => {
-      const id = String(counter++);
-      request.request_id = id;
-      pending.set(id, { resolve, reject });
-      const payload = Buffer.from(JSON.stringify(request), "utf-8");
-      const header = Buffer.alloc(4);
-      header.writeUInt32LE(payload.length);
-      sock.write(Buffer.concat([header, payload]));
-    });
-  }
-
-  return { send, close: () => sock.end() };
-}
-
-// Usage
-(async () => {
-  const client = createClient();
-
-  // Hello (optional version handshake)
-  const hello = await client.send({ type: "Hello", protocol_version: 2 });
-  if (hello.type === "Hello") {
-    console.log(`Server protocol: v${hello.protocol_version}, version: ${hello.server_version}`);
-  } else {
-    console.log("Server predates protocol versioning");
-  }
-
-  const pong = await client.send({ type: "Ping" });
-  console.log(pong); // { type: "Pong", request_id: "1" }
-
-  // Pipelining: send multiple searches concurrently
-  const searches = Promise.all([
-    client.send({ type: "Search", query: "fn main", limit: 5 }),
-    client.send({ type: "Search", query: "struct Config", limit: 5 }),
-    client.send({ type: "Search", query: "impl Display", limit: 5 }),
-  ]);
-  const results = await searches;
-  for (const r of results) {
-    console.log(`${r.request_id}: ${r.matches.length} matches`);
-  }
-
-  client.close();
-})();
-```
+For a production client, also handle reconnection and cancellation in its UI,
+reject pending requests on disconnect, and bound its own queued requests. The
+server's per-connection concurrency setting is not a client-side memory bound.
