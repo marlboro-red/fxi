@@ -171,7 +171,12 @@ byte offsets.
 Content caches are sharded and shared across readers in the process. Defaults
 limit retained text to 1 GiB and entries to 131,072; `FXI_CACHE_MIB` accepts
 0–4096 MiB (0 disables admission). One-shot CLI readers bypass admission.
-Cached snapshots are validated against file metadata before each reuse.
+Cached snapshots are validated against file metadata before each reuse. Unix
+validation includes device, inode and change time. On non-Unix platforms, a
+metadata hit also rereads and compares the complete UTF-8 source bytes before
+reusing cached content or positional evidence; size and modification/creation
+timestamps alone cannot distinguish rapid same-size rewrites. This adds read
+cost on Windows, so Unix warm-cache timings do not establish Windows performance.
 Concurrent queries can keep additional snapshots alive beyond those cache bounds.
 Scans estimated to exceed the cache budget reuse valid entries and may fill spare
 capacity, but cannot evict other entries. Smaller scans use normal LRU admission.

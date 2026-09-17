@@ -47,7 +47,7 @@ fn packed(entry: &Entry, bytes: &[u8], finder: &Finder<'_>) -> bool {
     let Ok(metadata) = fs::metadata(&entry.path) else {
         return false;
     };
-    if Stamp::from(metadata) != entry.stamp {
+    if !cfg!(unix) || Stamp::from(metadata) != entry.stamp {
         return ordinary(entry, finder);
     }
     bytes
@@ -173,7 +173,7 @@ fn main() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &serde_json::json!({"root":root,"files":entries.len(),"source_pack_bytes":end,"copy_seconds":copy_seconds,"rows":rows,"limits":"Offline verification-stage experiment, warm filesystem, four read tasks; index opening/planning, path sorting, CLI startup and serialization excluded. Both paths verify complete UTF-8 and every sample matches ripgrep. Pack retains uncompressed source plus in-memory metadata; no serialized format, corruption checksum, incremental update/compaction integration, cold-storage result, or whole-index build-time claim. Changed stamps fall back to ordinary source reads; source races have the same point-in-time limitations as the current content cache."})
+            &serde_json::json!({"root":root,"files":entries.len(),"source_pack_bytes":end,"copy_seconds":copy_seconds,"rows":rows,"limits":"Offline verification-stage experiment, warm filesystem, four read tasks; index opening/planning, path sorting, CLI startup and serialization excluded. Both paths verify complete UTF-8 and every sample matches ripgrep. Pack retains uncompressed source plus in-memory metadata; no serialized format, corruption checksum, incremental update/compaction integration, cold-storage result, or whole-index build-time claim. Packed reads are disabled on non-Unix platforms. Changed stamps fall back to ordinary source reads; source races have the same point-in-time limitations as the current content cache."})
         )?
     );
     Ok(())

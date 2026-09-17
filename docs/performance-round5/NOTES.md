@@ -203,3 +203,21 @@ FXI_INDEXES=/path/to/indexes target/release/examples/source_pack_lab /path/to/co
 The raw paired search files also record binary/harness hashes and source/index
 paths. No unmeasured claims are made about livegrep, indexed ugrep, OpenGrok,
 distributed services, other hardware, or simultaneous search/update workloads.
+
+
+## Windows CI regression and correction
+
+Run 35220348323 exposed a stale-cache result after a rapid same-size source
+rewrite on Windows. The six-byte query did not use positional evidence. The
+existing non-Unix stamp (size, modification time, creation time) could compare
+equal despite different content. Cache hits now reread complete UTF-8 bytes
+outside the shard mutex on non-Unix platforms. Identical bytes preserve the
+snapshot and its evidence; changed or unreadable sources discard that snapshot
+without evicting a concurrent replacement. Unix cache hits retain their existing
+identity/change-time validation and fast path.
+
+The daemon regression now restores the original modification time after each
+same-size rewrite. A platform-independent test exercises byte revalidation,
+unchanged snapshot identity, invalid UTF-8 and deletion. The offline source-pack
+lab falls back to ordinary reads on non-Unix platforms. Its reported speedups
+remain Unix measurements; no Windows packed-source acceleration is claimed.

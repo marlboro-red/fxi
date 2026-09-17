@@ -1214,8 +1214,8 @@ impl IndexReader {
 
     /// Read file content with LRU caching.
     /// This speeds up repeated queries that access the same files.
-    /// The cache stores Arc<SourceSnapshot>, so a hit is a refcount bump rather than a
-    /// copy of the file content; files too large to cache are returned as
+    /// The cache stores Arc<SourceSnapshot>; Unix hits only bump the refcount,
+    /// while non-Unix hits also compare source bytes. Files too large to cache return
     /// plain Strings without the Arc conversion copy.
     /// Returns None if the file cannot be read.
     pub fn read_file_cached(&self, path: &Path) -> Option<FileContent> {
@@ -1237,7 +1237,27 @@ impl IndexReader {
             if let Some((cached_stamp, content)) = cache.entries.get(path)
                 && *cached_stamp == stamp
             {
-                return Some(FileContent::Cached(Arc::clone(content)));
+                let snapshot = Arc::clone(content);
+                #[cfg(unix)]
+                return Some(FileContent::Cached(snapshot));
+                #[cfg(not(unix))]
+                {
+                    // Size/mtime/creation time cannot detect same-size rewrites
+                    // with restored or coarse timestamps. Read outside the lock.
+                    drop(cache);
+                    let verified = Self::revalidate_cached_bytes(path, &snapshot);
+                    if !matches!(verified, Some(FileContent::Cached(_)))
+                        && let Ok(mut cache) = shard.lock()
+                        && cache
+                            .entries
+                            .peek(path)
+                            .is_some_and(|(_, current)| Arc::ptr_eq(current, &snapshot))
+                        && let Some((_, old)) = cache.entries.pop(path)
+                    {
+                        cache.bytes -= old.len();
+                    }
+                    return verified;
+                }
             }
             // A stale entry is not useful residency. Reclaim its budget even
             // when this scan is forbidden from evicting other live entries.
@@ -1278,6 +1298,16 @@ impl IndexReader {
             Some(FileContent::Cached(content))
         } else {
             Some(FileContent::Owned(content))
+        }
+    }
+
+    #[cfg(any(not(unix), test))]
+    fn revalidate_cached_bytes(path: &Path, cached: &Arc<SourceSnapshot>) -> Option<FileContent> {
+        let current = Self::read_file_uncached(path)?;
+        if current.as_str() == &***cached {
+            Some(FileContent::Cached(Arc::clone(cached)))
+        } else {
+            Some(FileContent::Owned(current))
         }
     }
 
@@ -2009,6 +2039,39 @@ mod tests {
 
 #[cfg(test)]
 mod cache_budget_tests {
+    #[test]
+    fn byte_revalidation_detects_same_stamp_edits_and_invalid_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.txt");
+        std::fs::write(&path, "needle\n").unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let cached = Arc::new(SourceSnapshot::from(String::from("needle\n")));
+        for text in ["absent\n", "needle\n", "absent\n"] {
+            std::fs::write(&path, text).unwrap();
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+            let result = IndexReader::revalidate_cached_bytes(&path, &cached).unwrap();
+            match result {
+                FileContent::Cached(snapshot) => {
+                    assert_eq!(text, "needle\n");
+                    assert!(Arc::ptr_eq(&snapshot, &cached));
+                }
+                FileContent::Owned(current) => {
+                    assert_eq!(text, "absent\n");
+                    assert_eq!(current, text);
+                }
+            }
+        }
+        std::fs::write(&path, b"needle\xff").unwrap();
+        assert!(IndexReader::revalidate_cached_bytes(&path, &cached).is_none());
+        std::fs::remove_file(&path).unwrap();
+        assert!(IndexReader::revalidate_cached_bytes(&path, &cached).is_none());
+    }
+
     use super::*;
 
     #[test]

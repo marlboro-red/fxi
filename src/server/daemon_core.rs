@@ -1662,10 +1662,20 @@ mod tests {
             Response::ContentSearch(r) => r.matches.len(),
             other => panic!("{other:?}"),
         };
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let rewrite = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+        };
         assert_eq!(count(query()), 1);
-        std::fs::write(&path, "absent\n").unwrap();
+        rewrite("absent\n");
         assert_eq!(count(query()), 0);
-        std::fs::write(&path, "needle\n").unwrap();
+        rewrite("needle\n");
         assert_eq!(count(query()), 1);
         std::fs::remove_file(&path).unwrap();
         assert_eq!(count(query()), 0);
