@@ -17,11 +17,16 @@ parser.add_argument('--baseline', type=Path, required=True)
 parser.add_argument('--candidate', type=Path, required=True)
 parser.add_argument('--output', type=Path, required=True)
 parser.add_argument('--repetitions', type=int, default=11)
+parser.add_argument('--before-search-parallelism', type=int)
+parser.add_argument('--after-search-parallelism', type=int)
 parser.add_argument('--patterns', nargs='+')
 parser.add_argument('--literal', action='store_true', help='Compare bare identifiers with case-insensitive fixed-string ripgrep')
 args = parser.parse_args()
 if args.repetitions < 1:
     parser.error('repetitions must be positive')
+search_tasks = {'before': args.before_search_parallelism, 'after': args.after_search_parallelism}
+if any(value is not None and value < 1 for value in search_tasks.values()):
+    parser.error('Search parallelism must be positive')
 patterns = args.patterns or ['folio_wait_bit_common', 'auditNonexistentSymbol94283', 'struct file_operations', 'return']
 if args.literal and any(not pattern.isidentifier() for pattern in patterns):
     parser.error('--literal requires identifier patterns to preserve bare-query semantics')
@@ -45,6 +50,8 @@ try:
         runtime.mkdir()
         envs[name] = {**os.environ, 'FXI_INDEXES': str(args.indexes.resolve()),
                       'FXI_SOCKET': str(runtime / 'fxi.sock'), 'XDG_RUNTIME_DIR': str(runtime)}
+        if search_tasks[name] is not None:
+            envs[name]['FXI_SEARCH_PARALLELISM'] = str(search_tasks[name])
         logs[name] = (runtime / 'server.log').open('w')
         servers[name] = subprocess.Popen([str(binary), 'daemon', 'foreground'], cwd=root,
                                         env=envs[name], stdout=logs[name], stderr=logs[name])
@@ -94,7 +101,7 @@ finally:
             server.wait()
     for log in logs.values():
         log.close()
-args.output.write_text(json.dumps({'query_syntax': 'bare insensitive identifier' if args.literal else 'regex', 'base': str(base), 'corpus': str(root), 'indexes': str(args.indexes.resolve()),
+args.output.write_text(json.dumps({'search_parallelism': search_tasks, 'experiment_environment': {key: os.environ.get(key) for key in ['FXI_SOURCE_PACK', 'FXI_INTERIOR_TOKENS']}, 'query_syntax': 'bare insensitive identifier' if args.literal else 'regex', 'base': str(base), 'corpus': str(root), 'indexes': str(args.indexes.resolve()),
     'binaries': {name: {'path': str(binary), 'sha256': hashlib.sha256(binary.read_bytes()).hexdigest()}
                  for name, binary in binaries.items()},
     'harness_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), 'rows': rows}, indent=2) + '\n')

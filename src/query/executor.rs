@@ -584,14 +584,21 @@ impl<'a> QueryExecutor<'a> {
         };
 
         let use_source_pack = self.reader.should_use_source_pack(candidate_count);
-        let packed_batch_size = if use_source_pack {
-            // Packed reads avoid per-file opens. Use all workers by default,
-            // retaining the explicit read-task override for reproducible tuning.
+        let verification_batch_size = if use_source_pack || (cache_scan && cfg!(unix)) {
+            // Memory-backed verification benefits from more workers than
+            // ordinary file opens. Keep cached scans bounded to eight tasks;
+            // packed scans can use all workers. Explicit overrides win.
             let tasks = std::env::var("FXI_SEARCH_PARALLELISM")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|&v| v > 0)
-                .unwrap_or_else(get_num_threads);
+                .unwrap_or_else(|| {
+                    if use_source_pack {
+                        get_num_threads()
+                    } else {
+                        get_num_threads().min(8)
+                    }
+                });
             (candidate_count / tasks).max(1)
         } else {
             search_batch_size(candidate_count)
@@ -631,7 +638,7 @@ impl<'a> QueryExecutor<'a> {
             // Indexed collection preserves path order regardless of worker completion.
             candidate_ids
                 .par_iter()
-                .with_min_len(packed_batch_size)
+                .with_min_len(verification_batch_size)
                 .map(verify)
                 .collect::<Vec<_>>()
                 .into_iter()

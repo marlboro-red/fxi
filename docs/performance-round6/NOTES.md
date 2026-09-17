@@ -60,3 +60,77 @@ These are precision observations, not latency predictions. The experimental
 module checks every true file against independent ripgrep results. Loading token
 dictionaries for one-shot search could erase the savings; a warm-only experiment
 is being evaluated separately.
+
+
+## Fresh three-tool comparison
+
+`linux-packed-common-indexers.json` rebuilds all three tools three times on the
+same 65,284-file corpus, validates complete coverage after every build, then
+interleaves eleven samples per query with exact ripgrep parity. All tools use
+complete file-only outputs. Zoekt ctags is disabled, matching round four.
+
+| Tool | Build median s | Peak build RSS MiB | Index MiB |
+|---|---:|---:|---:|
+| FXI, source packs enabled | 7.090 | 354.2 | 1886.6 |
+| csearch | 9.916 | 291.9 | 73.0 |
+| Zoekt | 112.192 | 1324.3 | 3239.8 |
+
+| Query | FXI ms | csearch ms | Zoekt ms |
+|---|---:|---:|---:|
+| Selective | 13.634 | 15.931 | 56.936 |
+| Absent | 11.736 | 4.227 | 55.797 |
+| Phrase | 25.197 | 379.627 | 60.372 |
+| Broad return | 89.179 | 1599.271 | 139.555 |
+| Alternation | 15.019 | 34.836 | 57.338 |
+| Internal literal | 14.055 | 16.361 | 59.333 |
+
+The optional packed configuration wins six of six against Zoekt and five of six
+across all tools here. It is not universal dominance: csearch remains faster on
+absence, uses far less disk and less build memory; these are warm-filesystem
+one-shot results, not cold-storage, simultaneous-client, line/count output or
+Windows results. FXI still verifies current source metadata; Zoekt searches its
+indexed snapshot. The source pack costs about 1.23 GiB beyond the default index.
+
+## Rejected warm interior-token filter
+
+`interior-tokens-experiment.patch` preserves a default-off warm-only implementation
+and six added tests. All 723 test executions passed with the experiment enabled.
+Twenty-one paired queries in `linux-interior-warm.json` showed phrase
+11.639 -> 10.454 ms and const phrase 11.325 -> 10.234 ms, but static-const regressed
+46.760 -> 48.026 ms, selective 4.353 -> 4.559 ms, and broad 68.636 -> 69.677 ms.
+The implementation is not shipped. The standalone precision lab remains useful.
+
+## Cached verification task count
+
+Twenty-one paired same-binary samples separate task scheduling from other code
+changes. Four versus twelve tasks reduced phrase 11.613 -> 10.767 ms, static-const
+47.930 -> 42.439 ms and return 66.071 -> 52.794 ms. The 8-versus-12 follow-up was
+essentially tied on broad/static-const; phrase was slightly faster with eight.
+All recorded first-query timings also improved in the 4-versus-12 run.
+
+Redis 4-versus-8 controls are effectively neutral, with return 4.976 -> 4.826 ms.
+CPython return improves 7.453 -> 6.864 ms; its other three controls are neutral or
+slightly better. Eight is the conservative measured default for Unix cached
+files-only scans estimated to fit the cache. Ordinary/oversized/non-Unix scans
+retain four tasks; explicit FXI_SEARCH_PARALLELISM overrides both. This changes
+scheduling, not source freshness, matching semantics, or the cache byte budget.
+
+The final scheduler binary confirms the task-setting sweep over 21 paired CLI
+samples: phrase 11.548 -> 10.694 ms, static-const 48.105 -> 42.513 ms, broad
+66.131 -> 52.911 ms, selective 4.410 -> 4.439 ms. No one-shot code path changes.
+
+Twenty-one canonical warm API samples against freshly built stock Zoekt indexes:
+
+| Query | FXI API ms | Stock Zoekt API ms | Zoekt paths-only API ms |
+|---|---:|---:|---:|
+| Selective | 0.598 | 0.893 | 0.593 |
+| Absent | 0.275 | 0.330 | 0.127 |
+| Phrase | 5.894 | 5.764 | 1.611 |
+| Broad return | 37.222 | 205.543 | 59.554 |
+| Alternation | 1.002 | 1.187 | 0.917 |
+| Internal literal | 0.622 | 3.776 | 3.526 |
+
+The comparable paths-only phrase gap remains about 3.7x; it has not disappeared.
+The full-response broad ratio includes Zoekt's much larger payload and is not an
+engine speedup. FXI's strong warm broad and internal-literal results survive the
+comparable-output test; selective is tied, and absence still favors Zoekt.

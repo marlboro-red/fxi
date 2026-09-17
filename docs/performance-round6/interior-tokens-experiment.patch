@@ -1,0 +1,368 @@
+diff --git a/src/index/reader.rs b/src/index/reader.rs
+index 1f014d6..447a39a 100644
+--- a/src/index/reader.rs
++++ b/src/index/reader.rs
+@@ -698,6 +698,17 @@ impl IndexReader {
+         }
+     }
+ 
++    /// Experimental warm-query evidence must never force lazy token loading or
++    /// add its postings work to a one-shot reader. Inspect only initialized
++    /// dictionaries; the normal fallible dependency barrier remains unchanged.
++    pub(crate) fn interior_tokens_ready(&self) -> bool {
++        self.content_cache_enabled
++            && self
++                .segments
++                .iter()
++                .all(|segment| matches!(segment.tokens.get(), Some(Ok(_))))
++    }
++
+     fn open_with_tokens(root_path: &Path, load_tokens: bool) -> Result<Self> {
+         let root_path = root_path.canonicalize()?;
+         let (index_path, generation_lease) = crate::index::generation::pin(&root_path)?;
+diff --git a/src/query/executor.rs b/src/query/executor.rs
+index c068252..8a4f7bf 100644
+--- a/src/query/executor.rs
++++ b/src/query/executor.rs
+@@ -505,11 +505,35 @@ impl<'a> QueryExecutor<'a> {
+     /// 3. Returns minimal data per file
+     pub fn execute_files_only(&self, query: &Query, file_limit: usize) -> Result<Vec<PathBuf>> {
+         let plan = QueryPlan::from_query(query);
+-        let candidates = self.execute_plan(&plan)?;
++        let mut candidates = self.execute_plan(&plan)?;
+         if candidates.is_empty() {
+             return Ok(Vec::new());
+         }
+ 
++        // Hold one compiled regex and literal finder for this query, avoiding
++        // shared-cache lookups and searcher construction for each candidate.
++        let prepared_regex = match &plan.verification {
++            Some(VerificationStep::Regex(pattern)) => get_regex_cache().get_or_compile(pattern),
++            Some(
++                VerificationStep::Literal(text) | VerificationStep::BoostedLiteral { text, .. },
++            ) if !text.is_empty() => {
++                get_regex_cache().get_or_compile(&format!("(?i:{})", regex::escape(text)))
++            }
++            _ => None,
++        };
++        if std::env::var_os("FXI_INTERIOR_TOKENS").is_some_and(|value| value == "1")
++            && let Some(literal) = prepared_regex
++                .as_ref()
++                .and_then(|regex| regex.existence_literal.as_deref())
++        {
++            // This opt-in filter only reads token dictionaries already loaded
++            // by a warm reader, and runs before path ordering or source stats.
++            super::interior_tokens::narrow_candidates(self.reader, literal, &mut candidates);
++            if candidates.is_empty() {
++                return Ok(Vec::new());
++            }
++        }
++
+         let ordered = file_limit != 0
+             || plan.verification.is_none()
+             || self.reader.should_cache_path_order(&candidates);
+@@ -542,17 +566,6 @@ impl<'a> QueryExecutor<'a> {
+         let candidate_count = candidate_ids.len();
+         let cache_scan = self.reader.should_cache_scan(&candidates);
+ 
+-        // Hold one compiled regex and literal finder for this query, avoiding
+-        // shared-cache lookups and searcher construction for each candidate.
+-        let prepared_regex = match verification {
+-            VerificationStep::Regex(pattern) => get_regex_cache().get_or_compile(pattern),
+-            VerificationStep::Literal(text) | VerificationStep::BoostedLiteral { text, .. }
+-                if !text.is_empty() =>
+-            {
+-                get_regex_cache().get_or_compile(&format!("(?i:{})", regex::escape(text)))
+-            }
+-            _ => None,
+-        };
+         let literal_finder = prepared_regex
+             .as_ref()
+             .and_then(|re| re.existence_literal.as_ref())
+diff --git a/src/query/mod.rs b/src/query/mod.rs
+index 2b5be79..be172f0 100644
+--- a/src/query/mod.rs
++++ b/src/query/mod.rs
+@@ -39,6 +39,7 @@
+ //! ```
+ 
+ pub mod executor;
++mod interior_tokens;
+ pub mod parser;
+ pub mod planner;
+ mod regex_plan;
+diff --git a/src/query/interior_tokens.rs b/src/query/interior_tokens.rs
+new file mode 100644
+index 0000000..805c6dc
+--- /dev/null
++++ b/src/query/interior_tokens.rs
+@@ -0,0 +1,269 @@
++//! Experimental candidate evidence from tokens entirely inside an exact literal.
++//!
++//! The literal's edge tokens can be arbitrary substring fragments. Interior
++//! tokens have both lexical boundaries fixed by literal bytes, so their indexed
++//! presence and relative ordinals are necessary conditions for a match. This is
++//! only candidate pruning: punctuation/byte distances still need verification.
++//!
++//! Like trigram pruning, this evidence describes the indexed generation. Source
++//! edits can introduce matches that remain invisible until the index updates;
++//! surviving candidates are still verified against live source snapshots.
++use crate::index::reader::IndexReader;
++use roaring::RoaringBitmap;
++
++/// Only call with an exact, case-sensitive HIR literal. Unicode case folding
++/// can turn ASCII token letters into non-ASCII delimiter bytes, invalidating
++/// this boundary proof. Missing eligibility always preserves every candidate.
++pub(super) fn narrow_candidates(
++    reader: &IndexReader,
++    literal: &[u8],
++    candidates: &mut RoaringBitmap,
++) {
++    if candidates.is_empty() || !reader.interior_tokens_ready() {
++        return;
++    }
++    let Ok(literal) = std::str::from_utf8(literal) else {
++        return;
++    };
++    let tokens = interior_tokens(literal);
++    for (token, _) in &tokens {
++        *candidates &= reader.get_token_docs(token);
++        if candidates.is_empty() {
++            return;
++        }
++    }
++    if let Some(positional) = reader.resolve_phrase_positional(&tokens, Some(candidates)) {
++        *candidates &= positional;
++    }
++}
++
++/// Mirror the ASCII tokenizer's boundaries, counting every lexical ordinal,
++/// including short/long/edge tokens omitted from the returned constraints.
++fn interior_tokens(literal: &str) -> Vec<(String, u32)> {
++    let bytes = literal.as_bytes();
++    let mut result = Vec::new();
++    let mut start = None;
++    let mut previous_lower = false;
++    let mut position = 0;
++    let mut emit = |start: usize, end: usize, position| {
++        if start > 0 && end < bytes.len() && (2..=128).contains(&(end - start)) {
++            result.push((literal[start..end].to_ascii_lowercase(), position));
++        }
++    };
++    for (offset, byte) in bytes.iter().copied().chain(std::iter::once(0)).enumerate() {
++        if byte.is_ascii_alphanumeric() {
++            if byte.is_ascii_uppercase() && previous_lower {
++                if let Some(begin) = start {
++                    emit(begin, offset, position);
++                    position += 1;
++                }
++                start = Some(offset);
++            } else if start.is_none() {
++                start = Some(offset);
++            }
++            previous_lower = byte.is_ascii_lowercase();
++        } else {
++            if let Some(begin) = start.take() {
++                emit(begin, offset, position);
++                position += 1;
++            }
++            previous_lower = false;
++        }
++    }
++    result
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn satisfies(source: &str, constraints: &[(String, u32)]) -> bool {
++        let indexed = crate::utils::extract_tokens_with_positions(source);
++        let Some((first, offset)) = constraints.first() else {
++            return true;
++        };
++        indexed
++            .iter()
++            .filter(|(token, _)| token == first)
++            .any(|(_, position)| {
++                constraints.iter().all(|(token, query_position)| {
++                    let delta = query_position - offset;
++                    position.checked_add(delta).is_some_and(|expected| {
++                        indexed
++                            .iter()
++                            .any(|(term, pos)| term == token && *pos == expected)
++                    })
++                })
++            })
++    }
++
++    #[test]
++    fn endpoints_are_fragments_and_internal_boundaries_are_proven() {
++        assert_eq!(
++            interior_tokens("struct file_operations"),
++            vec![("file".into(), 1)]
++        );
++        assert_eq!(
++            interior_tokens("const struct file_operations"),
++            vec![("struct".into(), 1), ("file".into(), 2)]
++        );
++        assert!(interior_tokens("static inline").is_empty());
++        assert!(interior_tokens("file_operations").is_empty());
++        assert_eq!(
++            interior_tokens(" fooBar "),
++            vec![("foo".into(), 0), ("bar".into(), 1)]
++        );
++        assert!(satisfies(
++            "prefixdestruct file_operations_extra",
++            &interior_tokens("struct file_operations")
++        ));
++        assert!(!satisfies(
++            "const struct other file_operations",
++            &interior_tokens("const struct file_operations")
++        ));
++    }
++
++    #[test]
++    fn omitted_short_and_long_tokens_keep_their_ordinal_gaps() {
++        let literal = format!("edge before a {} after tail", "q".repeat(129));
++        let constraints = interior_tokens(&literal);
++        assert_eq!(constraints, vec![("before".into(), 1), ("after".into(), 4)]);
++        assert!(satisfies(&format!("prefix{literal}suffix"), &constraints));
++        assert_eq!(
++            interior_tokens(&format!(" ({}) ", "q".repeat(128)))[0]
++                .0
++                .len(),
++            128
++        );
++        assert!(interior_tokens(&format!(" ({}) ", "q".repeat(129))).is_empty());
++    }
++
++    #[test]
++    fn every_unicode_boundary_substring_has_sound_interior_constraints() {
++        let source = "pfooBar_baz XYZHttpRequest fooébar Kabc foo42BAR a q_tail";
++        let long_source = format!("{}{source}", "padding ".repeat(40));
++        let boundaries: Vec<_> = source
++            .char_indices()
++            .map(|(p, _)| p)
++            .chain(std::iter::once(source.len()))
++            .collect();
++        for (index, &start) in boundaries.iter().enumerate() {
++            for &end in &boundaries[index + 1..] {
++                let literal = &source[start..end];
++                assert!(satisfies(source, &interior_tokens(literal)), "{literal:?}");
++                assert!(
++                    satisfies(&long_source, &interior_tokens(literal)),
++                    "long tokenizer: {literal:?}"
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn surrounding_bytes_never_change_interior_token_alignment() {
++        for literal in [
++            "struct file_operations",
++            "aFooBar_bazTail",
++            "XMLHttpRequest_Body",
++            "éfoo_barλ",
++            " AA foo42BAR ",
++        ] {
++            for prefix in ["", "a", "A", "42", "_", "é", "aA", "unrelated "] {
++                for suffix in ["", "a", "A", "42", "_", "é"] {
++                    assert!(
++                        satisfies(
++                            &format!("{prefix}{literal}{suffix}"),
++                            &interior_tokens(literal)
++                        ),
++                        "{prefix:?} + {literal:?} + {suffix:?}"
++                    );
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn unicode_case_folding_and_regex_operators_are_not_exact_evidence() {
++        for pattern in [
++            "(?i:struct file_operations)",
++            "struct (?:file|other)_operations",
++            "^struct file_operations",
++            "struct file_operations$",
++            "struct.*file_operations",
++        ] {
++            assert!(super::super::regex_plan::existence_literal(pattern).is_none());
++        }
++        // ASCII `s` can match the long s under Unicode case folding, but that
++        // character is a delimiter for FXI's ASCII token index.
++        let pattern = regex::Regex::new("(?i:prefix struct suffix)").unwrap();
++        assert!(pattern.is_match("prefix ſtruct suffix"));
++        assert!(!satisfies(
++            "prefix ſtruct suffix",
++            &interior_tokens("prefix struct suffix")
++        ));
++    }
++
++    #[test]
++    fn indexed_filter_preserves_exact_substrings_and_uncached_readers() {
++        use crate::index::build::build_index_with_options;
++        use std::fs;
++        struct Fixture(tempfile::TempDir);
++        impl Drop for Fixture {
++            fn drop(&mut self) {
++                let _ = crate::utils::remove_index(self.0.path());
++            }
++        }
++        let fixture = Fixture(tempfile::tempdir().unwrap());
++        let root = fixture.0.path();
++        let contents = [
++            "prefixdestruct file_operations_extra\n",
++            "const struct file_operations\n",
++            "const struct other file_operations; t file\n",
++            "prefix fooBar_bazSuffix\n",
++            "edge before a qqq after tail\n",
++            "éfoo_barλ\n",
++        ];
++        for (index, content) in contents.iter().enumerate() {
++            fs::write(root.join(format!("{index}.txt")), content).unwrap();
++        }
++        build_index_with_options(root, true, true, Some(2)).unwrap();
++        let reader = IndexReader::open(root).unwrap();
++        assert!(reader.interior_tokens_ready());
++        let uncached = IndexReader::open_for_search_uncached(root).unwrap();
++        assert!(!uncached.interior_tokens_ready());
++        for literal in [
++            "struct file_operations",
++            "const struct file_operations",
++            "fooBar_baz",
++            "edge before a qqq after tail",
++            "éfoo_barλ",
++            "file_operations",
++            "absent interior token",
++        ] {
++            let baseline = reader
++                .get_trigram_docs_with_bloom(&crate::utils::query_trigrams(literal))
++                & reader.valid_doc_ids();
++            let mut narrowed = baseline.clone();
++            narrow_candidates(&reader, literal.as_bytes(), &mut narrowed);
++            assert!(narrowed.is_subset(&baseline));
++            for (index, content) in contents.iter().enumerate() {
++                if content.contains(literal) {
++                    let path = std::path::PathBuf::from(format!("{index}.txt"));
++                    assert!(
++                        narrowed.iter().any(|id| reader
++                            .get_document(id)
++                            .and_then(|doc| reader.get_path(doc))
++                            == Some(&path)),
++                        "lost {literal:?} in {path:?}"
++                    );
++                }
++            }
++            if literal == "const struct file_operations" {
++                assert!(narrowed.len() < baseline.len());
++            }
++            let mut unchanged = baseline.clone();
++            narrow_candidates(&uncached, literal.as_bytes(), &mut unchanged);
++            assert_eq!(unchanged, baseline);
++        }
++    }
++}

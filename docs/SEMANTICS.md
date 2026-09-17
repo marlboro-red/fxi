@@ -180,7 +180,9 @@ cost on Windows, so Unix warm-cache timings do not establish Windows performance
 Concurrent queries can keep additional snapshots alive beyond those cache bounds.
 Scans estimated to exceed the cache budget reuse valid entries and may fill spare
 capacity, but cannot evict other entries. Smaller scans use normal LRU admission.
-This avoids repeated cache churn; it does not guarantee that every working set
+Unix files-only scans estimated to fit this cache use up to eight verification
+tasks by default; ordinary reads retain four. `FXI_SEARCH_PARALLELISM` overrides
+both policies. This avoids repeated cache churn; it does not guarantee that every working set
 becomes resident. Filling the cache can increase first-query latency and RSS.
 
 
