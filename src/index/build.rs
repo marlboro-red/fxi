@@ -1656,6 +1656,46 @@ mod scoped_reconciliation_tests {
 
     #[cfg(unix)]
     #[test]
+    fn unreadable_subtree_never_becomes_a_mass_deletion() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = fixture();
+        let root = temp.path().canonicalize().unwrap();
+        let subtree = root.join("private");
+        fs::create_dir(&subtree).unwrap();
+        fs::write(subtree.join("secret.rs"), "directoryRetryMarker\n").unwrap();
+        build_index(&root, true).unwrap();
+        let generation = get_index_dir(&root).unwrap();
+        fs::set_permissions(&subtree, fs::Permissions::from_mode(0o0)).unwrap();
+        if fs::read_dir(&subtree).is_ok() {
+            fs::set_permissions(&subtree, fs::Permissions::from_mode(0o755)).unwrap();
+            crate::utils::remove_index(&root).unwrap();
+            return;
+        }
+        let update = update_index(&root);
+        let rebuild = build_index(&root, true);
+        fs::set_permissions(&subtree, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            update
+                .unwrap_err()
+                .downcast_ref::<SourceReadError>()
+                .is_some()
+        );
+        assert!(
+            rebuild
+                .unwrap_err()
+                .downcast_ref::<SourceReadError>()
+                .is_some()
+        );
+        assert_eq!(get_index_dir(&root).unwrap(), generation);
+        assert_eq!(
+            matches(&IndexReader::open(&root).unwrap(), "directoryRetryMarker"),
+            vec![PathBuf::from("private/secret.rs")]
+        );
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn temporary_permissions_are_not_cached_as_content_rejection() {
         use std::os::unix::fs::PermissionsExt;
         let temp = fixture();
@@ -1664,7 +1704,7 @@ mod scoped_reconciliation_tests {
         let generation = get_index_dir(&root).unwrap();
         let path = root.join("new.rs");
         fs::write(&path, "permissionRetryMarker\n").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o0)).unwrap();
         if File::open(&path).is_ok() {
             // privileged test runners bypass mode bits
             fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();

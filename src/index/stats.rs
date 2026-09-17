@@ -1,5 +1,5 @@
 use crate::index::reader::IndexReader;
-use crate::utils::{find_codebase_root, get_index_dir, list_indexed_codebases};
+use crate::utils::{find_codebase_root, list_indexed_codebases};
 use anyhow::Result;
 use std::path::Path;
 
@@ -8,7 +8,7 @@ pub fn show_stats(root_path: &Path) -> Result<()> {
     // Auto-detect codebase root
     let root = find_codebase_root(root_path)?;
     let reader = IndexReader::open(&root)?;
-    let index_path = get_index_dir(&root)?;
+    let index_path = reader.generation_path();
 
     println!("Index Statistics");
     println!("================");
@@ -16,23 +16,18 @@ pub fn show_stats(root_path: &Path) -> Result<()> {
     println!("Root path:        {}", reader.root_path().display());
     println!("Index location:   {}", index_path.display());
     println!("Index version:    {}", reader.meta.version);
-    println!("Document count:   {}", reader.meta.doc_count);
+    let stats = document_stats(reader.documents());
+    println!("Live files:       {}", stats.live);
+    println!("Stored documents: {}", reader.documents().len());
+    println!("Tombstones:       {}", stats.tombstones);
+    println!("Stale documents:  {}", stats.stale);
     println!("Segment count:    {}", reader.meta.segment_count);
     println!("Stop-grams:       {}", reader.meta.stop_grams.len());
 
-    // Count by language
-    let docs = reader.documents();
-    let mut lang_counts = std::collections::HashMap::new();
-    for doc in docs {
-        *lang_counts
-            .entry(format!("{:?}", doc.language))
-            .or_insert(0) += 1;
-    }
-
     println!();
     println!("Files by language:");
-    let mut sorted: Vec<_> = lang_counts.into_iter().collect();
-    sorted.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
+    let mut sorted: Vec<_> = stats.languages.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     for (lang, count) in sorted.iter().take(15) {
         println!("  {:15} {}", lang, count);
@@ -43,7 +38,7 @@ pub fn show_stats(root_path: &Path) -> Result<()> {
     }
 
     // Index size
-    if let Ok(size) = dir_size(&index_path) {
+    if let Ok(size) = dir_size(index_path) {
         println!();
         println!("Index size:       {}", format_size(size));
     }
@@ -60,6 +55,30 @@ pub fn show_stats(root_path: &Path) -> Result<()> {
     );
 
     Ok(())
+}
+
+#[derive(Default)]
+struct DocumentStats {
+    live: usize,
+    tombstones: usize,
+    stale: usize,
+    languages: std::collections::HashMap<String, usize>,
+}
+
+fn document_stats(documents: &[crate::index::types::Document]) -> DocumentStats {
+    let mut stats = DocumentStats::default();
+    for doc in documents {
+        stats.tombstones += usize::from(doc.flags.is_tombstone());
+        stats.stale += usize::from(doc.flags.is_stale());
+        if doc.is_valid() {
+            stats.live += 1;
+            *stats
+                .languages
+                .entry(format!("{:?}", doc.language))
+                .or_default() += 1;
+        }
+    }
+    stats
 }
 
 /// List all indexed codebases
@@ -131,8 +150,11 @@ fn format_timestamp(ts: u64) -> String {
     let seconds = time_of_day % 60;
 
     // Calculate date from days since epoch (1970-01-01)
-    let mut remaining_days = days as i64;
-    let mut year: i64 = 1970;
+    // Gregorian dates repeat every 400 years. Bound the loop even for
+    // arbitrary timestamps from externally supplied/corrupt metadata.
+    let eras = days / 146_097;
+    let mut remaining_days = (days % 146_097) as i64;
+    let mut year: i64 = 1970 + eras as i64 * 400;
 
     loop {
         let days_in_year: i64 = if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) {
@@ -179,4 +201,37 @@ fn format_timestamp(ts: u64) -> String {
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
         year, month, day, hours, minutes, seconds
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::types::{DocFlags, Document, Language};
+    #[test]
+    fn statistics_count_only_live_files_by_language() {
+        let mut documents = vec![
+            Document {
+                doc_id: 1,
+                path_id: 0,
+                size: 10,
+                mtime: 0,
+                language: Language::Rust,
+                flags: DocFlags::new(),
+                segment_id: 1
+            };
+            3
+        ];
+        documents[1].flags = DocFlags(DocFlags::TOMBSTONE);
+        documents[2].flags = DocFlags(DocFlags::STALE);
+        let stats = document_stats(&documents);
+        assert_eq!((stats.live, stats.tombstones, stats.stale), (1, 1, 1));
+        assert_eq!(stats.languages.get("Rust"), Some(&1));
+    }
+    #[test]
+    fn timestamps_handle_gregorian_cycles_and_extreme_metadata() {
+        assert_eq!(format_timestamp(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(format_timestamp(951_782_400), "2000-02-29 00:00:00 UTC");
+        assert_eq!(format_timestamp(146_097 * 86400), "2370-01-01 00:00:00 UTC");
+        assert!(format_timestamp(u64::MAX).ends_with(" UTC"));
+    }
 }

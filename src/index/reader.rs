@@ -233,7 +233,11 @@ struct TokenIndex {
 }
 
 impl TokenIndex {
-    fn open(segment_path: &Path, required_positions: bool) -> Result<Self> {
+    fn open(
+        segment_path: &Path,
+        required_positions: bool,
+        allowed_docs: &RoaringBitmap,
+    ) -> Result<Self> {
         let positions_path = segment_path.join("tokens.positions");
         anyhow::ensure!(
             !required_positions || positions_path.is_file(),
@@ -246,11 +250,8 @@ impl TokenIndex {
         } else {
             None
         };
-        let dictionary = read_token_dict(
-            segment_path,
-            postings.len(),
-            positions.as_ref().map(|data| data.len()),
-        )?;
+        let dictionary =
+            read_token_dict(segment_path, &postings, positions.as_deref(), allowed_docs)?;
         Ok(Self {
             dictionary,
             postings,
@@ -268,6 +269,7 @@ struct SegmentReader {
     trigram_postings: MappedBytes,
     tokens: OnceLock<std::result::Result<TokenIndex, String>>,
     required_positions: bool,
+    allowed_docs: Option<Arc<RoaringBitmap>>,
     /// Lazily loaded line maps - only loaded when first accessed
     line_maps: OnceLock<HashMap<DocId, Vec<u32>>>,
     /// Path to segment directory for lazy loading
@@ -292,6 +294,7 @@ impl SegmentReader {
         segment_id: SegmentId,
         required_positions: bool,
         load_tokens: bool,
+        allowed_docs: Arc<RoaringBitmap>,
     ) -> Result<Self> {
         // Read trigram dictionary (already sorted from BTreeMap write)
         let trigram_dict = read_trigram_dict(segment_path)?;
@@ -310,6 +313,13 @@ impl SegmentReader {
                 "Unsorted trigram dictionary"
             );
             previous_gram = Some(entry.trigram);
+            let bytes = &trigram_postings
+                [entry.offset as usize..entry.offset as usize + entry.length as usize];
+            crate::utils::encoding::validate_document_postings(
+                bytes,
+                entry.doc_freq,
+                &allowed_docs,
+            )?;
         }
         // Line maps are NOT loaded here - loaded lazily on first access
 
@@ -323,6 +333,7 @@ impl SegmentReader {
             trigram_postings,
             tokens: OnceLock::new(),
             required_positions,
+            allowed_docs: Some(allowed_docs),
             line_maps: OnceLock::new(),
             segment_path: segment_path.to_path_buf(),
             bloom_filter,
@@ -441,6 +452,7 @@ impl SegmentReader {
                 positions: Some(MappedBytes::Owned(token_positions)),
             })),
             required_positions: true,
+            allowed_docs: None,
             line_maps: OnceLock::from(line_maps),
             // All lazy cells are populated; this path is never opened.
             segment_path: PathBuf::new(),
@@ -451,8 +463,14 @@ impl SegmentReader {
     fn ensure_tokens(&self) -> Result<()> {
         self.tokens
             .get_or_init(|| {
-                TokenIndex::open(&self.segment_path, self.required_positions)
-                    .map_err(|error| format!("{error:#}"))
+                TokenIndex::open(
+                    &self.segment_path,
+                    self.required_positions,
+                    self.allowed_docs
+                        .as_deref()
+                        .expect("disk segment document IDs"),
+                )
+                .map_err(|error| format!("{error:#}"))
             })
             .as_ref()
             .map(|_| ())
@@ -925,59 +943,31 @@ impl IndexReader {
         }
         segment_ids.extend(&meta.delta_segments);
 
-        // PARALLEL LOADING: Load documents, paths, and all segments concurrently
-        // Uses parallel tuple collection for true 3-way parallelism
-        // This can reduce startup time by 50-70% on multi-core systems
-        let index_path_ref = &index_path;
-
-        // Use rayon's join for 3-way parallelism: (docs, (paths, segments))
-        // The inner join runs paths and segments loading in parallel
-        // The outer join runs docs loading in parallel with the inner join
-        let (documents_result, (paths_result, segments)) = rayon::join(
-            || read_documents_version(index_path_ref, meta.version),
-            || {
-                rayon::join(
-                    || read_paths(index_path_ref),
-                    || {
-                        // Load all segments in parallel using par_iter
-                        segment_ids
-                            .par_iter()
-                            .map(|&seg_id| {
-                                let segment_path = index_path_ref
-                                    .join("segments")
-                                    .join(format!("seg_{:04}", seg_id));
-                                SegmentReader::open(
-                                    &segment_path,
-                                    seg_id,
-                                    meta.has_positions,
-                                    load_tokens,
-                                )
-                                .map(Arc::new)
-                                .with_context(|| {
-                                    format!("Cannot open segment {seg_id}; rebuild the index")
-                                })
-                            })
-                            .collect::<Result<Vec<_>>>()
-                    },
+        // Document membership is required to validate segment payloads. Read
+        // metadata in parallel, then validate independent segments in parallel.
+        let (documents, paths) = rayon::join(
+            || read_documents_version(&index_path, meta.version),
+            || read_paths(&index_path),
+        );
+        let documents = documents?;
+        let paths = PathTable::new(paths?);
+        validate_document_references(&meta, &documents, paths.len())?;
+        let allowed = segment_document_ids(&documents);
+        let segments = segment_ids
+            .par_iter()
+            .map(|&seg_id| {
+                let path = index_path.join("segments").join(format!("seg_{seg_id:04}"));
+                SegmentReader::open(
+                    &path,
+                    seg_id,
+                    meta.has_positions,
+                    load_tokens,
+                    allowed.get(&seg_id).cloned().unwrap_or_default(),
                 )
-            },
-        );
-
-        let segments = segments?;
-        let documents = documents_result?;
-        anyhow::ensure!(
-            meta.doc_count as usize == documents.len(),
-            "Document count does not match metadata"
-        );
-        let paths = PathTable::new(paths_result?);
-        let segment_ids: AHashSet<_> = segment_ids.iter().copied().collect();
-        anyhow::ensure!(segment_ids.len() == segments.len(), "Duplicate segment IDs");
-        anyhow::ensure!(
-            documents.iter().all(|doc| {
-                (doc.path_id as usize) < paths.len() && segment_ids.contains(&doc.segment_id)
-            }),
-            "Document references a missing path or segment"
-        );
+                .map(Arc::new)
+                .with_context(|| format!("Cannot open segment {seg_id}; rebuild the index"))
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         let doc_id_to_index = DocumentLookup::new(&documents);
 
@@ -1815,6 +1805,43 @@ fn validate_disk_count(
     Ok(bytes)
 }
 
+fn validate_document_references(
+    meta: &IndexMeta,
+    documents: &[Document],
+    path_count: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        meta.doc_count as usize == documents.len(),
+        "Document count does not match metadata"
+    );
+    let ids: AHashSet<_> = meta
+        .base_segment
+        .into_iter()
+        .chain(meta.delta_segments.iter().copied())
+        .collect();
+    anyhow::ensure!(
+        ids.len() == usize::from(meta.base_segment.is_some()) + meta.delta_segments.len(),
+        "Duplicate segment IDs"
+    );
+    anyhow::ensure!(
+        documents
+            .iter()
+            .all(|doc| (doc.path_id as usize) < path_count && ids.contains(&doc.segment_id)),
+        "Document references a missing path or segment"
+    );
+    Ok(())
+}
+
+fn segment_document_ids(documents: &[Document]) -> HashMap<SegmentId, Arc<RoaringBitmap>> {
+    let mut ids: HashMap<SegmentId, RoaringBitmap> = HashMap::new();
+    for doc in documents {
+        ids.entry(doc.segment_id).or_default().insert(doc.doc_id);
+    }
+    ids.into_iter()
+        .map(|(id, docs)| (id, Arc::new(docs)))
+        .collect()
+}
+
 /// Read documents from an immutable index generation.
 pub fn read_documents(index_path: &Path) -> Result<Vec<Document>> {
     let meta: IndexMeta = serde_json::from_reader(File::open(index_path.join("meta.json"))?)?;
@@ -1822,6 +1849,10 @@ pub fn read_documents(index_path: &Path) -> Result<Vec<Document>> {
 }
 
 fn read_documents_version(index_path: &Path, version: u32) -> Result<Vec<Document>> {
+    anyhow::ensure!(
+        matches!(version, 1 | 2),
+        "Unsupported index version; rebuild the index"
+    );
     let data = MappedBytes::open(&index_path.join("docs.bin"))?;
     anyhow::ensure!(data.len() >= 4, "Truncated document header");
     let count = le32(&data) as usize;
@@ -1922,10 +1953,11 @@ fn read_trigram_dict(segment_path: &Path) -> Result<TrigramDict> {
 
 fn read_token_dict(
     segment_path: &Path,
-    posting_size: usize,
-    position_size: Option<usize>,
+    postings: &[u8],
+    positions: Option<&[u8]>,
+    allowed_docs: &RoaringBitmap,
 ) -> Result<TokenDict> {
-    let has_positions = position_size.is_some();
+    let has_positions = positions.is_some();
     let data = MappedBytes::open(&segment_path.join("tokens.dict"))?;
     anyhow::ensure!(data.len() >= 4, "Truncated token dictionary header");
     let count = le32(&data) as usize;
@@ -1956,14 +1988,27 @@ fn read_token_dict(
         previous_token = Some(token);
         let fields = &data[cursor + 2 + len..cursor + fixed_size + len];
         anyhow::ensure!(
-            posting_range_fits(le64(fields), le32(&fields[8..]), posting_size),
+            posting_range_fits(le64(fields), le32(&fields[8..]), postings.len()),
             "Truncated token postings"
         );
-        if let Some(size) = position_size {
+        let start = le64(fields) as usize;
+        let end = start + le32(&fields[8..]) as usize;
+        crate::utils::encoding::validate_document_postings(
+            &postings[start..end],
+            le32(&fields[12..]),
+            allowed_docs,
+        )?;
+        if let Some(positions) = positions {
             anyhow::ensure!(
-                posting_range_fits(le64(&fields[16..]), le32(&fields[24..]), size),
+                posting_range_fits(le64(&fields[16..]), le32(&fields[24..]), positions.len()),
                 "Truncated token positions"
             );
+            let start = le64(&fields[16..]) as usize;
+            let end = start + le32(&fields[24..]) as usize;
+            crate::utils::encoding::validate_position_stream_with_documents(
+                &positions[start..end],
+                Some(allowed_docs),
+            )?;
         }
         offsets.push(cursor);
         cursor += fixed_size + len;
@@ -2084,15 +2129,23 @@ pub(crate) fn validate_negative_routing_core(index_path: &Path, meta: &IndexMeta
         "Unsupported index version {}; rebuild the index",
         meta.version
     );
-    read_documents_version(index_path, meta.version)?;
-    read_paths(index_path)?;
+    let documents = read_documents_version(index_path, meta.version)?;
+    let paths = read_paths(index_path)?;
+    validate_document_references(meta, &documents, paths.len())?;
+    let allowed = segment_document_ids(&documents);
     for id in meta
         .base_segment
         .into_iter()
         .chain(meta.delta_segments.iter().copied())
     {
         let path = index_path.join("segments").join(format!("seg_{id:04}"));
-        let segment = SegmentReader::open(&path, id, meta.has_positions, false)?;
+        let segment = SegmentReader::open(
+            &path,
+            id,
+            meta.has_positions,
+            false,
+            allowed.get(&id).cloned().unwrap_or_default(),
+        )?;
         let bloom = segment
             .bloom_filter
             .context("Missing or invalid routing Bloom")?;
@@ -2129,6 +2182,60 @@ mod tests {
         crate::index::build::build_index(&root_path, false).expect("Failed to build index");
 
         (temp_dir, root_path)
+    }
+
+    #[test]
+    fn ordinary_search_rejects_corrupt_gram_payloads_before_planning() {
+        for damage in ["truncated_varint", "zero_id", "unknown_id", "frequency"] {
+            let (_temp, root) = create_test_index();
+            let generation = crate::utils::get_index_dir(&root).unwrap();
+            let segment = generation.join("segments/seg_0001");
+            if damage == "frequency" {
+                let path = segment.join("grams.dict");
+                let mut bytes = fs::read(&path).unwrap();
+                bytes[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+                fs::write(path, bytes).unwrap();
+            } else {
+                let path = segment.join("grams.postings");
+                let mut bytes = fs::read(&path).unwrap();
+                bytes[0] = match damage {
+                    "truncated_varint" => 0x80,
+                    "zero_id" => 0,
+                    _ => 127,
+                };
+                fs::write(path, bytes).unwrap();
+            }
+            assert!(
+                IndexReader::open_for_search_uncached(&root).is_err(),
+                "{damage}"
+            );
+            assert!(IndexReader::open(&root).is_err(), "{damage}");
+            crate::utils::remove_index(&root).unwrap();
+        }
+    }
+
+    #[test]
+    fn lazy_token_initialization_rejects_corrupt_postings_and_positions() {
+        for file in ["tokens.postings", "tokens.positions"] {
+            let (_temp, root) = create_test_index();
+            let generation = crate::utils::get_index_dir(&root).unwrap();
+            let path = generation.join("segments/seg_0001").join(file);
+            let mut bytes = fs::read(&path).unwrap();
+            bytes.fill(0x80);
+            fs::write(path, bytes).unwrap();
+            let core = IndexReader::open_for_search_uncached(&root).unwrap();
+            assert!(core.ensure_tokens().is_err(), "{file}");
+            assert!(core.ensure_tokens().is_err(), "cached failure {file}");
+            assert!(IndexReader::open(&root).is_err(), "{file}");
+            // Unused auxiliary data is not required by a gram-only query.
+            assert_eq!(
+                crate::query::QueryExecutor::new(&core)
+                    .execute_files_only(&crate::query::parse_query("main"), 0)
+                    .unwrap(),
+                vec![PathBuf::from("test.rs")]
+            );
+            crate::utils::remove_index(&root).unwrap();
+        }
     }
 
     #[test]

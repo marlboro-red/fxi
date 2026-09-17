@@ -353,6 +353,42 @@ pub fn decode_position_postings_filtered(
     result
 }
 
+/// Establish the invariants required by the allocation-free query decoders.
+/// A contiguous segment uses two comparisons instead of one bitmap lookup per ID.
+pub(crate) fn validate_document_postings(
+    bytes: &[u8],
+    expected_count: u32,
+    allowed: &roaring::RoaringBitmap,
+) -> anyhow::Result<()> {
+    let contiguous = allowed
+        .min()
+        .zip(allowed.max())
+        .filter(|&(first, last)| u64::from(last) - u64::from(first) + 1 == allowed.len());
+    let mut cursor = 0;
+    let mut previous = 0u32;
+    let mut count = 0usize;
+    while cursor < bytes.len() {
+        let (delta, consumed) = decode_varint(&bytes[cursor..])
+            .ok_or_else(|| anyhow::anyhow!("Malformed document posting"))?;
+        anyhow::ensure!(delta > 0, "Unsorted or duplicate document postings");
+        previous = previous
+            .checked_add(delta)
+            .ok_or_else(|| anyhow::anyhow!("Document posting overflow"))?;
+        let exists = contiguous.map_or_else(
+            || allowed.contains(previous),
+            |(first, last)| previous >= first && previous <= last,
+        );
+        anyhow::ensure!(exists, "Posting references an unknown segment document");
+        cursor += consumed;
+        count += 1;
+    }
+    anyhow::ensure!(
+        count == expected_count as usize,
+        "Posting frequency does not match payload"
+    );
+    Ok(())
+}
+
 /// Validate a complete unsigned delta stream before using it for index mutation.
 pub(crate) fn validate_delta_stream(buf: &[u8]) -> anyhow::Result<usize> {
     let mut cursor = 0;
@@ -371,6 +407,13 @@ pub(crate) fn validate_delta_stream(buf: &[u8]) -> anyhow::Result<usize> {
 }
 
 pub(crate) fn validate_position_stream(buf: &[u8]) -> anyhow::Result<()> {
+    validate_position_stream_with_documents(buf, None)
+}
+
+pub(crate) fn validate_position_stream_with_documents(
+    buf: &[u8],
+    allowed: Option<&roaring::RoaringBitmap>,
+) -> anyhow::Result<()> {
     let mut cursor = 0;
     let mut previous_doc = 0u32;
     let read = |cursor: &mut usize| -> anyhow::Result<u32> {
@@ -385,6 +428,10 @@ pub(crate) fn validate_position_stream(buf: &[u8]) -> anyhow::Result<()> {
         previous_doc = previous_doc
             .checked_add(delta)
             .ok_or_else(|| anyhow::anyhow!("Position document overflow"))?;
+        anyhow::ensure!(
+            allowed.is_none_or(|ids| ids.contains(previous_doc)),
+            "Position references an unknown document"
+        );
         let count = read(&mut cursor)? as usize;
         anyhow::ensure!(
             count <= buf.len() - cursor,
