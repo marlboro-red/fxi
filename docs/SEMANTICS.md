@@ -143,6 +143,15 @@ file identity/change timestamps before reusing an immutable copy. A concurrent
 edit can race a query; results are not a transactional snapshot of the entire
 filesystem.
 
+Immutable cached snapshots can retain complete byte positions for up to two
+trigrams, capped at 32 occurrences each. Proven exact line-local literals can
+use these positions to verify the full literal at possible offsets instead of
+rescanning all bytes. Overflow falls back to the ordinary matcher. This evidence
+is shared across compatible literals and discarded with its source snapshot;
+it never bypasses metadata validation or caches a whole-query answer. Position
+payload is bounded to 256 bytes per snapshot, plus entry/allocation metadata,
+separately from the retained-text byte budget.
+
 New or newly matching files still require an index update to become candidates.
 
 

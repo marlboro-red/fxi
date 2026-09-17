@@ -1,3 +1,4 @@
+pub use crate::index::source_positions::SourceSnapshot;
 use crate::index::types::*;
 use crate::utils::{BloomFilter, delta_decode, delta_decode_bitmap, delta_decode_intersect};
 use ahash::AHashSet;
@@ -512,7 +513,7 @@ const FILE_CACHE_SHARD_BYTES: usize = 64 * 1024 * 1024;
 
 /// Byte and entry limits both apply, including replacement accounting.
 struct ContentCache {
-    entries: LruCache<PathBuf, (FileStamp, Arc<str>)>,
+    entries: LruCache<PathBuf, (FileStamp, Arc<SourceSnapshot>)>,
     bytes: usize,
     max_bytes: usize,
     max_entries: usize,
@@ -529,7 +530,7 @@ impl ContentCache {
         }
     }
 
-    fn put(&mut self, path: PathBuf, stamp: FileStamp, content: Arc<str>) {
+    fn put(&mut self, path: PathBuf, stamp: FileStamp, content: Arc<SourceSnapshot>) {
         let size = content.len();
         if let Some((_, (_, old))) = self.entries.push(path, (stamp, content)) {
             self.bytes -= old.len();
@@ -588,7 +589,7 @@ impl SharedContentCache {
 /// An owned source snapshot or a shared, immutable copy of one.
 pub enum FileContent {
     Owned(String),
-    Cached(Arc<str>),
+    Cached(Arc<SourceSnapshot>),
 }
 impl std::ops::Deref for FileContent {
     type Target = str;
@@ -1193,9 +1194,27 @@ impl IndexReader {
         self.read_file_with_cache_policy(path, cache_scan)
     }
 
+    pub(crate) fn cached_literal_anchor(&self, literal: &[u8]) -> Option<usize> {
+        if !self.content_cache_enabled || self.file_cache.max_bytes == 0 || literal.len() < 8 {
+            return None;
+        }
+        literal
+            .windows(3)
+            .enumerate()
+            .filter(|(_, bytes)| !self.is_stop_gram(bytes_to_trigram(bytes[0], bytes[1], bytes[2])))
+            .min_by_key(|(_, bytes)| {
+                let gram = bytes_to_trigram(bytes[0], bytes[1], bytes[2]);
+                self.segments
+                    .iter()
+                    .map(|segment| u64::from(segment.get_trigram_doc_freq(gram)))
+                    .sum::<u64>()
+            })
+            .map(|(offset, _)| offset)
+    }
+
     /// Read file content with LRU caching.
     /// This speeds up repeated queries that access the same files.
-    /// The cache stores Arc<str>, so a hit is a refcount bump rather than a
+    /// The cache stores Arc<SourceSnapshot>, so a hit is a refcount bump rather than a
     /// copy of the file content; files too large to cache are returned as
     /// plain Strings without the Arc conversion copy.
     /// Returns None if the file cannot be read.
@@ -1242,7 +1261,7 @@ impl IndexReader {
         file.read_to_string(&mut content).ok()?;
         let after = FileStamp::from_metadata(&file.metadata().ok()?);
         if content.len() <= self.file_cache.max_entry_bytes && before == after {
-            let content: Arc<str> = content.into();
+            let content: Arc<SourceSnapshot> = Arc::new(content.into());
             if let Ok(mut cache) = shard.lock() {
                 // Another worker may have filled the spare space while this
                 // file was read. Recheck under the insertion lock.
@@ -2003,12 +2022,16 @@ mod cache_budget_tests {
             cache.put(
                 format!("f{i}").into(),
                 stamp.clone(),
-                Arc::from("x".repeat(128 * 1024)),
+                Arc::new(SourceSnapshot::from("x".repeat(128 * 1024))),
             );
             assert!(cache.bytes <= cache.max_bytes);
         }
         assert!(!cache.entries.contains(Path::new("f0")));
-        cache.put("f63".into(), stamp.clone(), Arc::from("small"));
+        cache.put(
+            "f63".into(),
+            stamp.clone(),
+            Arc::new(SourceSnapshot::from("small".to_owned())),
+        );
         assert_eq!(
             cache.bytes,
             cache
@@ -2018,7 +2041,11 @@ mod cache_budget_tests {
                 .sum::<usize>()
         );
         for i in 0..cache.max_entries + 1 {
-            cache.put(format!("small{i}").into(), stamp.clone(), Arc::from("x"));
+            cache.put(
+                format!("small{i}").into(),
+                stamp.clone(),
+                Arc::new(SourceSnapshot::from("x".to_owned())),
+            );
         }
         assert_eq!(cache.entries.len(), cache.max_entries);
         assert_eq!(cache.bytes, cache.max_entries);

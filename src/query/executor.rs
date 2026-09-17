@@ -1,4 +1,5 @@
 use crate::index::reader::{FileContent, GramQuery, IndexReader};
+use crate::index::source_positions::LiteralProbe;
 use crate::index::types::{DocId, Language, SearchMatch};
 use crate::query::parser::{Query, SortOrder};
 use crate::query::planner::{FilterStep, PlanStep, QueryPlan, VerificationStep};
@@ -505,6 +506,9 @@ impl<'a> QueryExecutor<'a> {
     pub fn execute_files_only(&self, query: &Query, file_limit: usize) -> Result<Vec<PathBuf>> {
         let plan = QueryPlan::from_query(query);
         let candidates = self.execute_plan(&plan)?;
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let ordered = file_limit != 0
             || plan.verification.is_none()
@@ -553,6 +557,12 @@ impl<'a> QueryExecutor<'a> {
             .as_ref()
             .and_then(|re| re.existence_literal.as_ref())
             .map(memchr::memmem::Finder::new);
+        let position_probe = prepared_regex
+            .as_ref()
+            .and_then(|re| re.existence_literal.as_deref())
+            .and_then(|literal| {
+                LiteralProbe::new(literal, self.reader.cached_literal_anchor(literal)?)
+            });
         let (line_start, line_end) = Self::extract_line_filter(&plan.steps);
         let has_match = |content: &str| {
             if line_start.is_none() && line_end.is_none() {
@@ -577,6 +587,13 @@ impl<'a> QueryExecutor<'a> {
             let doc = self.reader.get_document(*id)?;
             let full_path = self.reader.get_full_path(doc)?;
             let content = self.reader.read_file_for_scan(&full_path, cache_scan)?;
+            if line_start.is_none()
+                && line_end.is_none()
+                && let FileContent::Cached(source) = &content
+                && let Some(probe) = &position_probe
+            {
+                return probe.contains(source).then_some(*id);
+            }
             has_match(&content).then_some(*id)
         };
         let matching_ids: Vec<DocId> = if !should_use_parallel(candidate_count) {

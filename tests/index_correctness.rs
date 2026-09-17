@@ -686,3 +686,64 @@ fn prepared_bare_identifiers_preserve_unicode_case_folding() {
         }
     }
 }
+
+#[test]
+fn positional_source_evidence_is_invalidated_by_edits_and_invalid_utf8() {
+    use fxi::query::{QueryExecutor, parse_query};
+    let root = tempfile::tempdir().unwrap();
+    let contents = format!("{}\nstruct file_operations\r\n", "x".repeat(5000));
+    for i in 0..128 {
+        fs::write(root.path().join(format!("{i:04}.txt")), &contents).unwrap();
+    }
+    build_index_with_options(root.path(), true, true, Some(17)).unwrap();
+    let reader = IndexReader::open(root.path()).unwrap();
+    let executor = QueryExecutor::new(&reader);
+    let patterns = [
+        "struct file_operations",
+        "file_operations",
+        "file_operation",
+        "struct file_operatio",
+    ];
+    let check = || {
+        for pattern in patterns {
+            let expected: Vec<_> = (0..128)
+                .filter_map(|i| {
+                    let relative = PathBuf::from(format!("{i:04}.txt"));
+                    let text = fs::read_to_string(root.path().join(&relative)).ok()?;
+                    text.lines()
+                        .any(|line| line.contains(pattern))
+                        .then_some(relative)
+                })
+                .collect();
+            for limit in [0, 1, 17] {
+                let take = if limit == 0 {
+                    expected.len()
+                } else {
+                    expected.len().min(limit)
+                };
+                assert_eq!(
+                    executor
+                        .execute_files_only(&parse_query(&format!("re:/{pattern}/")), limit)
+                        .unwrap(),
+                    expected[..take]
+                );
+            }
+        }
+    };
+    check();
+    check();
+    for i in 0..64 {
+        // Same-size replacement invalidates the old positional evidence.
+        fs::write(
+            root.path().join(format!("{i:04}.txt")),
+            contents.replace("file_operations", "file_operaXions"),
+        )
+        .unwrap();
+    }
+    let mut invalid = contents.as_bytes().to_vec();
+    invalid.push(0xff);
+    fs::write(root.path().join("0064.txt"), invalid).unwrap();
+    fs::remove_file(root.path().join("0065.txt")).unwrap();
+    check();
+    check();
+}
