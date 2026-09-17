@@ -1,0 +1,37 @@
+{
+  "tool": "fxi",
+  "binary": "/private/tmp/fxi-freshness-baseline",
+  "binary_sha256": "5e6920c0f016e765b88b7b362c05ee4a9101afbe4df1e9f6df33edb66c375ab3",
+  "harness_sha256": "1d32b362f7885e399ca5f861434aa140344babb447641b24eec7ab708d0424e2",
+  "synthetic_probe_files": 256,
+  "source": "/private/tmp/fxi-linux-corpus",
+  "debounce_ms": null,
+  "atomic_save": false,
+  "edit_source": null,
+  "edit_payload_bytes": 0,
+  "edit_payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "max_batch_age_ms": null,
+  "trace_updates": null,
+  "burst_edits": 1,
+  "burst_interval_seconds": 0.025,
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-ku6sgdvx",
+  "rows": [
+    {
+      "repetition": 0,
+      "visibility_seconds": 0.403163917013444,
+      "after_last_edit_seconds": 0.40229516600084025,
+      "server_rss_kib": {
+        "before_edits": 283984,
+        "after_visibility": 313152
+      },
+      "new_file_first_visible_seconds": 0.403163917013444,
+      "graceful_shutdown_persistence_verified": true,
+      "incremental_publications_before_visibility": 1,
+      "last_incomplete_probe_started_seconds": 0.3811260000074981,
+      "poll_interval_seconds": 0.005,
+      "attempts": 31,
+      "server_log": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-ku6sgdvx/0/server.log",
+      "server_log_text": "Running daemon in foreground (Ctrl+C to stop)...\nfxid: config: watch=true, debounce=100ms, delta_flush=0s, merge_segments=15, rebuild_threshold=30%\nfxid: listening on /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-ku6sgdvx/0/runtime/fxi.sock\nfxid: loading index for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-ku6sgdvx/0/corpus\nfxid: loaded 65543 files from /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-ku6sgdvx/0/corpus\nfxid: reconciling index for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-ku6sgdvx/0/corpus\nIndex is up to date, no changes detected.\nfxid: starting file watcher for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-ku6sgdvx/0/corpus\nfxid: watching /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-ku6sgdvx/0/corpus for changes\nIndex is up to date, no changes detected.\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0034: 2 files indexed, 1 tombstones\nDetected 1 changes: 0 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0035: 1 files indexed, 1 tombstones\nDetected 3 changes: 1 new, 1 modified, 1 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0036: 2 files indexed, 2 tombstones\n"
+    }
+  ]
+}

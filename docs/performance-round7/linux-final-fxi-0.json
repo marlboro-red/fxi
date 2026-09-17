@@ -1,0 +1,30 @@
+{
+  "tool": "fxi",
+  "binary": "/private/tmp/fxi-freshness-final",
+  "binary_sha256": "acea94362d62864249db9a7b4974c52abac31b63ea7a1d9f3aa3dad25a5621e8",
+  "harness_sha256": "b17769f43b2656c533a4cf5395a68c6454afaecccf081c9f0c6239b35959dd07",
+  "synthetic_probe_files": 256,
+  "source": "/private/tmp/fxi-linux-corpus",
+  "debounce_ms": null,
+  "atomic_save": false,
+  "max_batch_age_ms": null,
+  "trace_updates": null,
+  "burst_edits": 1,
+  "burst_interval_seconds": 0.025,
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-phq8e04n",
+  "rows": [
+    {
+      "repetition": 0,
+      "visibility_seconds": 0.04772612500528339,
+      "after_last_edit_seconds": 0.04588958299427759,
+      "new_file_first_visible_seconds": 0.04772612500528339,
+      "graceful_shutdown_persistence_verified": true,
+      "incremental_publications_before_visibility": 0,
+      "last_incomplete_probe_started_seconds": 0.020354292006231844,
+      "poll_interval_seconds": 0.005,
+      "attempts": 3,
+      "server_log": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-phq8e04n/0/server.log",
+      "server_log_text": "Running daemon in foreground (Ctrl+C to stop)...\nfxid: config: watch=true, debounce=1ms, delta_flush=0s, merge_segments=15, rebuild_threshold=30%\nfxid: listening on /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-phq8e04n/0/runtime/fxi.sock\nfxid: loading index for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-phq8e04n/0/corpus\nfxid: loaded 65543 files from /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-phq8e04n/0/corpus\nfxid: reconciling index for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-phq8e04n/0/corpus\nIndex is up to date, no changes detected.\nfxid: starting file watcher for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-phq8e04n/0/corpus\nfxid: watching /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-phq8e04n/0/corpus for changes\nIndex is up to date, no changes detected.\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 1 changes: 0 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0034: 2 files indexed, 1 tombstones\n"
+    }
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "tool": "fxi",
+  "binary": "/private/tmp/fxi-freshness-shipped",
+  "binary_sha256": "8879d77ae4b2c6350bf33b1a071bda9dde417d2ff36b3451d6e1cc9107a7c6a2",
+  "harness_sha256": "1d32b362f7885e399ca5f861434aa140344babb447641b24eec7ab708d0424e2",
+  "synthetic_probe_files": 256,
+  "source": null,
+  "debounce_ms": null,
+  "atomic_save": false,
+  "edit_source": null,
+  "edit_payload_bytes": 0,
+  "edit_payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "max_batch_age_ms": null,
+  "trace_updates": null,
+  "burst_edits": 1,
+  "burst_interval_seconds": 0.025,
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0",
+  "rows": [
+    {
+      "repetition": 0,
+      "visibility_seconds": 0.02480075000494253,
+      "after_last_edit_seconds": 0.023188958002720028,
+      "server_rss_kib": {
+        "before_edits": 11136,
+        "after_visibility": 11328
+      },
+      "new_file_first_visible_seconds": 0.02480075000494253,
+      "graceful_shutdown_persistence_verified": true,
+      "incremental_publications_before_visibility": 0,
+      "last_incomplete_probe_started_seconds": 0.00017437500355299562,
+      "poll_interval_seconds": 0.005,
+      "attempts": 2,
+      "server_log": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/0/server.log",
+      "server_log_text": "Running daemon in foreground (Ctrl+C to stop)...\nfxid: config: watch=true, debounce=1ms, delta_flush=0s, merge_segments=15, rebuild_threshold=30%\nfxid: listening on /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/0/runtime/fxi.sock\nfxid: loading index for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/0/corpus\nfxid: loaded 256 files from /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/0/corpus\nfxid: reconciling index for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/0/corpus\nIndex is up to date, no changes detected.\nfxid: starting file watcher for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/0/corpus\nfxid: watching /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/0/corpus for changes\nIndex is up to date, no changes detected.\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 1 changes: 0 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0002: 2 files indexed, 1 tombstones\n"
+    },
+    {
+      "repetition": 1,
+      "visibility_seconds": 0.021262583002680913,
+      "after_last_edit_seconds": 0.02013666600396391,
+      "server_rss_kib": {
+        "before_edits": 11424,
+        "after_visibility": 11568
+      },
+      "new_file_first_visible_seconds": 0.021262583002680913,
+      "graceful_shutdown_persistence_verified": true,
+      "incremental_publications_before_visibility": 0,
+      "last_incomplete_probe_started_seconds": 0.0001137080107582733,
+      "poll_interval_seconds": 0.005,
+      "attempts": 2,
+      "server_log": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/1/server.log",
+      "server_log_text": "Running daemon in foreground (Ctrl+C to stop)...\nfxid: config: watch=true, debounce=1ms, delta_flush=0s, merge_segments=15, rebuild_threshold=30%\nfxid: listening on /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/1/runtime/fxi.sock\nfxid: loading index for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/1/corpus\nfxid: loaded 256 files from /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/1/corpus\nfxid: reconciling index for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/1/corpus\nIndex is up to date, no changes detected.\nfxid: starting file watcher for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/1/corpus\nfxid: watching /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/1/corpus for changes\nIndex is up to date, no changes detected.\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 1 changes: 0 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0002: 2 files indexed, 1 tombstones\n"
+    },
+    {
+      "repetition": 2,
+      "visibility_seconds": 0.02516000000468921,
+      "after_last_edit_seconds": 0.02390245901187882,
+      "server_rss_kib": {
+        "before_edits": 11312,
+        "after_visibility": 11440
+      },
+      "new_file_first_visible_seconds": 0.02516000000468921,
+      "graceful_shutdown_persistence_verified": true,
+      "incremental_publications_before_visibility": 0,
+      "last_incomplete_probe_started_seconds": 0.00011787500989157706,
+      "poll_interval_seconds": 0.005,
+      "attempts": 2,
+      "server_log": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/2/server.log",
+      "server_log_text": "Running daemon in foreground (Ctrl+C to stop)...\nfxid: config: watch=true, debounce=1ms, delta_flush=0s, merge_segments=15, rebuild_threshold=30%\nfxid: listening on /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/2/runtime/fxi.sock\nfxid: loading index for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/2/corpus\nfxid: loaded 256 files from /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/2/corpus\nfxid: reconciling index for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/2/corpus\nIndex is up to date, no changes detected.\nfxid: starting file watcher for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/2/corpus\nfxid: watching /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-79dxdfq0/2/corpus for changes\nIndex is up to date, no changes detected.\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 1 changes: 0 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0002: 2 files indexed, 1 tombstones\n"
+    }
+  ]
+}

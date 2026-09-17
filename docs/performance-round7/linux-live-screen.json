@@ -1,0 +1,30 @@
+{
+  "tool": "fxi",
+  "binary": "/private/tmp/fxi-freshness-live",
+  "binary_sha256": "5cd109b8f53738fd423551e31ff7b8b8a39fd98d2ad5dea60fd3cc43eeac87aa",
+  "harness_sha256": "c6b0c41ac8f8ec7f2573161db4eb899afc2ad8500b52533419a524fa53ec8a1c",
+  "synthetic_probe_files": 256,
+  "source": "/private/tmp/fxi-linux-corpus",
+  "debounce_ms": 5,
+  "atomic_save": false,
+  "max_batch_age_ms": 100,
+  "trace_updates": "1",
+  "burst_edits": 1,
+  "burst_interval_seconds": 0.025,
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54",
+  "rows": [
+    {
+      "repetition": 0,
+      "visibility_seconds": 0.05966837500454858,
+      "after_last_edit_seconds": 0.05830762500409037,
+      "new_file_first_visible_seconds": 0.05966837500454858,
+      "graceful_shutdown_persistence_verified": true,
+      "incremental_publications_before_visibility": 1,
+      "last_incomplete_probe_started_seconds": 0.035484916996210814,
+      "poll_interval_seconds": 0.005,
+      "attempts": 4,
+      "server_log": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54/0/server.log",
+      "server_log_text": "Running daemon in foreground (Ctrl+C to stop)...\nfxid: config: watch=true, debounce=5ms, delta_flush=0s, merge_segments=15, rebuild_threshold=30%\nfxid: listening on /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54/0/runtime/fxi.sock\nfxid: loading index for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54/0/corpus\nfxid: loaded 65543 files from /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54/0/corpus\nfxid: reconciling index for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54/0/corpus\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54/0/corpus: prepare=15.226ms diff=167.365ms scoped=false\nIndex is up to date, no changes detected.\nfxid: starting file watcher for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54/0/corpus\nfxid: watching /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54/0/corpus for changes\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54/0/corpus: prepare=11.636ms diff=113.274ms scoped=false\nIndex is up to date, no changes detected.\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54/0/corpus: prepare=17.281ms diff=1.875ms scoped=true\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nfxid: memory update visible after 29.962ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54/0/corpus: prepare=9.823ms diff=1.154ms scoped=true\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nfxid: memory update visible after 19.980ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54/0/corpus: prepare=7.427ms diff=0.948ms scoped=true\nDetected 1 changes: 0 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nfxid: memory update visible after 15.648ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54/0/corpus: prepare=10.378ms diff=0.941ms scoped=true\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nfxid: memory update visible after 19.014ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54/0/corpus: prepare=13.760ms diff=1.282ms scoped=true\nDetected 2 changes: 1 new, 1 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nfxid: memory update visible after 23.944ms\nfxid: writer timings load=3.559ms inherit=74.070ms paths=14.209ms\nfxid: writer timings encode=6.104ms publish=26.995ms\nWrote delta segment seg_0034: 2 files indexed, 1 tombstones\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-oo3las54/0/corpus: publication=136.355ms\nfxid: update timings reconcile=151.481ms reopen=14.164ms total=165.646ms\n"
+    }
+  ]
+}

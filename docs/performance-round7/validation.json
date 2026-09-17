@@ -1,0 +1,17 @@
+{
+  "rust_test_executions": 774,
+  "cargo_test_all_targets": "passed",
+  "clippy_all_targets_deny_warnings": "passed",
+  "rust_1_88_locked_all_targets": "passed",
+  "cargo_fmt_check": "passed",
+  "python_benchmark_tests": 3,
+  "notes": "Rust library tests execute in both fxi and fxid targets; count is executions, not distinct test cases.",
+  "implementation_commits": [
+    "5deea4f",
+    "a01bb26",
+    "b3e5ef7",
+    "8bc43d7",
+    "d5ad53f"
+  ],
+  "compatibility_regression_after_clippy_cleanup": "passed"
+}

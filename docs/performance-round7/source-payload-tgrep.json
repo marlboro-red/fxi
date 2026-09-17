@@ -1,0 +1,71 @@
+{
+  "tool": "tgrep",
+  "binary": "/private/tmp/fxi-audit-tgrep/target/release/tgrep",
+  "binary_sha256": "f9aa670e2dfadf831c28a8549fbb2e11d03ab9eb7db6c4c77ca40b682124c1d3",
+  "harness_sha256": "1d32b362f7885e399ca5f861434aa140344babb447641b24eec7ab708d0424e2",
+  "synthetic_probe_files": 256,
+  "source": null,
+  "debounce_ms": null,
+  "atomic_save": false,
+  "edit_source": "/private/tmp/fxi-linux-corpus/fs/open.c",
+  "edit_payload_bytes": 41202,
+  "edit_payload_sha256": "c31af395b495fd2cc3920587d806466f6acd480d888d4e7c7b4db74320ef4fc7",
+  "max_batch_age_ms": null,
+  "trace_updates": null,
+  "burst_edits": 1,
+  "burst_interval_seconds": 0.025,
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-bwg_h18r",
+  "rows": [
+    {
+      "repetition": 0,
+      "visibility_seconds": 0.055508500008727424,
+      "after_last_edit_seconds": 0.054291041000396945,
+      "server_rss_kib": {
+        "before_edits": 14768,
+        "after_visibility": 15920
+      },
+      "new_file_first_visible_seconds": 0.055508500008727424,
+      "graceful_shutdown_persistence_verified": false,
+      "incremental_publications_before_visibility": null,
+      "last_incomplete_probe_started_seconds": 0.032169582991627976,
+      "poll_interval_seconds": 0.005,
+      "attempts": 4,
+      "server_log": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-bwg_h18r/0/server.log",
+      "server_log_text": "[trace] opened index: 274 files, 5326 trigrams in 0.1ms\n[trace] serve ready in 1.0ms. TCP on port 64707. Cache: max 50000 entries / 1024 MiB (entries over 64 MiB not cached). Memory cap: 16384 MB. Index threads: 6. Watcher queue cap: 16384.\n[trace] refresh mode: auto, native watch budget=8192\n[trace] stale check: comparing index against filesystem...\n[trace] watcher subscriptions deferred until the ignore matcher is ready\n[trace] file watcher worker started (complete native coverage: true)\n[trace] gitignore matcher built from stale walk in 0.1ms (0 .gitignore + 0 .ignore files)\n[trace] stale check: index is up-to-date (274 files checked in 3ms)\n[trace] search: pattern=\"symbol_0\" case_insensitive=false raw_candidates=1 candidates=1 matches=1 elapsed=0.5ms (index=0.0ms resolve=0.1ms search=0.2ms)\n[trace] search: pattern=\"freshnessNeedle0X42\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessNeedle0X42\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessNeedle0X42\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessNeedle0X42\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] reindex: modified new.rs\n[trace] reindex: modified file_001.rs\n[trace] search: pattern=\"freshnessNeedle0X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.2ms (index=0.0ms resolve=0.1ms search=0.1ms)\n[trace] search: pattern=\"freshnessRetainedMarker0Z73\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessRetainedMarker0Z73\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessRetainedMarker0Z73\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessRetainedMarker0Z73\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] reindex: modified file_001.rs\n[trace] search: pattern=\"freshnessRetainedMarker0Z73\" case_insensitive=false raw_candidates=1 candidates=1 matches=1 elapsed=0.5ms (index=0.4ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessNeedle0X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.1ms)\n[trace] search: pattern=\"freshnessNeedle0X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.1ms)\n[trace] search: pattern=\"freshnessNeedle0X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.1ms)\n[trace] search: pattern=\"freshnessNeedle0X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.1ms)\n[trace] search: pattern=\"freshnessNeedle0X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.1ms)\n[trace] reindex: dropped new.rs (removed)\n[trace] reindex: modified file_001.rs\n[trace] search: pattern=\"freshnessNeedle0X42\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n"
+    },
+    {
+      "repetition": 1,
+      "visibility_seconds": 0.05567508300009649,
+      "after_last_edit_seconds": 0.054567874991334975,
+      "server_rss_kib": {
+        "before_edits": 14880,
+        "after_visibility": 16032
+      },
+      "new_file_first_visible_seconds": 0.05567508300009649,
+      "graceful_shutdown_persistence_verified": false,
+      "incremental_publications_before_visibility": null,
+      "last_incomplete_probe_started_seconds": 0.03191591599897947,
+      "poll_interval_seconds": 0.005,
+      "attempts": 4,
+      "server_log": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-bwg_h18r/1/server.log",
+      "server_log_text": "[trace] opened index: 274 files, 5326 trigrams in 0.2ms\n[trace] serve ready in 1.0ms. TCP on port 64726. Cache: max 50000 entries / 1024 MiB (entries over 64 MiB not cached). Memory cap: 16384 MB. Index threads: 6. Watcher queue cap: 16384.\n[trace] refresh mode: auto, native watch budget=8192\n[trace] stale check: comparing index against filesystem...\n[trace] watcher subscriptions deferred until the ignore matcher is ready\n[trace] file watcher worker started (complete native coverage: true)\n[trace] gitignore matcher built from stale walk in 0.1ms (0 .gitignore + 0 .ignore files)\n[trace] stale check: index is up-to-date (274 files checked in 3ms)\n[trace] search: pattern=\"symbol_0\" case_insensitive=false raw_candidates=1 candidates=1 matches=1 elapsed=0.5ms (index=0.0ms resolve=0.1ms search=0.3ms)\n[trace] search: pattern=\"freshnessNeedle1X42\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessNeedle1X42\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessNeedle1X42\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessNeedle1X42\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] reindex: modified new.rs\n[trace] reindex: modified file_001.rs\n[trace] search: pattern=\"freshnessNeedle1X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.2ms (index=0.0ms resolve=0.1ms search=0.1ms)\n[trace] search: pattern=\"freshnessRetainedMarker1Z73\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessRetainedMarker1Z73\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessRetainedMarker1Z73\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessRetainedMarker1Z73\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessRetainedMarker1Z73\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] reindex: modified file_001.rs\n[trace] search: pattern=\"freshnessRetainedMarker1Z73\" case_insensitive=false raw_candidates=1 candidates=1 matches=1 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.1ms)\n[trace] search: pattern=\"freshnessNeedle1X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.1ms)\n[trace] search: pattern=\"freshnessNeedle1X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.1ms)\n[trace] search: pattern=\"freshnessNeedle1X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.1ms)\n[trace] search: pattern=\"freshnessNeedle1X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.1ms)\n[trace] reindex: dropped new.rs (removed)\n[trace] reindex: modified file_001.rs\n[trace] search: pattern=\"freshnessNeedle1X42\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n"
+    },
+    {
+      "repetition": 2,
+      "visibility_seconds": 0.054747917005443014,
+      "after_last_edit_seconds": 0.053889042013906874,
+      "server_rss_kib": {
+        "before_edits": 14880,
+        "after_visibility": 15968
+      },
+      "new_file_first_visible_seconds": 0.054747917005443014,
+      "graceful_shutdown_persistence_verified": false,
+      "incremental_publications_before_visibility": null,
+      "last_incomplete_probe_started_seconds": 0.0316258340026252,
+      "poll_interval_seconds": 0.005,
+      "attempts": 4,
+      "server_log": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-freshness-bwg_h18r/2/server.log",
+      "server_log_text": "[trace] opened index: 274 files, 5326 trigrams in 0.2ms\n[trace] serve ready in 1.2ms. TCP on port 64744. Cache: max 50000 entries / 1024 MiB (entries over 64 MiB not cached). Memory cap: 16384 MB. Index threads: 6. Watcher queue cap: 16384.\n[trace] refresh mode: auto, native watch budget=8192\n[trace] stale check: comparing index against filesystem...\n[trace] watcher subscriptions deferred until the ignore matcher is ready\n[trace] file watcher worker started (complete native coverage: true)\n[trace] gitignore matcher built from stale walk in 0.1ms (0 .gitignore + 0 .ignore files)\n[trace] stale check: index is up-to-date (274 files checked in 3ms)\n[trace] search: pattern=\"symbol_0\" case_insensitive=false raw_candidates=1 candidates=1 matches=1 elapsed=0.6ms (index=0.1ms resolve=0.1ms search=0.3ms)\n[trace] search: pattern=\"freshnessNeedle2X42\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessNeedle2X42\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessNeedle2X42\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessNeedle2X42\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] reindex: modified new.rs\n[trace] reindex: modified file_001.rs\n[trace] search: pattern=\"freshnessNeedle2X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.2ms (index=0.0ms resolve=0.1ms search=0.1ms)\n[trace] search: pattern=\"freshnessRetainedMarker2Z73\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessRetainedMarker2Z73\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessRetainedMarker2Z73\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] search: pattern=\"freshnessRetainedMarker2Z73\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n[trace] reindex: modified file_001.rs\n[trace] search: pattern=\"freshnessRetainedMarker2Z73\" case_insensitive=false raw_candidates=1 candidates=1 matches=1 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.1ms)\n[trace] search: pattern=\"freshnessNeedle2X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.1ms)\n[trace] search: pattern=\"freshnessNeedle2X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.1ms)\n[trace] search: pattern=\"freshnessNeedle2X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.1ms)\n[trace] search: pattern=\"freshnessNeedle2X42\" case_insensitive=false raw_candidates=2 candidates=2 matches=2 elapsed=0.1ms (index=0.0ms resolve=0.0ms search=0.1ms)\n[trace] reindex: dropped new.rs (removed)\n[trace] reindex: modified file_001.rs\n[trace] search: pattern=\"freshnessNeedle2X42\" case_insensitive=false raw_candidates=0 candidates=0 matches=0 elapsed=0.0ms (index=0.0ms resolve=0.0ms search=0.0ms)\n"
+    }
+  ]
+}

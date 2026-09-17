@@ -215,7 +215,14 @@ The daemon keeps indexes loaded in memory. Searches automatically use it when av
 
 With `--watch`, the daemon monitors indexed directories for file changes and automatically updates indexes. Changes are debounced to handle rapid edits (e.g., IDE auto-save, git operations). The watcher respects `.gitignore` rules and skips common non-source directories (`node_modules`, `target`, `.git`, etc.).
 
-When a watcher starts for a root, the daemon first reconciles the index with one incremental scan, so changes made while the daemon was down are picked up. While a root is watched, `fxi index` skips its own tree walk — the daemon owns freshness — and reports any pending debounced changes instead. `fxi index --force` still rebuilds locally.
+Small updates become searchable through an immutable in-memory index before
+disk publication. The default quiet debounce is 1 ms, with a 100 ms maximum
+event age; these are scheduling windows, not guaranteed end-to-end latencies.
+Disk writes are grouped until 250 ms of quiet or ten seconds of continuous
+updates. Large batches use the durable update path. See
+[freshness semantics](docs/SEMANTICS.md#freshness) for bounds and recovery behavior.
+
+When a watcher starts for a root, the daemon first reconciles the index with one incremental scan, so changes made while the daemon was down are picked up. While a root is watched, `fxi index` skips its own tree walk — the daemon owns freshness — and reports pending updates instead. Those changes may already be searchable in memory while awaiting disk publication. `fxi index --force` still rebuilds locally.
 
 ### Manage Indexes
 
@@ -400,7 +407,9 @@ Press `F1` or `?` to show help in the TUI.
 ## Performance and validation
 
 Current measurements, correctness fixes, research experiments, and remaining gaps
-are documented in [the source verification and position experiments](docs/performance-round5/NOTES.md),
+are documented in [the live-update experiments](docs/performance-round7/NOTES.md),
+[the source-pack comparisons](docs/performance-round6/NOTES.md),
+[the source verification and position experiments](docs/performance-round5/NOTES.md),
 [the broader comparisons and cache experiments](docs/performance-round4/NOTES.md),
 [the watcher and metadata experiments](docs/performance-round3/NOTES.md),
 [the indexing and query experiments](docs/performance-round2/NOTES.md), and
