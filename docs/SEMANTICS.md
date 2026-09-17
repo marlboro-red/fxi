@@ -226,3 +226,32 @@ an unchanged source stamp preserves that fact. Corruption in an untouched packed
 tail cannot invalidate an already verified positive witness in the live source.
 Other verification uses a whole-file checksum and UTF-8 validation. Existing
 point-in-time limitations during concurrent source writes remain unchanged.
+
+### Experimental certified negative routing
+
+`FXI_NEGATIVE_ROUTING=1` enables certificate creation during index publication and
+its use for direct files-only searches. Both build and query processes need the
+setting. It is independent of source packs and remains off by default.
+
+The proof currently accepts only exact case-sensitive regex literals of at least
+three bytes, with no additional filters or line breaks. It pins the generation,
+checks a checksummed certificate bound to the exact metadata and generation, and
+compares each opened Bloom handle's Unix identity, size, mtime and ctime before
+probing a checked mapped view. Only when every segment rejects the literal does
+it compare every certified core dependency stamp and return an empty result.
+Invalid queries, damaged/missing/changed evidence, and unsupported platforms
+fall back to ordinary opening and its existing validation and errors. Stale-index
+warnings and the existing index-update visibility contract are preserved.
+
+Certificate creation structurally validates inherited as well as new document,
+path, gram dictionary and posting-range data, and verifies every Bloom covers
+its gram dictionary. Unused token/line-map/source-pack data retain their existing
+independent validation. Checksums detect accidental corruption, not adversarial
+modification. The same immutable-index and Unix metadata-validation assumptions
+as the ordinary reader and source cache apply.
+
+Certificates are freshly generated, never inherited. Collecting older hardlinks
+can change ctime on the current generation's inherited files, immediately making
+a delta certificate unusable. This safely restores ordinary validation; it can
+remove the performance benefit after updates. The experiment retains the ctime
+check rather than weakening validation to keep a certificate usable.

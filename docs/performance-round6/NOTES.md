@@ -134,3 +134,90 @@ The comparable paths-only phrase gap remains about 3.7x; it has not disappeared.
 The full-response broad ratio includes Zoekt's much larger payload and is not an
 engine speedup. FXI's strong warm broad and internal-literal results survive the
 comparable-output test; selective is tied, and absence still favors Zoekt.
+
+## Smaller-corpus and ordinary-query controls
+
+Twenty-one paired direct samples on the existing Redis/CPython fixtures, using
+one identical packed index for old/new binaries (the old binary ignores packs):
+
+| Corpus/query | Baseline ms | Packed ms |
+|---|---:|---:|
+| Redis static void | 7.933 | 5.745 |
+| Redis raxFind | 5.228 | 5.280 |
+| Redis return | 12.744 | 6.326 |
+| Redis absent | 4.642 | 4.702 |
+| CPython static int | 13.880 | 8.054 |
+| CPython PyErr_SetString | 8.842 | 6.647 |
+| CPython return | 29.812 | 10.094 |
+| CPython absent | 5.067 | 5.122 |
+
+On the common Linux corpus, bare case-insensitive identifier queries (checked
+against ripgrep -i -F) improve return 661.012 -> 112.439 ms and file_operations
+75.258 -> 37.604 ms; selective folio_wait_bit_common regresses 15.176 -> 15.756 ms.
+These use whole-file packed validation, not the exact-case literal block shortcut.
+The extra storage therefore also helps common ordinary CLI queries, but the
+small selective counterexample is retained rather than hidden.
+
+## Negative-routing experiment, first version
+
+An opt-in prototype certifies existing core structural validation using Unix
+identity/mtime/ctime/length stamps and checksummed metadata bound to one immutable
+generation. It requires a separately issued certificate and an exact case-sensitive
+regex literal. Every segment Bloom must reject the query; any changed/missing
+core dependency falls back to ordinary validation and its existing errors.
+
+For auditNonexistentSymbol94283, every gram exists globally, but no segment has
+all grams. All 33 existing Blooms reject it. Their combined 5,053,475 bytes are
+smaller than the 84,343,552 dictionary bytes scanned at ordinary startup.
+Nevertheless, reloading/checksumming those Blooms loses: 21 paired samples show
+absence 10.455 -> 11.248 ms, selective 12.449 -> 12.863 ms, phrase 25.690 ->
+26.188 ms, broad 86.703 -> 86.342 ms. The certificate's 102 stamps were verified
+current, so this is an actual eligible-path regression, not stale-proof fallback.
+The explicit environment was FXI_NEGATIVE_ROUTING=1; both tools used the same
+fresh certificate-bearing packed index. The opt-in build also used
+FXI_SOURCE_PACK=1 and took 7.21 s in this single screening sample.
+
+The prototype preserves corruption errors, unsupported-query fallback and stale
+warnings. An additional lifecycle test demonstrates safe fallback after old
+hardlinks are collected: unlinking old aliases changes ctime on inherited files
+in the new generation too. No ctime check is dropped to hide this limitation.
+A certified mapped-Bloom revision is being evaluated separately.
+
+The mapped revision checks each OPEN Bloom handle's certified stamp before mapping
+and probing checked header/word ranges with the shared portable hash function.
+It reuses the prior payload/coverage validation instead of rehashing every word.
+The remaining core stamps are checked only after every segment rejects.
+
+Twenty-one paired samples in `linux-mapped-negative-routing.json`:
+
+| Query | Without certificate preflight ms | Mapped preflight ms |
+|---|---:|---:|
+| Absent | 11.710 | 5.818 |
+| Selective | 13.336 | 12.913 |
+| Phrase | 24.302 | 24.383 |
+| Broad return | 87.917 | 86.492 |
+
+The environment was FXI_NEGATIVE_ROUTING=1; the baseline binary predates the
+feature, and both read exactly the same certificate-bearing packed index. This
+is a useful opt-in reduction, not a measured win over csearch's 4.227 ms result
+from the earlier fresh three-tool comparison. The prototype stays explicitly
+experimental because inherited-link collection can remove its benefit.
+
+Validation includes bit-probe parity for every supported hash count, malformed
+and truncated mapped headers, same-length core corruption with restored mtime,
+missing/corrupt/mismatched Blooms and certificates, stop-gram fallback, delta and
+compaction generations, inherited-link collection, and a real CLI regression for
+corruption errors, invalid regex, and newly indexed matches. Local validation:
+727 all-target test executions plus the subsequently added CLI test; strict
+Clippy on Rust 1.98 and Rust 1.88 all-target checks passed.
+
+For a fresh experimental combined index and queries in the same shell:
+
+```sh
+export FXI_SOURCE_PACK=1 FXI_NEGATIVE_ROUTING=1
+fxi index --force PATH
+fxi -l 're:/struct file_operations/' -p PATH
+```
+
+Source packs remain useful without certificates. Negative routing is a startup
+optimization only; it does not change the remaining warm phrase loss to Zoekt.

@@ -1584,7 +1584,7 @@ fn read_line_maps(segment_path: &Path) -> Result<HashMap<DocId, Vec<u32>>> {
 }
 
 /// Read bloom filter from segment
-fn read_bloom_filter(segment_path: &Path) -> Result<BloomFilter> {
+pub(crate) fn read_bloom_filter(segment_path: &Path) -> Result<BloomFilter> {
     let mut file = BufReader::new(File::open(segment_path.join("bloom.bin"))?);
     let mut magic = [0u8; 6];
     file.read_exact(&mut magic)?;
@@ -1619,6 +1619,39 @@ fn read_bloom_filter(segment_path: &Path) -> Result<BloomFilter> {
         "Bloom checksum mismatch"
     );
     Ok(filter)
+}
+
+/// Establish exactly the core invariants required by a files-only gram query,
+/// including inherited segments. A routing certificate may reuse these checks
+/// only while strong file stamps remain unchanged. Unused token/line-map/source
+/// evidence keeps its existing independent, lazy validation behavior.
+pub(crate) fn validate_negative_routing_core(index_path: &Path, meta: &IndexMeta) -> Result<()> {
+    anyhow::ensure!(
+        matches!(meta.version, 1 | 2),
+        "Unsupported index version {}; rebuild the index",
+        meta.version
+    );
+    read_documents_version(index_path, meta.version)?;
+    read_paths(index_path)?;
+    for id in meta
+        .base_segment
+        .into_iter()
+        .chain(meta.delta_segments.iter().copied())
+    {
+        let path = index_path.join("segments").join(format!("seg_{id:04}"));
+        let segment = SegmentReader::open(&path, id, meta.has_positions, false)?;
+        let bloom = segment
+            .bloom_filter
+            .context("Missing or invalid routing Bloom")?;
+        anyhow::ensure!(
+            segment
+                .trigram_dict
+                .iter()
+                .all(|entry| bloom.might_contain(entry.trigram)),
+            "Routing Bloom omits a stored gram"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

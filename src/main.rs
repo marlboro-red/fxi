@@ -559,6 +559,10 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
 /// last update; surface that when the index looks old instead of silently
 /// missing recent changes. Tunable via FXI_STALE_WARN_SECS (0 disables).
 fn warn_if_stale(reader: &index::reader::IndexReader, root: &Path) {
+    warn_if_stale_metadata(&reader.meta, root);
+}
+
+fn warn_if_stale_metadata(meta: &index::types::IndexMeta, root: &Path) {
     use std::io::IsTerminal;
 
     if !std::io::stderr().is_terminal() {
@@ -575,7 +579,7 @@ fn warn_if_stale(reader: &index::reader::IndexReader, root: &Path) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let age = now.saturating_sub(reader.meta.updated_at);
+    let age = now.saturating_sub(meta.updated_at);
     if age > threshold {
         eprintln!(
             "note: index for {} was last updated {}h {}m ago; run `fxi index` or `fxi daemon start --watch` to keep it fresh",
@@ -638,14 +642,18 @@ fn do_direct_content_search(
     use crate::index::reader::IndexReader;
     use crate::query::{QueryExecutor, parse_query};
 
-    // Load index
-    let reader = IndexReader::open_for_search_uncached(root)?;
-    warn_if_stale(&reader, root);
-
     // Case-insensitivity is applied at the plan level: the planner narrows
     // through the lowercased token index and verifiers ignore case
     let mut parsed = parse_query(pattern);
     parsed.options.case_insensitive = case_insensitive;
+    if files_only && let Some(meta) = index::negative_routing::preflight(root, &parsed) {
+        warn_if_stale_metadata(&meta, root);
+        return Ok(Vec::new());
+    }
+
+    // A failed/unsupported preflight retains ordinary index and query checks.
+    let reader = IndexReader::open_for_search_uncached(root)?;
+    warn_if_stale(&reader, root);
     if parsed.is_empty() {
         return Ok(Vec::new());
     }

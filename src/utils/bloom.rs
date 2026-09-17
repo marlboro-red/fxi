@@ -18,6 +18,68 @@ fn mix64(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
+/// Portable double-hash probes, specified by bloom format version 1. Owned
+/// filters and certified mapped views must use this same implementation.
+#[inline]
+fn hash_pair(item: u32) -> (u64, u64) {
+    (
+        mix64(u64::from(item).wrapping_add(0x9e3779b97f4a7c15)),
+        mix64(u64::from(item).wrapping_add(0x3c6ef372fe94f82a)) | 1,
+    )
+}
+
+/// Borrowed view of an immutable Bloom whose complete checksum and gram
+/// coverage were already validated by a generation certificate. Header guards
+/// remain local, but this type deliberately does not recheck the payload hash.
+/// Callers must bind the opened file's strong stamp to that certificate first.
+pub(crate) struct CertifiedBloomView<'a> {
+    words: &'a [u8],
+    num_bits: usize,
+    num_hashes: u8,
+}
+
+impl<'a> CertifiedBloomView<'a> {
+    pub(crate) fn from_prevalidated_bytes(data: &'a [u8]) -> Option<Self> {
+        if data.len() < 19 || &data[..6] != BLOOM_MAGIC {
+            return None;
+        }
+        let num_hashes = data[6];
+        if !(1..=16).contains(&num_hashes) {
+            return None;
+        }
+        let num_words = u32::from_le_bytes(data[7..11].try_into().ok()?) as usize;
+        let word_bytes = num_words.checked_mul(8)?;
+        let num_bits = num_words.checked_mul(64)?;
+        if num_words == 0 || data.len() != 19usize.checked_add(word_bytes)? {
+            return None;
+        }
+        Some(Self {
+            words: &data[11..11 + word_bytes],
+            num_bits,
+            num_hashes,
+        })
+    }
+
+    #[inline]
+    fn might_contain(&self, item: u32) -> bool {
+        let (h1, h2) = hash_pair(item);
+        for i in 0..u64::from(self.num_hashes) {
+            let hash = h1.wrapping_add(i.wrapping_mul(h2));
+            let bit = (hash % self.num_bits as u64) as usize;
+            let offset = (bit / 64) * 8;
+            let word = u64::from_le_bytes(self.words[offset..offset + 8].try_into().unwrap());
+            if word & (1u64 << (bit % 64)) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn might_contain_all(&self, items: &[u32]) -> bool {
+        items.iter().all(|&item| self.might_contain(item))
+    }
+}
+
 /// A space-efficient probabilistic data structure for fast membership testing.
 ///
 /// Used to quickly reject documents that definitely don't contain certain trigrams
@@ -87,7 +149,7 @@ impl BloomFilter {
     /// Insert an element into the bloom filter
     #[inline]
     pub fn insert(&mut self, item: u32) {
-        let (h1, h2) = self.hash_pair(item);
+        let (h1, h2) = hash_pair(item);
 
         for i in 0..self.num_hashes as u64 {
             // Double hashing: h(i) = h1 + i*h2
@@ -103,7 +165,7 @@ impl BloomFilter {
     /// Returns false if definitely not present, true if possibly present.
     #[inline]
     pub fn might_contain(&self, item: u32) -> bool {
-        let (h1, h2) = self.hash_pair(item);
+        let (h1, h2) = hash_pair(item);
 
         for i in 0..self.num_hashes as u64 {
             let hash = h1.wrapping_add(i.wrapping_mul(h2));
@@ -128,15 +190,6 @@ impl BloomFilter {
             }
         }
         true
-    }
-
-    /// Portable double-hash probes, specified by bloom format version 1.
-    #[inline]
-    fn hash_pair(&self, item: u32) -> (u64, u64) {
-        (
-            mix64(u64::from(item).wrapping_add(0x9e3779b97f4a7c15)),
-            mix64(u64::from(item).wrapping_add(0x3c6ef372fe94f82a)) | 1,
-        )
     }
 
     /// Detect accidental damage before using this optional rejection filter.
@@ -195,6 +248,63 @@ impl Default for BloomFilter {
 mod tests {
     use super::*;
 
+    fn serialized(filter: &BloomFilter) -> Vec<u8> {
+        let mut bytes = BLOOM_MAGIC.to_vec();
+        bytes.push(filter.num_hashes());
+        bytes.extend_from_slice(&(filter.bits().len() as u32).to_le_bytes());
+        for word in filter.bits() {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        bytes.extend_from_slice(&filter.checksum().to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn certified_view_matches_owned_probes_for_all_supported_hash_counts() {
+        for probes in 1..=16 {
+            for bits in [64, 128, 1024, 8192] {
+                let mut filter = BloomFilter::with_params(bits, probes);
+                for value in [0, 1, 63, 64, 65, 123, 65535, 0x00ff_ffff, u32::MAX] {
+                    filter.insert(value);
+                }
+                let bytes = serialized(&filter);
+                let view = CertifiedBloomView::from_prevalidated_bytes(&bytes).unwrap();
+                for value in (0..2048).chain([65535, 0x00ff_ffff, u32::MAX]) {
+                    assert_eq!(view.might_contain(value), filter.might_contain(value));
+                }
+                assert!(view.might_contain_all(&[]));
+                assert_eq!(
+                    view.might_contain_all(&[1, 65, 123, u32::MAX]),
+                    filter.might_contain_all(&[1, 65, 123, u32::MAX])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn certified_view_rejects_malformed_headers_and_byte_ranges() {
+        let bytes = serialized(&BloomFilter::with_params(128, 7));
+        for length in 0..bytes.len() {
+            assert!(CertifiedBloomView::from_prevalidated_bytes(&bytes[..length]).is_none());
+        }
+        for probes in [0, 17, 255] {
+            let mut broken = bytes.clone();
+            broken[6] = probes;
+            assert!(CertifiedBloomView::from_prevalidated_bytes(&broken).is_none());
+        }
+        for words in [0, 1, 3, u32::MAX] {
+            let mut broken = bytes.clone();
+            broken[7..11].copy_from_slice(&words.to_le_bytes());
+            assert!(CertifiedBloomView::from_prevalidated_bytes(&broken).is_none());
+        }
+        let mut broken = bytes.clone();
+        broken[5] ^= 1;
+        assert!(CertifiedBloomView::from_prevalidated_bytes(&broken).is_none());
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(CertifiedBloomView::from_prevalidated_bytes(&trailing).is_none());
+    }
+
     #[test]
     fn legacy_header_view_is_an_empty_wildcard() {
         assert_eq!(BLOOM_MAGIC[0], 0);
@@ -213,12 +323,8 @@ mod tests {
 
     #[test]
     fn portable_hash_has_fixed_vectors() {
-        let filter = BloomFilter::new(100, 0.01);
-        assert_eq!(
-            filter.hash_pair(0),
-            (0xe220a8397b1dcdaf, 0x6e789e6aa1b965f5)
-        );
-        assert_eq!(filter.hash_pair(1).0, 0x910a2dec89025cc1);
+        assert_eq!(hash_pair(0), (0xe220a8397b1dcdaf, 0x6e789e6aa1b965f5));
+        assert_eq!(hash_pair(1).0, 0x910a2dec89025cc1);
     }
 
     #[test]
@@ -334,11 +440,9 @@ mod tests {
     #[test]
     fn test_hash_pair_independence() {
         // Verify that h1 and h2 are independent (different values)
-        let bf = BloomFilter::new(1000, 0.01);
-
         let mut same_count = 0;
         for i in 0..1000u32 {
-            let (h1, h2) = bf.hash_pair(i);
+            let (h1, h2) = hash_pair(i);
             if h1 == h2 {
                 same_count += 1;
             }

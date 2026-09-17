@@ -1,0 +1,36 @@
+{
+  "base_commit": "6657a18e2e9e66a931a8b58aa246062ce7c925e0",
+  "performance_rust": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+  "lint_rust": "1.98.0",
+  "msrv": "1.88.0",
+  "local_test_executions": 728,
+  "python_harness_tests": 3,
+  "source_sha256": {
+    "src/index/source_pack.rs": "62bbba74313de2922868a962cf91de479e08a9a6d6b996398c53c03d12a661d5",
+    "src/index/negative_routing.rs": "8ea344e09d5263c389f062888f135ddda92329d4f4f59b9e7a8a6fda123ac6e4",
+    "src/index/reader.rs": "40b3f09b0f688a024093ebf17d7e8fbb775d1d6ca27627e285c4d32d94321499",
+    "src/index/writer.rs": "92f136e5b717b27574cd0df5c2c49e603d19153fa525e7ddc4ec63baa7959f3a",
+    "src/index/compact.rs": "febebf1037e1dc01967c4e15c008226a41b525469d623cd86881b32cb7ce6d93",
+    "src/index/generation.rs": "f67250b125a0b8edca1a2db5379732ad2c873511d84261f0e24619b1db1196c1",
+    "src/main.rs": "ed6f9cd6d9d85a01a7cd44069d2a14b23c41e99a95baad2cee7e2bb3f1b4e1d2",
+    "src/query/executor.rs": "e4441d73ddb5afb1cbe9440f0a394bc8afd2d1dca947f355388bc43d68f02d3e",
+    "src/utils/bloom.rs": "234ce9a2f8b7ae53206e55f00e8a11407d8ad4f69fbda052f838ce66c12e50c1",
+    "Cargo.lock": "b11df61021fffcd05df5b4327ec40456764be8ff19ec55ecdd40dbe033a55bb8"
+  },
+  "binaries_sha256": {
+    "/tmp/fxi-round6-pack-final": "ea7b72225f7643ca13042ac88db321b4f267fce75bd6cbe40237786c4ecbd56c",
+    "/tmp/fxi-round6-scheduler": "831e0441cc74da604c68a2a5e5630c7d2ddd5e5aa1d791803e5cc26222ff6674",
+    "/tmp/fxi-round6-routing": "acbbaa40e3f77a200f8b3299139920d8108da13ca510d095d188cbad0bd190bf",
+    "/tmp/fxi-round6-mapped-routing": "5e6920c0f016e765b88b7b362c05ee4a9101afbe4df1e9f6df33edb66c375ab3"
+  },
+  "experimental_routing_environment": {
+    "build": {
+      "FXI_SOURCE_PACK": "1",
+      "FXI_NEGATIVE_ROUTING": "1"
+    },
+    "query": {
+      "FXI_NEGATIVE_ROUTING": "1"
+    }
+  },
+  "verified_ci_before_routing": "https://github.com/marlboro-red/fxi/actions/runs/35225350989"
+}

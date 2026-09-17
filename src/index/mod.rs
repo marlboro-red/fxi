@@ -45,6 +45,7 @@
 
 pub mod build;
 pub mod compact;
+pub(crate) mod negative_routing;
 pub mod reader;
 pub mod segment_io;
 pub(crate) mod source_pack;

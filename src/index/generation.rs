@@ -73,6 +73,7 @@ impl Generation {
     }
 
     pub fn publish(&mut self) -> Result<()> {
+        crate::index::negative_routing::write_if_requested(&self.path)?;
         // Publish only after every referenced byte and directory entry is durable.
         sync_tree(&self.path)?;
         sync_directory(&self.container.join("generations"))?;

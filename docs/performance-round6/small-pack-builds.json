@@ -1,0 +1,20 @@
+[
+  {
+    "name": "redis",
+    "corpus": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-bench-zlggoq33/corpus",
+    "indexes": "/tmp/fxi-round6-small-packs/redis",
+    "seconds": 0.18591745900630485,
+    "stderr": "        0.18 real         0.33 user         0.19 sys\n            82100224  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n                5311  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                  32  voluntary context switches\n                 615  involuntary context switches\n          3772775687  instructions retired\n          1641062864  cycles elapsed\n            75923912  peak memory footprint\n",
+    "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-bench-zlggoq33/corpus\nIndexing: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-bench-zlggoq33/corpus\nIndex complete\nIndex stored at: /tmp/fxi-round6-small-packs/redis/corpus-b320cc1870d0cb4f/generations/gen-97482-1789650837754398000-0\n",
+    "index_bytes": 28530151
+  },
+  {
+    "name": "python",
+    "corpus": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-bench-3bq_oyyj/corpus",
+    "indexes": "/tmp/fxi-round6-small-packs/python",
+    "seconds": 0.45513612499053124,
+    "stderr": "        0.45 real         1.20 user         0.65 sys\n           214974464  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               14047  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 103  voluntary context switches\n                1525  involuntary context switches\n         14754678272  instructions retired\n          5773205139  cycles elapsed\n           208863808  peak memory footprint\n",
+    "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-bench-3bq_oyyj/corpus\nIndexing: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-bench-3bq_oyyj/corpus\nProcessing in 2 chunks of up to 2000 files each\nTotal: 3480 files processed across 2 segments\nIndex complete\nIndex stored at: /tmp/fxi-round6-small-packs/python/corpus-91e03e89645ad48a/generations/gen-97484-1789650837954997000-0\n",
+    "index_bytes": 118604406
+  }
+]
