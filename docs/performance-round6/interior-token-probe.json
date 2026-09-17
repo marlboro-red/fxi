@@ -1,0 +1,272 @@
+{
+  "limits": "Offline precision probe using existing indexes, not a production optimization or timing benchmark. Forcing eager token loading may regress one-shot startup. Token positions constrain ordinal gaps, not byte distances or punctuation: surviving candidates still need source verification. Missing position files conservatively fall back to token-document filtering. Existing stale-index visibility limits remain; sources must match the index. No novelty claim.",
+  "method": "Only complete ASCII tokens with both boundaries inside an exact case-sensitive byte literal constrain candidates. Case folding, token truncation, and edge fragments cannot be treated as exact-token evidence. Token ordinals count all lexical tokens, including unindexed short/long ones. Matching files are independently checked with ripgrep; no true match may be removed.",
+  "root": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "rows": [
+    {
+      "baseline_bytes": 217774192,
+      "baseline_files": 3787,
+      "interior_tokens": [
+        [
+          "file",
+          1
+        ]
+      ],
+      "literal": "struct file_operations",
+      "matching_files": 1240,
+      "positional_bytes": 149452667,
+      "positional_data_used": false,
+      "positional_files": 2853,
+      "token_bytes": 149452667,
+      "token_document_frequencies": [
+        [
+          "file",
+          14515
+        ]
+      ],
+      "token_files": 2853
+    },
+    {
+      "baseline_bytes": 216150590,
+      "baseline_files": 3744,
+      "interior_tokens": [
+        [
+          "struct",
+          1
+        ],
+        [
+          "file",
+          2
+        ]
+      ],
+      "literal": "const struct file_operations",
+      "matching_files": 1227,
+      "positional_bytes": 72684558,
+      "positional_data_used": true,
+      "positional_files": 1800,
+      "token_bytes": 148086044,
+      "token_document_frequencies": [
+        [
+          "struct",
+          54156
+        ],
+        [
+          "file",
+          14515
+        ]
+      ],
+      "token_files": 2822
+    },
+    {
+      "baseline_bytes": 222881944,
+      "baseline_files": 3982,
+      "interior_tokens": [],
+      "literal": "file_operations",
+      "matching_files": 1491,
+      "positional_bytes": 222881944,
+      "positional_data_used": false,
+      "positional_files": 3982,
+      "token_bytes": 222881944,
+      "token_document_frequencies": [],
+      "token_files": 3982
+    },
+    {
+      "baseline_bytes": 621795469,
+      "baseline_files": 22738,
+      "interior_tokens": [
+        [
+          "const",
+          1
+        ]
+      ],
+      "literal": "static const struct",
+      "matching_files": 18958,
+      "positional_bytes": 606157633,
+      "positional_data_used": false,
+      "positional_files": 22425,
+      "token_bytes": 606157633,
+      "token_document_frequencies": [
+        [
+          "const",
+          38813
+        ]
+      ],
+      "token_files": 22425
+    },
+    {
+      "baseline_bytes": 381669167,
+      "baseline_files": 15959,
+      "interior_tokens": [],
+      "literal": "static inline",
+      "matching_files": 14718,
+      "positional_bytes": 381669167,
+      "positional_data_used": false,
+      "positional_files": 15959,
+      "token_bytes": 381669167,
+      "token_document_frequencies": [],
+      "token_files": 15959
+    },
+    {
+      "baseline_bytes": 501631551,
+      "baseline_files": 16713,
+      "interior_tokens": [],
+      "literal": "return -EINVAL",
+      "matching_files": 15399,
+      "positional_bytes": 501631551,
+      "positional_data_used": false,
+      "positional_files": 16713,
+      "token_bytes": 501631551,
+      "token_document_frequencies": [],
+      "token_files": 16713
+    },
+    {
+      "baseline_bytes": 330893493,
+      "baseline_files": 7762,
+      "interior_tokens": [
+        [
+          "long",
+          1
+        ]
+      ],
+      "literal": "unsigned long flags",
+      "matching_files": 4784,
+      "positional_bytes": 325966933,
+      "positional_data_used": false,
+      "positional_files": 7658,
+      "token_bytes": 325966933,
+      "token_document_frequencies": [
+        [
+          "long",
+          24500
+        ]
+      ],
+      "token_files": 7658
+    },
+    {
+      "baseline_bytes": 141981561,
+      "baseline_files": 6193,
+      "interior_tokens": [],
+      "literal": "void __iomem",
+      "matching_files": 5804,
+      "positional_bytes": 141981561,
+      "positional_data_used": false,
+      "positional_files": 6193,
+      "token_bytes": 141981561,
+      "token_document_frequencies": [],
+      "token_files": 6193
+    },
+    {
+      "baseline_bytes": 193048820,
+      "baseline_files": 4495,
+      "interior_tokens": [
+        [
+          "unlikely",
+          1
+        ]
+      ],
+      "literal": "if (unlikely(",
+      "matching_files": 4281,
+      "positional_bytes": 185564788,
+      "positional_data_used": false,
+      "positional_files": 4380,
+      "token_bytes": 185564788,
+      "token_document_frequencies": [
+        [
+          "unlikely",
+          4800
+        ]
+      ],
+      "token_files": 4380
+    },
+    {
+      "baseline_bytes": 294553666,
+      "baseline_files": 12886,
+      "interior_tokens": [
+        [
+          "description",
+          1
+        ]
+      ],
+      "literal": "MODULE_DESCRIPTION(",
+      "matching_files": 12842,
+      "positional_bytes": 293536292,
+      "positional_data_used": false,
+      "positional_files": 12877,
+      "token_bytes": 293536292,
+      "token_document_frequencies": [
+        [
+          "description",
+          14844
+        ]
+      ],
+      "token_files": 12877
+    },
+    {
+      "baseline_bytes": 5494985,
+      "baseline_files": 44,
+      "interior_tokens": [
+        [
+          "wait",
+          1
+        ],
+        [
+          "bit",
+          2
+        ]
+      ],
+      "literal": "folio_wait_bit_common",
+      "matching_files": 1,
+      "positional_bytes": 572220,
+      "positional_data_used": true,
+      "positional_files": 7,
+      "token_bytes": 5422029,
+      "token_document_frequencies": [
+        [
+          "wait",
+          12271
+        ],
+        [
+          "bit",
+          24111
+        ]
+      ],
+      "token_files": 43
+    },
+    {
+      "baseline_bytes": 828369729,
+      "baseline_files": 44315,
+      "interior_tokens": [],
+      "literal": "return",
+      "matching_files": 44258,
+      "positional_bytes": 828369729,
+      "positional_data_used": false,
+      "positional_files": 44315,
+      "token_bytes": 828369729,
+      "token_document_frequencies": [],
+      "token_files": 44315
+    },
+    {
+      "baseline_bytes": 0,
+      "baseline_files": 0,
+      "interior_tokens": [
+        [
+          "nonexistent",
+          1
+        ]
+      ],
+      "literal": "auditNonexistentSymbol94283",
+      "matching_files": 0,
+      "positional_bytes": 0,
+      "positional_data_used": false,
+      "positional_files": 0,
+      "token_bytes": 0,
+      "token_document_frequencies": [
+        [
+          "nonexistent",
+          90
+        ]
+      ],
+      "token_files": 0
+    }
+  ]
+}

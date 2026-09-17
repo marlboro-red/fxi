@@ -60,6 +60,7 @@ def main():
         manifest.update(json.dumps([name, hashlib.sha256(data).hexdigest()], separators=(',', ':')).encode() + b'\n')
     expected_files = set(source_paths)
     result = {'base': str(base), 'corpus': str(root), 'mode': 'direct CLI, warm filesystem, immutable snapshot',
+              'fxi_source_pack': env.get('FXI_SOURCE_PACK'),
               'files': len(expected_files), 'source_bytes': total_bytes, 'manifest_sha256': manifest.hexdigest(),
               'harness_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'binaries': {name: {'path': str(binary), 'sha256': hashlib.sha256(binary.read_bytes()).hexdigest()}

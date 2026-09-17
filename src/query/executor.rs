@@ -583,9 +583,34 @@ impl<'a> QueryExecutor<'a> {
             }
         };
 
+        let use_source_pack = self.reader.should_use_source_pack(candidate_count);
+        let packed_batch_size = if use_source_pack {
+            // Packed reads avoid per-file opens. Use all workers by default,
+            // retaining the explicit read-task override for reproducible tuning.
+            let tasks = std::env::var("FXI_SEARCH_PARALLELISM")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or_else(get_num_threads);
+            (candidate_count / tasks).max(1)
+        } else {
+            search_batch_size(candidate_count)
+        };
         let verify = |id: &DocId| {
             let doc = self.reader.get_document(*id)?;
             let full_path = self.reader.get_full_path(doc)?;
+            if use_source_pack {
+                if line_start.is_none()
+                    && line_end.is_none()
+                    && let Some(finder) = &literal_finder
+                    && let Some(found) = self.reader.packed_literal(doc, &full_path, finder)
+                {
+                    return found.then_some(*id);
+                }
+                if let Some(content) = self.reader.packed_source(doc, &full_path) {
+                    return has_match(content).then_some(*id);
+                }
+            }
             let content = self.reader.read_file_for_scan(&full_path, cache_scan)?;
             if line_start.is_none()
                 && line_end.is_none()
@@ -606,7 +631,7 @@ impl<'a> QueryExecutor<'a> {
             // Indexed collection preserves path order regardless of worker completion.
             candidate_ids
                 .par_iter()
-                .with_min_len(search_batch_size(candidate_count))
+                .with_min_len(packed_batch_size)
                 .map(verify)
                 .collect::<Vec<_>>()
                 .into_iter()

@@ -47,6 +47,7 @@ pub mod build;
 pub mod compact;
 pub mod reader;
 pub mod segment_io;
+pub(crate) mod source_pack;
 pub(crate) mod source_positions;
 pub mod stats;
 pub mod types;

@@ -199,3 +199,28 @@ Immutable generation leases keep deferred files available for the reader's lifet
 Files-only searches return paths in lexical path order. A nonzero file limit
 selects that ordered prefix of verified matches, including across segments and
 parallel workers. Zero means unlimited. Path-only filters use the same order.
+
+### Optional source packs
+
+On Unix, `FXI_SOURCE_PACK=1 fxi index --force PATH` adds source copies to each
+immutable segment. Incremental updates inherit existing packs and create packs
+for new segments; compaction recreates them with the remapped document IDs.
+Generation publication synchronizes packs and readers pin their lifetime just
+like postings. Building packs requires a second source read and additional disk
+space. It does not change the existing stale-index candidate visibility contract.
+
+One-shot files-only scans with at least 128 candidates may use packed bytes;
+small scans and warm daemon queries retain the ordinary path. Every use first
+validates source size, device, inode, modification time and change time. Changed,
+missing, unsupported or corrupt evidence falls back to live source verification.
+`FXI_SOURCE_PACK=0` disables packed reads. Non-Unix platforms do not use packs.
+
+The versioned table has an XXH3 integrity checksum and each source has both a
+whole-file and 4 KiB block checksum. These detect accidental corruption, not
+malicious alteration. A proven exact, nonempty case-sensitive literal can return
+a positive match after checking all blocks covering that match. A negative must
+check all source blocks. The whole source was validated as UTF-8 during capture;
+an unchanged source stamp preserves that fact. Corruption in an untouched packed
+tail cannot invalidate an already verified positive witness in the live source.
+Other verification uses a whole-file checksum and UTF-8 validation. Existing
+point-in-time limitations during concurrent source writes remain unchanged.

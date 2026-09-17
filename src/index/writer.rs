@@ -866,6 +866,13 @@ impl ChunkedIndexWriter {
 
         // Write metadata
         self.write_meta(&stop_grams)?;
+        crate::index::source_pack::write_missing(
+            &self.index_path,
+            &self.root_path,
+            &self.all_documents,
+            &self.all_paths,
+            crate::index::source_pack::requested(),
+        )?;
         self.generation.publish()?;
 
         Ok(())
@@ -1206,6 +1213,14 @@ impl DeltaSegmentWriter {
 
         // Write meta.json atomically (commits the transaction)
         write_meta_atomic(&self.index_path, meta)?;
+        crate::index::source_pack::write_missing(
+            &self.index_path,
+            &self.root_path,
+            &all_documents,
+            &all_paths,
+            crate::index::source_pack::requested()
+                || crate::index::source_pack::present(&self.index_path),
+        )?;
         self.generation.publish()?;
 
         Ok(())

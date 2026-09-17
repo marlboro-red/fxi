@@ -1,0 +1,9 @@
+{
+  "root": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "indexes": "/tmp/fxi-round6-pack-indexes",
+  "elapsed_seconds": 7.745412083997508,
+  "returncode": 0,
+  "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex\nIndexing: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex\nProcessing in 33 chunks of up to 2000 files each\nTotal: 65284 files processed across 33 segments\nIndex complete\nIndex stored at: /tmp/fxi-round6-pack-indexes/fxi-common-index-56d5aabee3b5b70d/generations/gen-91682-1789648880581734000-0\n",
+  "stderr": "        7.74 real        18.53 user        10.87 sys\n           340541440  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               38328  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   1  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n               78519  voluntary context switches\n              144287  involuntary context switches\n        261688767645  instructions retired\n         94443161123  cycles elapsed\n           334594720  peak memory footprint\n",
+  "bytes": 1974899533
+}

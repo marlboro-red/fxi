@@ -1,0 +1,185 @@
+{
+  "harness_sha256": "c7669136798bebcab502ed57bfc5ec9244168b362256c459f9ac3c87f7365ac1",
+  "candidate_indexes": "/private/tmp/fxi-round6-pack-indexes",
+  "rayon_threads": {
+    "before": null,
+    "after": null
+  },
+  "search_parallelism": {
+    "before": null,
+    "after": null
+  },
+  "corpus": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "indexes": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/fxi",
+  "mode": "direct",
+  "output_mode": "files",
+  "query_syntax": "regex",
+  "binaries": {
+    "before": {
+      "path": "/private/tmp/fxi-round5-final",
+      "sha256": "f3f40dc80efde25392bbbe2e40761f6de572ba2762c6558c75884e0e013b1e51"
+    },
+    "after": {
+      "path": "/private/tmp/fxi-round6-pack-v1",
+      "sha256": "d0ed079e418cc9eae0a4c8260d24b8f75562401fd7e6dc4c81e5e5267d435515"
+    }
+  },
+  "rows": [
+    {
+      "query": "return",
+      "pattern": "return",
+      "files": 44258,
+      "tools": {
+        "before": {
+          "median_ms": 593.285542,
+          "samples_ms": [
+            600.518208,
+            591.314083,
+            580.191708,
+            594.395875,
+            596.540625,
+            590.27125,
+            586.661833,
+            593.390875,
+            696.289792,
+            593.285542,
+            591.035083
+          ]
+        },
+        "after": {
+          "median_ms": 121.174958,
+          "samples_ms": [
+            122.051334,
+            119.352875,
+            121.174958,
+            121.473666,
+            121.737667,
+            123.302083,
+            121.071458,
+            121.125083,
+            130.058709,
+            120.498125,
+            121.160375
+          ]
+        }
+      }
+    },
+    {
+      "query": "struct file_operations",
+      "pattern": "struct file_operations",
+      "files": 1240,
+      "tools": {
+        "before": {
+          "median_ms": 50.158083,
+          "samples_ms": [
+            48.201708,
+            50.796334,
+            52.157625,
+            51.814583,
+            49.617583,
+            50.158083,
+            50.163958,
+            50.05,
+            51.662334,
+            47.813083,
+            49.762042
+          ]
+        },
+        "after": {
+          "median_ms": 30.842584,
+          "samples_ms": [
+            30.559083,
+            31.4205,
+            30.793042,
+            30.565167,
+            30.966917,
+            30.842584,
+            30.911709,
+            30.683583,
+            30.710209,
+            30.88775,
+            31.028292
+          ]
+        }
+      }
+    },
+    {
+      "query": "folio_wait_bit_common",
+      "pattern": "folio_wait_bit_common",
+      "files": 1,
+      "tools": {
+        "before": {
+          "median_ms": 13.133084,
+          "samples_ms": [
+            13.097125,
+            14.102625,
+            13.197125,
+            12.854083,
+            13.133084,
+            13.849125,
+            13.064375,
+            13.222917,
+            13.119625,
+            14.71475,
+            12.822
+          ]
+        },
+        "after": {
+          "median_ms": 14.736875,
+          "samples_ms": [
+            14.358666,
+            14.782,
+            15.893416,
+            14.902958,
+            14.333667,
+            14.736875,
+            15.016417,
+            14.273917,
+            13.981,
+            14.542625,
+            15.14975
+          ]
+        }
+      }
+    },
+    {
+      "query": "auditNonexistentSymbol94283",
+      "pattern": "auditNonexistentSymbol94283",
+      "files": 0,
+      "tools": {
+        "before": {
+          "median_ms": 11.17025,
+          "samples_ms": [
+            11.17025,
+            12.140667,
+            10.896875,
+            12.284167,
+            10.747208,
+            11.543167,
+            10.978,
+            10.995375,
+            11.601917,
+            11.230458,
+            10.59825
+          ]
+        },
+        "after": {
+          "median_ms": 11.113917,
+          "samples_ms": [
+            11.113917,
+            12.384708,
+            11.069625,
+            11.1055,
+            11.401416,
+            11.257166,
+            11.598875,
+            11.102458,
+            10.769125,
+            12.273916,
+            11.0535
+          ]
+        }
+      }
+    }
+  ]
+}

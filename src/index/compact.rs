@@ -173,6 +173,13 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
         rejected_files: meta.rejected_files,
     };
     write_meta_atomic(&generation.path, &new_meta)?;
+    crate::index::source_pack::write_missing(
+        &generation.path,
+        &root,
+        &remapping.valid_docs,
+        &remapping.valid_paths,
+        crate::index::source_pack::requested() || crate::index::source_pack::present(&index_path),
+    )?;
     generation.publish()?;
     eprintln!("  Updated meta.json");
 

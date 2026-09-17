@@ -255,6 +255,7 @@ impl TokenIndex {
 
 /// Reader for a single segment
 struct SegmentReader {
+    source_pack: OnceLock<Option<crate::index::source_pack::SourcePack>>,
     #[allow(dead_code)]
     segment_id: SegmentId,
     trigram_dict: TrigramDict,
@@ -310,6 +311,7 @@ impl SegmentReader {
         let bloom_filter = read_bloom_filter(segment_path).ok();
 
         let reader = Self {
+            source_pack: OnceLock::new(),
             segment_id,
             trigram_dict,
             trigram_postings,
@@ -653,6 +655,7 @@ pub struct IndexReader {
     /// LRU cache for file contents (speeds up repeated queries on same files)
     file_cache: Arc<SharedContentCache>,
     content_cache_enabled: bool,
+    source_pack_enabled: bool,
     /// Lazily-built bitmap of valid doc IDs. Safe to cache: documents are
     /// immutable after open (index updates swap in a whole new reader).
     valid_docs_cache: OnceLock<RoaringBitmap>,
@@ -781,6 +784,8 @@ impl IndexReader {
             stop_grams,
             file_cache,
             content_cache_enabled: true,
+            source_pack_enabled: cfg!(unix)
+                && std::env::var_os("FXI_SOURCE_PACK").is_none_or(|v| v != "0"),
             valid_docs_cache: OnceLock::new(),
             path_order_cache: OnceLock::new(),
         })
@@ -1188,6 +1193,51 @@ impl IndexReader {
             }
         }
         true
+    }
+
+    pub(crate) fn should_use_source_pack(&self, candidates: usize) -> bool {
+        self.source_pack_enabled
+            && !self.content_cache_enabled
+            && candidates >= 128
+            && self
+                .segments
+                .iter()
+                .any(|segment| segment.segment_path.join("source.table").is_file())
+    }
+
+    pub(crate) fn packed_literal(
+        &self,
+        doc: &Document,
+        full_path: &Path,
+        finder: &memchr::memmem::Finder<'_>,
+    ) -> Option<bool> {
+        if !self.source_pack_enabled {
+            return None;
+        }
+        let segment = self
+            .segments
+            .iter()
+            .find(|segment| segment.segment_id == doc.segment_id)?;
+        segment
+            .source_pack
+            .get_or_init(|| crate::index::source_pack::SourcePack::open(&segment.segment_path).ok())
+            .as_ref()?
+            .contains_literal(doc.doc_id, self.get_path(doc)?, full_path, finder)
+    }
+
+    pub(crate) fn packed_source(&self, doc: &Document, full_path: &Path) -> Option<&str> {
+        if !self.source_pack_enabled {
+            return None;
+        }
+        let segment = self
+            .segments
+            .iter()
+            .find(|segment| segment.segment_id == doc.segment_id)?;
+        segment
+            .source_pack
+            .get_or_init(|| crate::index::source_pack::SourcePack::open(&segment.segment_path).ok())
+            .as_ref()?
+            .read(doc.doc_id, self.get_path(doc)?, full_path)
     }
 
     pub(crate) fn read_file_for_scan(&self, path: &Path, cache_scan: bool) -> Option<FileContent> {

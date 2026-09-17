@@ -417,3 +417,9 @@ contents, not index construction, active results, or total process RSS.
 ## License
 
 MIT
+
+For the optional Unix source-pack experiment, build with
+`FXI_SOURCE_PACK=1 fxi index --force PATH`. It trades extra disk space and build
+work for faster broad one-shot files-only searches. See the
+[round-six measurements and limitations](docs/performance-round6/NOTES.md) and
+[source-pack semantics](docs/SEMANTICS.md#optional-source-packs).
