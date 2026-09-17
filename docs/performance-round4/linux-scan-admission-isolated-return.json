@@ -1,0 +1,85 @@
+{
+  "query_syntax": "bare insensitive identifier",
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-warm-files-5pt6x8hx",
+  "corpus": "/private/tmp/fxi-linux-corpus",
+  "indexes": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-4rmtodjl/after/indexes",
+  "binaries": {
+    "before": {
+      "path": "/private/tmp/fxi-round4-prepared",
+      "sha256": "b86bdbee091113c94de495d799d2fae2620d9a7be3010d0ffd5d959eee36ca9b"
+    },
+    "after": {
+      "path": "/private/tmp/fxi-round4-admission",
+      "sha256": "194b20b8a5d46c1ba41f7fe07cc1f59db9f61e78fef911acd6c0b8150736129a"
+    }
+  },
+  "harness_sha256": "6a01290152a3ce1c0edf54a44c43bda94d2a358f205458c6be1d5c1d18cbe81d",
+  "rows": [
+    {
+      "pattern": "return",
+      "files": 44691,
+      "first_query_ms": {
+        "before": 587.28625,
+        "after": 577.933333
+      },
+      "server_rss_kib": {
+        "before": 340464,
+        "after": 1433312
+      },
+      "tools": {
+        "before": {
+          "median_ms": 494.48075,
+          "samples_ms": [
+            482.152375,
+            544.768125,
+            479.535375,
+            496.088,
+            540.830958,
+            482.250292,
+            487.180208,
+            521.905833,
+            507.513625,
+            484.541833,
+            501.679791,
+            537.00725,
+            477.3345,
+            494.48075,
+            542.371208,
+            487.626209,
+            476.47425,
+            522.215333,
+            509.233917,
+            486.235292,
+            486.867083
+          ]
+        },
+        "after": {
+          "median_ms": 117.950334,
+          "samples_ms": [
+            115.108667,
+            117.986291,
+            117.553833,
+            116.118209,
+            119.310959,
+            117.173708,
+            117.472458,
+            115.056416,
+            117.950334,
+            119.409458,
+            120.845458,
+            119.359833,
+            117.14275,
+            117.152958,
+            119.467292,
+            119.159583,
+            118.218541,
+            114.793542,
+            118.000208,
+            118.631666,
+            117.484416
+          ]
+        }
+      }
+    }
+  ]
+}

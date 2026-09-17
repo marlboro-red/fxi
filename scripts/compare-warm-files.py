@@ -17,9 +17,14 @@ parser.add_argument('--baseline', type=Path, required=True)
 parser.add_argument('--candidate', type=Path, required=True)
 parser.add_argument('--output', type=Path, required=True)
 parser.add_argument('--repetitions', type=int, default=11)
+parser.add_argument('--patterns', nargs='+')
+parser.add_argument('--literal', action='store_true', help='Compare bare identifiers with case-insensitive fixed-string ripgrep')
 args = parser.parse_args()
 if args.repetitions < 1:
     parser.error('repetitions must be positive')
+patterns = args.patterns or ['folio_wait_bit_common', 'auditNonexistentSymbol94283', 'struct file_operations', 'return']
+if args.literal and any(not pattern.isidentifier() for pattern in patterns):
+    parser.error('--literal requires identifier patterns to preserve bare-query semantics')
 root = args.corpus.resolve()
 base = Path(tempfile.mkdtemp(prefix='fxi-warm-files-'))
 binaries = {'before': args.baseline.resolve(), 'after': args.candidate.resolve()}
@@ -49,19 +54,20 @@ try:
         if time.monotonic() > deadline:
             raise TimeoutError('Daemon socket startup')
         time.sleep(.02)
-    for pattern in ['folio_wait_bit_common', 'auditNonexistentSymbol94283', 'struct file_operations', 'return']:
-        oracle = subprocess.run(['rg', '-l', '--color=never', pattern, '.'], cwd=root, capture_output=True, timeout=120)
+    for pattern in patterns:
+        oracle = subprocess.run(['rg', *(['-i', '-F'] if args.literal else []), '-l', '--color=never', pattern, '.'], cwd=root, capture_output=True, timeout=120)
         assert oracle.returncode in (0, 1), oracle.stderr
         expected = paths(oracle.stdout)
         samples = {name: [] for name in binaries}
+        first_query_ms = {}
         for rep in range(-1, args.repetitions):
             order = list(binaries)
             random.Random(1729 + rep).shuffle(order)
             for name in order:
                 assert servers[name].poll() is None
-                variant = pattern + '(?:)' * (rep + 2)
+                variant = pattern if args.literal else f"re:/{pattern + '(?:)' * (rep + 2)}/"
                 start = time.perf_counter_ns()
-                result = subprocess.run([str(binaries[name]), '-l', '--color=never', f're:/{variant}/', '-p', str(root)],
+                result = subprocess.run([str(binaries[name]), '-l', '--color=never', variant, '-p', str(root)],
                                         cwd=root, env=envs[name], capture_output=True, timeout=120)
                 elapsed = (time.perf_counter_ns() - start) / 1e6
                 assert result.returncode == 0 and b'Daemon search failed' not in result.stderr, result.stderr
@@ -69,7 +75,10 @@ try:
                 assert paths(result.stdout) == expected, (name, pattern)
                 if rep >= 0:
                     samples[name].append(elapsed)
-        row = {'pattern': pattern, 'files': len(expected), 'tools': {
+                else:
+                    first_query_ms[name] = elapsed
+        row = {'pattern': pattern, 'files': len(expected), 'first_query_ms': first_query_ms,
+               'server_rss_kib': {name: int(subprocess.check_output(['ps', '-o', 'rss=', '-p', str(server.pid)], text=True).strip()) for name, server in servers.items()}, 'tools': {
             name: {'median_ms': statistics.median(values), 'samples_ms': values}
             for name, values in samples.items()}}
         rows.append(row)
@@ -85,7 +94,7 @@ finally:
             server.wait()
     for log in logs.values():
         log.close()
-args.output.write_text(json.dumps({'base': str(base), 'corpus': str(root), 'indexes': str(args.indexes.resolve()),
+args.output.write_text(json.dumps({'query_syntax': 'bare insensitive identifier' if args.literal else 'regex', 'base': str(base), 'corpus': str(root), 'indexes': str(args.indexes.resolve()),
     'binaries': {name: {'path': str(binary), 'sha256': hashlib.sha256(binary.read_bytes()).hexdigest()}
                  for name, binary in binaries.items()},
     'harness_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), 'rows': rows}, indent=2) + '\n')

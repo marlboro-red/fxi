@@ -1,0 +1,17 @@
+{
+  "implementation_commit": "2fc82df",
+  "all_target_tests": {
+    "passed": 680,
+    "failed": 0,
+    "ignored": 0,
+    "suites": 10
+  },
+  "checks": [
+    "cargo test --all-targets",
+    "cargo clippy --all-targets -- -D warnings",
+    "cargo build --release",
+    "cargo +1.88.0 check --all-targets",
+    "python3 scripts/test_benchmarks.py"
+  ],
+  "benchmark_harness_tests_passed": 3
+}

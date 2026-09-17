@@ -1,0 +1,511 @@
+{
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi",
+  "corpus": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "mode": "direct CLI, warm filesystem, immutable snapshot",
+  "files": 65284,
+  "source_bytes": 1311592608,
+  "manifest_sha256": "adb3052a8f1cd3f0d7b49c7dff2cc5ad36b831da7a4c238c2f899db85ae57854",
+  "harness_sha256": "9e71a932f265a02ec3aee6296ed63c9cc0a720cffaa5f11cbfbc4a6421cdce3a",
+  "binaries": {
+    "fxi": {
+      "path": "/private/tmp/fxi-round4-combined",
+      "sha256": "f1e8065e4b07a89773d8d6c55845e2ec07ffa5990b379986d58d05efdb45aa9d"
+    },
+    "zoekt": {
+      "path": "/private/tmp/fxi-research-bin/zoekt",
+      "sha256": "1ef055de86af25e13b3e8a64e4e1c2cc5246ee44c26e71644dd63799d4a914b5"
+    },
+    "zoekt-index": {
+      "path": "/private/tmp/fxi-research-bin/zoekt-index",
+      "sha256": "4922756a9d1d12b44cecf64bf6471ab5780daa383b1c58ab521c3b98f191b8fd"
+    },
+    "csearch": {
+      "path": "/private/tmp/fxi-research-bin/csearch",
+      "sha256": "d1368064a25485e9d1fa5ff0bdcc4a9a9c12453a2d4e67abb4fefc0b2c597f8f"
+    },
+    "cindex": {
+      "path": "/private/tmp/fxi-research-bin/cindex",
+      "sha256": "95c45352b1e0b52e2f375fdba169f2f2fae64e66df08805d48df18701e3e4f9e"
+    }
+  },
+  "builds": {
+    "csearch": [
+      {
+        "seconds": 9.741218292,
+        "peak_rss_bytes": 306233344,
+        "command": [
+          "/private/tmp/fxi-research-bin/cindex",
+          "-reset",
+          "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex"
+        ],
+        "stderr": "cindex: 2026/09/17 19:05:32 index /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex\ncindex: 2026/09/17 19:05:39 flush index\ncindex: 2026/09/17 19:05:39 merge mem + 75 MB disk\ncindex: 2026/09/17 19:05:41 1311592608 data bytes, 76499136 index bytes\ncindex: 2026/09/17 19:05:41 done\n        9.73 real         7.70 user         2.02 sys\n           306233344  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               18872  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                 348  signals received\n                  84  voluntary context switches\n                5299  involuntary context switches\n        143572958496  instructions retired\n         35635767408  cycles elapsed\n           225460968  peak memory footprint\n",
+        "index_bytes": 76499136
+      },
+      {
+        "seconds": 9.806339874999999,
+        "peak_rss_bytes": 306036736,
+        "command": [
+          "/private/tmp/fxi-research-bin/cindex",
+          "-reset",
+          "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex"
+        ],
+        "stderr": "cindex: 2026/09/17 19:09:43 index /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex\ncindex: 2026/09/17 19:09:50 flush index\ncindex: 2026/09/17 19:09:50 merge mem + 75 MB disk\ncindex: 2026/09/17 19:09:53 1311592608 data bytes, 76499136 index bytes\ncindex: 2026/09/17 19:09:53 done\n        9.80 real         7.72 user         2.05 sys\n           306036736  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               18862  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                 355  signals received\n                  64  voluntary context switches\n                5843  involuntary context switches\n        143785450292  instructions retired\n         35737843608  cycles elapsed\n           225215160  peak memory footprint\n",
+        "index_bytes": 76499136
+      },
+      {
+        "seconds": 9.711242582999999,
+        "peak_rss_bytes": 306216960,
+        "command": [
+          "/private/tmp/fxi-research-bin/cindex",
+          "-reset",
+          "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex"
+        ],
+        "stderr": "cindex: 2026/09/17 19:10:01 index /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex\ncindex: 2026/09/17 19:10:08 flush index\ncindex: 2026/09/17 19:10:08 merge mem + 75 MB disk\ncindex: 2026/09/17 19:10:11 1311592608 data bytes, 76499136 index bytes\ncindex: 2026/09/17 19:10:11 done\n        9.70 real         7.72 user         1.98 sys\n           306216960  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               18872  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                 346  signals received\n                  60  voluntary context switches\n                4995  involuntary context switches\n        142632329413  instructions retired\n         35462660474  cycles elapsed\n           225411792  peak memory footprint\n",
+        "index_bytes": 76499136
+      }
+    ],
+    "zoekt": [
+      {
+        "seconds": 109.812379375,
+        "peak_rss_bytes": 1309949952,
+        "command": [
+          "/private/tmp/fxi-research-bin/zoekt-index",
+          "-index",
+          "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt",
+          "-disable_ctags",
+          "-file_limit",
+          "10000000",
+          "-max_trigram_count",
+          "16777216",
+          "-ignore_dirs",
+          ".git,.hg,.svn,.tgrep",
+          "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex"
+        ],
+        "stderr": "2026/09/17 19:05:55 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00000.zoekt: 286260278 index bytes (overhead 2.7), 11617 files processed \n2026/09/17 19:06:04 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00001.zoekt: 286414041 index bytes (overhead 2.6), 4906 files processed \n2026/09/17 19:06:12 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00002.zoekt: 237800017 index bytes (overhead 2.2), 34 files processed \n2026/09/17 19:06:19 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00003.zoekt: 230480580 index bytes (overhead 2.2), 66 files processed \n2026/09/17 19:06:26 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00004.zoekt: 229462653 index bytes (overhead 2.2), 146 files processed \n2026/09/17 19:06:35 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00005.zoekt: 270838182 index bytes (overhead 2.6), 5977 files processed \n2026/09/17 19:06:45 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00006.zoekt: 288719906 index bytes (overhead 2.8), 6524 files processed \n2026/09/17 19:06:54 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00007.zoekt: 289699564 index bytes (overhead 2.8), 4557 files processed \n2026/09/17 19:07:03 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00008.zoekt: 279373992 index bytes (overhead 2.7), 4627 files processed \n2026/09/17 19:07:13 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00009.zoekt: 292740059 index bytes (overhead 2.8), 5733 files processed \n2026/09/17 19:07:22 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00010.zoekt: 288157615 index bytes (overhead 2.7), 9524 files processed \n2026/09/17 19:07:31 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00011.zoekt: 287760542 index bytes (overhead 2.7), 5947 files processed \n2026/09/17 19:07:34 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00012.zoekt: 129502061 index bytes (overhead 2.8), 5626 files processed \n      109.80 real       121.58 user         5.66 sys\n          1309949952  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               81450  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                4880  signals received\n                2699  voluntary context switches\n              167357  involuntary context switches\n       2576012818140  instructions retired\n        449849507220  cycles elapsed\n          1182582128  peak memory footprint\n",
+        "index_bytes": 3397209490
+      },
+      {
+        "seconds": 110.774074959,
+        "peak_rss_bytes": 1217347584,
+        "command": [
+          "/private/tmp/fxi-research-bin/zoekt-index",
+          "-index",
+          "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt",
+          "-disable_ctags",
+          "-file_limit",
+          "10000000",
+          "-max_trigram_count",
+          "16777216",
+          "-ignore_dirs",
+          ".git,.hg,.svn,.tgrep",
+          "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex"
+        ],
+        "stderr": "2026/09/17 19:07:59 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00000.zoekt: 286260278 index bytes (overhead 2.7), 11617 files processed \n2026/09/17 19:08:09 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00001.zoekt: 286414041 index bytes (overhead 2.6), 4906 files processed \n2026/09/17 19:08:16 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00002.zoekt: 237800017 index bytes (overhead 2.2), 34 files processed \n2026/09/17 19:08:23 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00003.zoekt: 230480580 index bytes (overhead 2.2), 66 files processed \n2026/09/17 19:08:31 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00004.zoekt: 229462653 index bytes (overhead 2.2), 146 files processed \n2026/09/17 19:08:40 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00005.zoekt: 270838182 index bytes (overhead 2.6), 5977 files processed \n2026/09/17 19:08:49 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00006.zoekt: 288719906 index bytes (overhead 2.8), 6524 files processed \n2026/09/17 19:08:59 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00007.zoekt: 289699564 index bytes (overhead 2.8), 4557 files processed \n2026/09/17 19:09:08 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00008.zoekt: 279373992 index bytes (overhead 2.7), 4627 files processed \n2026/09/17 19:09:17 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00009.zoekt: 292740059 index bytes (overhead 2.8), 5733 files processed \n2026/09/17 19:09:27 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00010.zoekt: 288157615 index bytes (overhead 2.7), 9524 files processed \n2026/09/17 19:09:36 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00011.zoekt: 287760542 index bytes (overhead 2.7), 5947 files processed \n2026/09/17 19:09:39 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00012.zoekt: 129502061 index bytes (overhead 2.8), 5626 files processed \n      110.76 real       122.58 user         5.59 sys\n          1217347584  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               75778  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                4896  signals received\n                1970  voluntary context switches\n              165448  involuntary context switches\n       2575402229069  instructions retired\n        449030781844  cycles elapsed\n          1089209736  peak memory footprint\n",
+        "index_bytes": 3397209490
+      },
+      {
+        "seconds": 111.378018,
+        "peak_rss_bytes": 1214873600,
+        "command": [
+          "/private/tmp/fxi-research-bin/zoekt-index",
+          "-index",
+          "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt",
+          "-disable_ctags",
+          "-file_limit",
+          "10000000",
+          "-max_trigram_count",
+          "16777216",
+          "-ignore_dirs",
+          ".git,.hg,.svn,.tgrep",
+          "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex"
+        ],
+        "stderr": "2026/09/17 19:10:25 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00000.zoekt: 286260278 index bytes (overhead 2.7), 11617 files processed \n2026/09/17 19:10:34 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00001.zoekt: 286414041 index bytes (overhead 2.6), 4906 files processed \n2026/09/17 19:10:41 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00002.zoekt: 237800017 index bytes (overhead 2.2), 34 files processed \n2026/09/17 19:10:49 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00003.zoekt: 230480580 index bytes (overhead 2.2), 66 files processed \n2026/09/17 19:10:56 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00004.zoekt: 229462653 index bytes (overhead 2.2), 146 files processed \n2026/09/17 19:11:06 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00005.zoekt: 270838182 index bytes (overhead 2.6), 5977 files processed \n2026/09/17 19:11:15 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00006.zoekt: 288719906 index bytes (overhead 2.8), 6524 files processed \n2026/09/17 19:11:25 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00007.zoekt: 289699564 index bytes (overhead 2.8), 4557 files processed \n2026/09/17 19:11:34 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00008.zoekt: 279373992 index bytes (overhead 2.7), 4627 files processed \n2026/09/17 19:11:43 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00009.zoekt: 292740059 index bytes (overhead 2.8), 5733 files processed \n2026/09/17 19:11:53 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00010.zoekt: 288157615 index bytes (overhead 2.7), 9524 files processed \n2026/09/17 19:12:01 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00011.zoekt: 287760542 index bytes (overhead 2.7), 5947 files processed \n2026/09/17 19:12:05 finished shard /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-p_am5fsi/zoekt/fxi-common-indexer-corpus-1td4bkex_v16.00012.zoekt: 129502061 index bytes (overhead 2.8), 5626 files processed \n      111.37 real       123.55 user         5.50 sys\n          1214873600  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               75623  page reclaims\n                   1  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                4955  signals received\n                1874  voluntary context switches\n              166699  involuntary context switches\n       2576652450753  instructions retired\n        449729325321  cycles elapsed\n          1069188392  peak memory footprint\n",
+        "index_bytes": 3397209490
+      }
+    ],
+    "fxi": [
+      {
+        "seconds": 4.555474125,
+        "peak_rss_bytes": 366510080,
+        "command": [
+          "/private/tmp/fxi-round4-combined",
+          "index",
+          "--force",
+          "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex"
+        ],
+        "stderr": "        4.55 real        19.69 user         9.82 sys\n           366510080  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               25474  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 377  voluntary context switches\n               23506  involuntary context switches\n        224933425845  instructions retired\n         91107893870  cycles elapsed\n           294519504  peak memory footprint\n",
+        "index_bytes": 657038869
+      },
+      {
+        "seconds": 4.4690017079999995,
+        "peak_rss_bytes": 360005632,
+        "command": [
+          "/private/tmp/fxi-round4-combined",
+          "index",
+          "--force",
+          "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex"
+        ],
+        "stderr": "        4.46 real        19.66 user         9.65 sys\n           360005632  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               25800  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 327  voluntary context switches\n               21512  involuntary context switches\n        224420927861  instructions retired\n         90590105729  cycles elapsed\n           328549024  peak memory footprint\n",
+        "index_bytes": 657038869
+      },
+      {
+        "seconds": 4.531660458999999,
+        "peak_rss_bytes": 365150208,
+        "command": [
+          "/private/tmp/fxi-round4-combined",
+          "index",
+          "--force",
+          "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex"
+        ],
+        "stderr": "        4.52 real        19.68 user         9.60 sys\n           365150208  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               25101  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 258  voluntary context switches\n               21673  involuntary context switches\n        224548180305  instructions retired\n         90469855730  cycles elapsed\n           290849488  peak memory footprint\n",
+        "index_bytes": 657038869
+      }
+    ]
+  },
+  "coverage": {
+    "csearch": {
+      "indexed_files": 65284,
+      "complete": true,
+      "missing": [],
+      "extra": []
+    },
+    "zoekt": {
+      "indexed_files": 65284,
+      "complete": true,
+      "missing": [],
+      "extra": []
+    },
+    "fxi": {
+      "indexed_files": 65284,
+      "complete": true,
+      "missing": [],
+      "extra": []
+    }
+  },
+  "rows": [
+    {
+      "pattern": "folio_wait_bit_common",
+      "files": 1,
+      "tools": {
+        "csearch": {
+          "median_ms": 15.808958,
+          "samples_ms": [
+            16.591583,
+            16.245167,
+            15.582417,
+            15.808958,
+            15.634792,
+            15.928584,
+            14.969417,
+            15.657209,
+            16.217916,
+            15.681333,
+            16.279875
+          ]
+        },
+        "zoekt": {
+          "median_ms": 55.65875,
+          "samples_ms": [
+            55.65875,
+            56.862375,
+            56.262583,
+            55.494958,
+            56.613333,
+            55.054375,
+            55.757625,
+            55.119958,
+            55.646417,
+            54.157833,
+            55.762833
+          ]
+        },
+        "fxi": {
+          "median_ms": 13.0655,
+          "samples_ms": [
+            12.705125,
+            12.848917,
+            13.0655,
+            15.539625,
+            14.458042,
+            12.86175,
+            13.001625,
+            13.842833,
+            13.292167,
+            12.92125,
+            13.856917
+          ]
+        }
+      }
+    },
+    {
+      "pattern": "auditNonexistentSymbol94283",
+      "files": 0,
+      "tools": {
+        "csearch": {
+          "median_ms": 4.228167,
+          "samples_ms": [
+            4.236834,
+            4.232292,
+            3.899416,
+            4.01325,
+            3.779541,
+            4.580125,
+            3.675875,
+            4.340542,
+            4.304333,
+            4.228167,
+            4.219417
+          ]
+        },
+        "zoekt": {
+          "median_ms": 55.654125,
+          "samples_ms": [
+            56.560083,
+            55.992709,
+            53.876542,
+            54.814583,
+            53.496209,
+            54.447958,
+            56.916416,
+            54.374042,
+            55.654125,
+            57.227708,
+            56.364292
+          ]
+        },
+        "fxi": {
+          "median_ms": 11.494292,
+          "samples_ms": [
+            12.150958,
+            11.004625,
+            11.411292,
+            11.923916,
+            12.124583,
+            11.029917,
+            11.249,
+            11.560292,
+            11.494292,
+            11.71575,
+            11.367875
+          ]
+        }
+      }
+    },
+    {
+      "pattern": "struct file_operations",
+      "files": 1240,
+      "tools": {
+        "csearch": {
+          "median_ms": 375.9335,
+          "samples_ms": [
+            372.778,
+            410.522083,
+            371.596583,
+            375.844666,
+            374.63325,
+            381.167875,
+            396.912458,
+            376.395666,
+            371.457333,
+            375.9335,
+            408.25175
+          ]
+        },
+        "zoekt": {
+          "median_ms": 59.441,
+          "samples_ms": [
+            57.690125,
+            59.259667,
+            58.787625,
+            59.8015,
+            60.111042,
+            58.472667,
+            59.091125,
+            59.467584,
+            60.045958,
+            59.774709,
+            59.441
+          ]
+        },
+        "fxi": {
+          "median_ms": 45.221917,
+          "samples_ms": [
+            42.209666,
+            49.054417,
+            42.671791,
+            48.378375,
+            47.513667,
+            42.134292,
+            46.561459,
+            43.91125,
+            43.183917,
+            50.253125,
+            45.221917
+          ]
+        }
+      }
+    },
+    {
+      "pattern": "return",
+      "files": 44258,
+      "tools": {
+        "csearch": {
+          "median_ms": 1611.341125,
+          "samples_ms": [
+            1705.027291,
+            1565.102042,
+            1638.241125,
+            1550.862792,
+            1551.181375,
+            1650.311041,
+            1716.783375,
+            1541.148334,
+            1611.341125,
+            1716.7175,
+            1537.35125
+          ]
+        },
+        "zoekt": {
+          "median_ms": 138.6045,
+          "samples_ms": [
+            137.130125,
+            141.190542,
+            140.318166,
+            135.265458,
+            139.611625,
+            138.784875,
+            137.937,
+            141.360875,
+            138.277167,
+            138.6045,
+            136.676708
+          ]
+        },
+        "fxi": {
+          "median_ms": 592.705458,
+          "samples_ms": [
+            624.235334,
+            520.477084,
+            550.147959,
+            625.382208,
+            617.146333,
+            592.705458,
+            512.893458,
+            623.036292,
+            586.044917,
+            520.59175,
+            601.990916
+          ]
+        }
+      }
+    },
+    {
+      "pattern": "folio_wait_bit_common|bpf_prog_select_runtime",
+      "files": 6,
+      "tools": {
+        "csearch": {
+          "median_ms": 34.423417,
+          "samples_ms": [
+            33.971833,
+            34.423417,
+            33.932125,
+            34.317917,
+            34.170792,
+            34.574084,
+            33.208083,
+            34.613167,
+            34.670959,
+            34.481834,
+            34.966
+          ]
+        },
+        "zoekt": {
+          "median_ms": 57.201083,
+          "samples_ms": [
+            58.076583,
+            56.748208,
+            56.802083,
+            57.91275,
+            57.560333,
+            56.514875,
+            57.201083,
+            57.212584,
+            56.916875,
+            59.976,
+            56.737083
+          ]
+        },
+        "fxi": {
+          "median_ms": 14.304333,
+          "samples_ms": [
+            15.172333,
+            14.1895,
+            14.433334,
+            14.304333,
+            14.760708,
+            14.106875,
+            14.217125,
+            15.98475,
+            14.166167,
+            14.476584,
+            14.06625
+          ]
+        }
+      }
+    },
+    {
+      "pattern": ".*folio_wait_bit_common",
+      "files": 1,
+      "tools": {
+        "csearch": {
+          "median_ms": 16.076958,
+          "samples_ms": [
+            16.147375,
+            15.863208,
+            15.3555,
+            16.076958,
+            16.41875,
+            15.854291,
+            15.156791,
+            16.555666,
+            16.198917,
+            17.053833,
+            15.859958
+          ]
+        },
+        "zoekt": {
+          "median_ms": 59.234375,
+          "samples_ms": [
+            61.182542,
+            58.644042,
+            58.799125,
+            59.234375,
+            58.519625,
+            59.838208,
+            60.129083,
+            59.35775,
+            58.352333,
+            58.866917,
+            60.210417
+          ]
+        },
+        "fxi": {
+          "median_ms": 13.390292,
+          "samples_ms": [
+            13.515209,
+            13.1175,
+            13.367333,
+            14.2785,
+            13.891333,
+            13.353417,
+            13.18,
+            13.884583,
+            13.390292,
+            14.10875,
+            13.163084
+          ]
+        }
+      }
+    }
+  ]
+}

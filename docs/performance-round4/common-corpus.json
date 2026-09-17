@@ -1,0 +1,10 @@
+{
+  "source": "/private/tmp/fxi-linux-corpus",
+  "corpus": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "excluded": [
+    "scripts/sbom/tests/cmd_graph/test_savedcmd_parser.py",
+    "tools/testing/selftests/hid/tests/test_multitouch.py",
+    "tools/testing/selftests/hid/tests/test_tablet.py"
+  ],
+  "reason": "Files omitted by the unmodified csearch revision. Full-corpus coverage gap remains reported separately."
+}

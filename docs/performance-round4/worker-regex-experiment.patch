@@ -1,0 +1,73 @@
+diff --git a/src/query/executor.rs b/src/query/executor.rs
+index 63a4bad..7010856 100644
+--- a/src/query/executor.rs
++++ b/src/query/executor.rs
+@@ -89,6 +89,7 @@ fn read_file_content(path: &Path) -> Option<FileContent> {
+ 
+ /// Whole-buffer existence checks are equivalent to per-line checks only when
+ /// a nonempty match cannot cross a line terminator or inspect its surroundings.
++#[derive(Clone)]
+ struct CachedRegex {
+     regex: Regex,
+     line_local: bool,
+@@ -554,11 +555,11 @@ impl<'a> QueryExecutor<'a> {
+             .and_then(|re| re.existence_literal.as_ref())
+             .map(memchr::memmem::Finder::new);
+         let (line_start, line_end) = Self::extract_line_filter(&plan.steps);
+-        let has_match = |content: &str| {
++        let has_match = |content: &str, prepared: Option<&CachedRegex>| {
+             if line_start.is_none() && line_end.is_none() {
+                 if let Some(finder) = &literal_finder {
+                     finder.find(content.as_bytes()).is_some()
+-                } else if let Some(re) = &prepared_regex {
++                } else if let Some(re) = prepared {
+                     re.is_match_in_lines(content)
+                 } else {
+                     Self::has_match(content, verification)
+@@ -573,16 +574,16 @@ impl<'a> QueryExecutor<'a> {
+             }
+         };
+ 
+-        let verify = |id: &DocId| {
++        let verify = |id: &DocId, prepared: Option<&CachedRegex>| {
+             let doc = self.reader.get_document(*id)?;
+             let full_path = self.reader.get_full_path(doc)?;
+             let content = self.reader.read_file_for_scan(&full_path, cache_scan)?;
+-            has_match(&content).then_some(*id)
++            has_match(&content, prepared).then_some(*id)
+         };
+         let matching_ids: Vec<DocId> = if !should_use_parallel(candidate_count) {
+             candidate_ids
+                 .iter()
+-                .filter_map(verify)
++                .filter_map(|id| verify(id, prepared_regex.as_deref()))
+                 .take(effective_limit)
+                 .collect()
+         } else if effective_limit >= candidate_count {
+@@ -590,7 +591,10 @@ impl<'a> QueryExecutor<'a> {
+             candidate_ids
+                 .par_iter()
+                 .with_min_len(search_batch_size(candidate_count))
+-                .map(verify)
++                .map_init(
++                    || prepared_regex.as_deref().cloned(),
++                    |prepared, id| verify(id, prepared.as_ref()),
++                )
+                 .collect::<Vec<_>>()
+                 .into_iter()
+                 .flatten()
+@@ -599,7 +603,13 @@ impl<'a> QueryExecutor<'a> {
+             // Bound excess verification while selecting the same prefix on every run.
+             let mut matches = Vec::new();
+             for batch in candidate_ids.chunks(64) {
+-                let verified: Vec<_> = batch.par_iter().map(verify).collect();
++                let verified: Vec<_> = batch
++                    .par_iter()
++                    .map_init(
++                        || prepared_regex.as_deref().cloned(),
++                        |prepared, id| verify(id, prepared.as_ref()),
++                    )
++                    .collect();
+                 matches.extend(
+                     verified
+                         .into_iter()

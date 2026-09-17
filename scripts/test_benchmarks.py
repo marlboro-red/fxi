@@ -1,5 +1,7 @@
 """Regression checks for benchmark execution, independent of index timings."""
 import json
+import importlib.util
+import socket
 import os
 from pathlib import Path
 import subprocess
@@ -32,6 +34,34 @@ class StartupHarnessTests(unittest.TestCase):
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             self.assertEqual(calls.count(str(before.resolve())), 4)
             self.assertEqual(calls.count(str(after.resolve())), 4)
+
+
+def load_harness(name):
+    spec = importlib.util.spec_from_file_location(name.replace('-', '_'), Path(__file__).with_name(name + '.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class IndexerHarnessTests(unittest.TestCase):
+    def test_path_normalization_rejects_duplicate_aliases_and_outside_paths(self):
+        harness = load_harness('compare-indexers')
+        root = Path('/benchmark/corpus')
+        self.assertEqual(harness.normalize_paths(b'./a.txt\n/benchmark/corpus/b.txt\n', root), {'a.txt', 'b.txt'})
+        with self.assertRaises(ValueError):
+            harness.normalize_paths(b'./a.txt\n/benchmark/corpus/a.txt\n', root)
+        with self.assertRaises(ValueError):
+            harness.normalize_paths(b'/elsewhere/a.txt\n', root)
+
+    def test_framed_response_requires_the_whole_message(self):
+        harness = load_harness('compare-indexer-servers')
+        reader, writer = socket.socketpair()
+        with reader, writer:
+            writer.sendall(b'abc')
+            writer.shutdown(socket.SHUT_WR)
+            self.assertEqual(harness.receive_exact(reader, 3), b'abc')
+            with self.assertRaises(EOFError):
+                harness.receive_exact(reader, 1)
 
 
 if __name__ == '__main__':

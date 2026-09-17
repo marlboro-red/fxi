@@ -1,0 +1,85 @@
+{
+  "query_syntax": "bare insensitive identifier",
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-warm-files-nwqezypd",
+  "corpus": "/private/tmp/fxi-linux-corpus",
+  "indexes": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-4rmtodjl/after/indexes",
+  "binaries": {
+    "before": {
+      "path": "/private/tmp/fxi-round4-baseline",
+      "sha256": "d7bb0e007b4cca3a010a14e50c9603f2e40e51dd60cb19ee77ce66020533ab6b"
+    },
+    "after": {
+      "path": "/private/tmp/fxi-round4-combined",
+      "sha256": "f1e8065e4b07a89773d8d6c55845e2ec07ffa5990b379986d58d05efdb45aa9d"
+    }
+  },
+  "harness_sha256": "6a01290152a3ce1c0edf54a44c43bda94d2a358f205458c6be1d5c1d18cbe81d",
+  "rows": [
+    {
+      "pattern": "return",
+      "files": 44691,
+      "first_query_ms": {
+        "before": 510.440375,
+        "after": 510.781333
+      },
+      "server_rss_kib": {
+        "before": 338368,
+        "after": 1435360
+      },
+      "tools": {
+        "before": {
+          "median_ms": 427.083417,
+          "samples_ms": [
+            415.786458,
+            432.489958,
+            436.806709,
+            419.126833,
+            420.823833,
+            439.523625,
+            455.034708,
+            410.88375,
+            416.595292,
+            451.868584,
+            432.307,
+            427.336917,
+            410.881,
+            450.130291,
+            425.804417,
+            429.639333,
+            422.633792,
+            455.575041,
+            427.083417,
+            424.125292,
+            406.384292
+          ]
+        },
+        "after": {
+          "median_ms": 90.212791,
+          "samples_ms": [
+            88.197167,
+            90.879542,
+            92.145541,
+            89.379125,
+            88.1975,
+            90.523917,
+            92.413917,
+            89.955,
+            90.149584,
+            88.557042,
+            92.706834,
+            91.448958,
+            91.537167,
+            91.819708,
+            90.212791,
+            88.949083,
+            90.841458,
+            87.0285,
+            89.957042,
+            93.017458,
+            87.879875
+          ]
+        }
+      }
+    }
+  ]
+}

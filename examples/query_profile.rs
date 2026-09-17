@@ -57,6 +57,12 @@ fn main() -> anyhow::Result<()> {
             .filter_map(|id| reader.get_document(id))
             .map(|d| d.size)
             .sum();
+        let cacheable_bytes: u64 = docs
+            .iter()
+            .filter_map(|id| reader.get_document(id))
+            .filter(|d| d.size <= 8 * 1024 * 1024)
+            .map(|d| d.size)
+            .sum();
         let expected = executor.execute_files_only(&query, 0)?;
         let mut plans_us = Vec::new();
         let mut lookup_us = Vec::new();
@@ -75,7 +81,7 @@ fn main() -> anyhow::Result<()> {
         plans_us.sort();
         lookup_us.sort();
         total_us.sort();
-        rows.push(serde_json::json!({"pattern":pattern,"candidate_files":docs.len(),"candidate_bytes":bytes,
+        rows.push(serde_json::json!({"pattern":pattern,"candidate_files":docs.len(),"candidate_bytes":bytes,"candidate_cacheable_bytes_default":cacheable_bytes,
             "matching_files":expected.len(),"plan_median_us":plans_us[10],"lookup_median_us":lookup_us[10],
             "engine_median_us":total_us[10],"engine_samples_us":total_us}));
     }
