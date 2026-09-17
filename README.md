@@ -230,13 +230,14 @@ Performance depends on query shape, output mode, corpus, cache state and platfor
 FXI is not the best tool on every measured workload. The reports retain losing
 cases as well as wins:
 
+- [After-audit comparison](docs/performance-after-audit/NOTES.md): fixed FXI versus tgrep, csearch, Zoekt and ripgrep, including default/packed reads and warm APIs.
 - [Update visibility](docs/performance-round7/NOTES.md): short saves, atomic replacement and bursts on macOS.
 - [Source packs and common-tool comparisons](docs/performance-round6/NOTES.md): build cost, disk/RSS, cold-process and warm-server results; remaining phrase and absence gaps.
 - [Earlier verification and cache experiments](docs/performance-round5/NOTES.md).
 - [Current correctness and UX audit](docs/audit-2026-09-18/AUDIT.md): findings, repairs and remaining work.
 
-These are measurements of pinned historical revisions and configurations, not a
-fresh benchmark of every subsequent fix. “Up to 400×” and million-file
+Each report identifies its tested binary revisions and configurations; older
+reports are historical evidence, not a fresh benchmark of subsequent fixes. “Up to 400×” and million-file
 extrapolations from the original benchmarks are not accepted as current evidence.
 
 The daemon shares a content cache across readers. `FXI_CACHE_MIB` sets its retained
