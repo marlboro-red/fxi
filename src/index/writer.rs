@@ -1018,16 +1018,20 @@ impl DeltaSegmentWriter {
     /// Create a new delta segment writer.
     /// Loads existing documents and paths from the index.
     pub fn new(root_path: &Path, segment_id: SegmentId) -> Result<Self> {
+        let trace = std::env::var_os("FXI_TRACE_UPDATES").is_some_and(|v| v == "1");
+        let start = std::time::Instant::now();
         let root_path = root_path.canonicalize()?;
         let index_path = get_index_dir(&root_path)?;
 
         // Load existing documents and paths
         let existing_documents = crate::index::reader::read_documents(&index_path)?;
         let existing_paths = crate::index::reader::read_paths(&index_path)?;
+        let loaded = std::time::Instant::now();
 
-        let mut generation = crate::index::generation::Generation::new(&root_path)?;
+        let generation = crate::index::generation::Generation::new(&root_path)?;
         generation.inherit_segments(&index_path)?;
         let index_path = generation.path.clone();
+        let inherited = std::time::Instant::now();
 
         // Build path lookup map
         let mut path_to_id: HashMap<PathBuf, PathId> = HashMap::new();
@@ -1043,6 +1047,14 @@ impl DeltaSegmentWriter {
             .unwrap_or(0)
             + 1;
         let next_path_id = existing_paths.len() as PathId;
+        if trace {
+            eprintln!(
+                "fxid: writer timings load={:.3}ms inherit={:.3}ms paths={:.3}ms",
+                loaded.duration_since(start).as_secs_f64() * 1000.0,
+                inherited.duration_since(loaded).as_secs_f64() * 1000.0,
+                inherited.elapsed().as_secs_f64() * 1000.0
+            );
+        }
 
         Ok(Self {
             generation,
@@ -1150,6 +1162,8 @@ impl DeltaSegmentWriter {
     /// Finalize the delta segment - write all data atomically.
     /// Returns the updated IndexMeta.
     pub fn finalize(mut self, meta: &mut IndexMeta) -> Result<()> {
+        let trace = std::env::var_os("FXI_TRACE_UPDATES").is_some_and(|v| v == "1");
+        let start = std::time::Instant::now();
         // Create segment directory if we have new documents
         let has_new_documents = !self.new_documents.is_empty();
         if has_new_documents {
@@ -1221,7 +1235,15 @@ impl DeltaSegmentWriter {
             crate::index::source_pack::requested()
                 || crate::index::source_pack::present(&self.index_path),
         )?;
+        let written = std::time::Instant::now();
         self.generation.publish()?;
+        if trace {
+            eprintln!(
+                "fxid: writer timings encode={:.3}ms publish={:.3}ms",
+                written.duration_since(start).as_secs_f64() * 1000.0,
+                written.elapsed().as_secs_f64() * 1000.0
+            );
+        }
 
         Ok(())
     }
