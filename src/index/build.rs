@@ -9,10 +9,10 @@ use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
@@ -644,6 +644,31 @@ pub(crate) fn reconcile_index(
     cached: Option<&IndexReader>,
     rebuild_threshold_percent: usize,
 ) -> Result<UpdateOutcome> {
+    reconcile_index_with_paths(root_path, cached, rebuild_threshold_percent, None)
+}
+
+/// Reconcile precise file notifications without scanning unrelated subtrees.
+/// Paths are relative to the root. Directory changes, ignore-control files and
+/// an externally replaced generation require the ordinary complete scan.
+/// Native notifications are evidence of a possible content change even when
+/// an editor preserves the file's mtime and size.
+pub(crate) fn reconcile_index_paths(
+    root_path: &Path,
+    cached: Option<&IndexReader>,
+    rebuild_threshold_percent: usize,
+    paths: &[PathBuf],
+) -> Result<UpdateOutcome> {
+    reconcile_index_with_paths(root_path, cached, rebuild_threshold_percent, Some(paths))
+}
+
+fn reconcile_index_with_paths(
+    root_path: &Path,
+    cached: Option<&IndexReader>,
+    rebuild_threshold_percent: usize,
+    paths: Option<&[PathBuf]>,
+) -> Result<UpdateOutcome> {
+    let trace = std::env::var_os("FXI_TRACE_UPDATES").is_some_and(|value| value == "1");
+    let started = std::time::Instant::now();
     let root = root_path.canonicalize().context("Invalid path")?;
     let index_path = get_index_dir(&root)?;
 
@@ -654,10 +679,10 @@ pub(crate) fn reconcile_index(
         return Ok(UpdateOutcome::Rebuilt);
     }
 
+    let reusable = cached
+        .filter(|reader| reader.root_path() == root && reader.generation_path() == index_path);
     let opened;
-    let reader = if let Some(reader) =
-        cached.filter(|reader| reader.root_path() == root && reader.generation_path() == index_path)
-    {
+    let reader = if let Some(reader) = reusable {
         reader
     } else {
         opened = IndexReader::open(&root)?;
@@ -665,21 +690,71 @@ pub(crate) fn reconcile_index(
     };
     let meta = &reader.meta;
 
-    // Build map of indexed files: rel_path -> (doc_id, mtime)
-    let mut indexed_files: HashMap<PathBuf, (u32, u64, u64)> = HashMap::new();
+    let hinted: Option<HashSet<PathBuf>> = paths.map(|paths| paths.iter().cloned().collect());
+    let candidate_scope = hinted.as_ref().filter(|_| reusable.is_some());
+    let indexed_count = reader.valid_doc_ids().len() as usize;
+    // Precise hints only need exact-file lookups. Borrow the other live paths
+    // for directory-replacement checks instead of cloning and hashing the
+    // whole corpus on every save. A fallback fills the complete map below.
+    let mut known_paths = Vec::with_capacity(if candidate_scope.is_some() {
+        indexed_count
+    } else {
+        0
+    });
+    let mut indexed_files: HashMap<PathBuf, (u32, u64, u64)> =
+        HashMap::with_capacity(candidate_scope.map_or(indexed_count, HashSet::len));
     for doc_id in reader.valid_doc_ids().iter() {
         if let Some(doc) = reader.get_document(doc_id)
             && let Some(path) = reader.get_path(doc)
         {
-            indexed_files.insert(path.clone(), (doc_id, doc.mtime, doc.size));
+            if candidate_scope.is_some() {
+                known_paths.push(path.as_path());
+            }
+            if candidate_scope.is_none_or(|paths| paths.contains(path)) {
+                indexed_files.insert(path.clone(), (doc_id, doc.mtime, doc.size));
+            }
         }
     }
 
-    // Previously rejected files (binary sniff etc.) with their mtimes
+    // Previously rejected files (binary sniff etc.) with their mtimes.
     let rejected: HashMap<PathBuf, u64> = meta.rejected_files.iter().cloned().collect();
+    let scoped = if let Some(paths) = candidate_scope {
+        file_hints_can_be_scoped(&root, paths, &indexed_files, &known_paths, &rejected)?
+    } else {
+        false
+    };
+    if candidate_scope.is_some() && !scoped {
+        indexed_files.reserve(indexed_count.saturating_sub(indexed_files.len()));
+        for doc_id in reader.valid_doc_ids().iter() {
+            if let Some(doc) = reader.get_document(doc_id)
+                && let Some(path) = reader.get_path(doc)
+            {
+                indexed_files.insert(path.clone(), (doc_id, doc.mtime, doc.size));
+            }
+        }
+    }
 
-    // Compute diff with filesystem
-    let diff = compute_index_diff(&root, &indexed_files, &rejected)?;
+    // A scoped scan starts at the same root and loads the same ignore rules as
+    // a complete scan; its filter only prunes branches unrelated to the hints.
+    // Starting a walker at an individual file would bypass ignore filtering.
+    let diff_started = std::time::Instant::now();
+    let diff = compute_index_diff(
+        &root,
+        &indexed_files,
+        indexed_count,
+        &rejected,
+        hinted.as_ref().filter(|_| scoped),
+        hinted.as_ref(),
+    )?;
+    if trace {
+        eprintln!(
+            "fxid: update timing {}: prepare={:.3}ms diff={:.3}ms scoped={}",
+            root.display(),
+            diff_started.duration_since(started).as_secs_f64() * 1000.0,
+            diff_started.elapsed().as_secs_f64() * 1000.0,
+            scoped,
+        );
+    }
 
     let total_changes = diff.new_files.len() + diff.modified_files.len() + diff.deleted_files.len();
 
@@ -716,27 +791,118 @@ pub(crate) fn reconcile_index(
 
     // Perform incremental update
     println!("Performing incremental update...");
+    let publication_started = std::time::Instant::now();
     perform_incremental_update(&root, meta, diff)?;
+    if trace {
+        eprintln!(
+            "fxid: update timing {}: publication={:.3}ms",
+            root.display(),
+            publication_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 
     Ok(UpdateOutcome::Incremental)
 }
 
 type ScannedFile = (PathBuf, PathBuf, u64, u64);
 
-/// Compute the difference between indexed files and filesystem
+fn file_hints_can_be_scoped(
+    root: &Path,
+    paths: &HashSet<PathBuf>,
+    indexed_files: &HashMap<PathBuf, (u32, u64, u64)>,
+    known_paths: &[&Path],
+    rejected: &HashMap<PathBuf, u64>,
+) -> Result<bool> {
+    let has_descendants = |path: &Path| {
+        known_paths
+            .iter()
+            .copied()
+            .chain(rejected.keys().map(PathBuf::as_path))
+            .any(|existing| existing != path && existing.starts_with(path))
+    };
+    let mut checked_ancestors = HashSet::new();
+    for path in paths {
+        if path.as_os_str().is_empty()
+            || path.components().any(|component| {
+                !matches!(component, Component::Normal(_))
+                    || matches!(
+                        component.as_os_str().to_str(),
+                        Some(".git" | ".gitignore" | ".ignore")
+                    )
+            })
+        {
+            return Ok(false);
+        }
+        // A child notification may be the only evidence of its directory
+        // being deleted or replaced by a symlink. Scope cannot leave the
+        // other indexed children behind. Check shared ancestors only once.
+        for ancestor in path
+            .ancestors()
+            .skip(1)
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            if !checked_ancestors.insert(ancestor.to_path_buf()) {
+                continue;
+            }
+            let remains_directory = match fs::symlink_metadata(root.join(ancestor)) {
+                Ok(metadata) => metadata.is_dir(),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    false
+                }
+                Err(error) => return Err(error).context("Cannot inspect watcher ancestor"),
+            };
+            if !remains_directory && has_descendants(ancestor) {
+                return Ok(false);
+            }
+        }
+        // A directory may have vanished, become a symlink, or even become a
+        // regular file. Unknown missing editor temporary paths have no indexed
+        // descendants and safely remain no-ops on the scoped path.
+        if !indexed_files.contains_key(path)
+            && !rejected.contains_key(path)
+            && has_descendants(path)
+        {
+            return Ok(false);
+        }
+        match fs::symlink_metadata(root.join(path)) {
+            Ok(metadata) if metadata.is_dir() => return Ok(false),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(error) => return Err(error).context("Cannot inspect watcher path"),
+        }
+    }
+    Ok(true)
+}
+
+/// Compute the difference between indexed files and filesystem. A scope limits
+/// membership changes to exact hinted paths; forced paths are re-read even when
+/// timestamps are unchanged, including when a hint requires a full scan.
 fn compute_index_diff(
     root: &Path,
     indexed_files: &HashMap<PathBuf, (u32, u64, u64)>,
+    indexed_count: usize,
     rejected: &HashMap<PathBuf, u64>,
+    scope: Option<&HashSet<PathBuf>>,
+    forced: Option<&HashSet<PathBuf>>,
 ) -> Result<IndexDiff> {
     let config = IndexConfig::default();
     let max_file_size = config.max_file_size;
 
-    // Walk the filesystem in parallel: the per-file metadata() stat dominates
-    // the scan on large trees, so it runs on the walker threads
+    // Complete scans parallelize metadata reads across the tree. A precise
+    // scope uses the serial walker to avoid starting workers for a few files.
     let scanned: Vec<ScannedFile> = {
-        let entries: Arc<Mutex<Vec<ScannedFile>>> =
-            Arc::new(Mutex::new(Vec::with_capacity(indexed_files.len())));
+        let entries: Arc<Mutex<Vec<ScannedFile>>> = Arc::new(Mutex::new(Vec::with_capacity(
+            scope.map_or(indexed_files.len(), HashSet::len),
+        )));
 
         struct ScanVisitor {
             root: PathBuf,
@@ -826,12 +992,22 @@ fn compute_index_diff(
             shared: Arc::clone(&entries),
         };
 
-        WalkBuilder::new(root)
-            .hidden(true)
+        // Include every ancestor so the walker constructs the normal nested
+        // ignore state, but do not descend into unrelated directories.
+        let relevant: Option<HashSet<PathBuf>> = scope.map(|paths| {
+            paths
+                .iter()
+                .flat_map(|path| path.ancestors().map(Path::to_path_buf))
+                .collect()
+        });
+        let filter_scope = scope.cloned();
+        let filter_root = root.to_path_buf();
+        let mut walk = WalkBuilder::new(root);
+        walk.hidden(true)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
-            .filter_entry(|entry| {
+            .filter_entry(move |entry| {
                 let name = entry.file_name().to_string_lossy();
                 !matches!(
                     name.as_ref(),
@@ -842,10 +1018,31 @@ fn compute_index_diff(
                         | "__pycache__"
                         | ".venv"
                         | "venv"
-                )
-            })
-            .build_parallel()
-            .visit(&mut builder);
+                ) && relevant.as_ref().is_none_or(|paths| {
+                    entry.path().strip_prefix(&filter_root).is_ok_and(|path| {
+                        if entry.file_type().is_some_and(|kind| kind.is_dir()) {
+                            paths.contains(path)
+                        } else {
+                            filter_scope
+                                .as_ref()
+                                .is_some_and(|scope| scope.contains(path))
+                        }
+                    })
+                })
+            });
+        if let Some(scope) = scope {
+            let mut visitor = ScanVisitor {
+                root: root.to_path_buf(),
+                max_file_size,
+                shared: Arc::clone(&entries),
+                local: Vec::with_capacity(scope.len()),
+            };
+            for entry in walk.build() {
+                ignore::ParallelVisitor::visit(&mut visitor, entry);
+            }
+        } else {
+            walk.build_parallel().visit(&mut builder);
+        }
 
         drop(builder);
         Arc::try_unwrap(entries).unwrap().into_inner().unwrap()
@@ -853,7 +1050,11 @@ fn compute_index_diff(
 
     let mut new_files = Vec::new();
     let mut modified_files = Vec::new();
-    let mut rejected_unchanged = Vec::new();
+    let mut rejected_unchanged: Vec<_> = rejected
+        .iter()
+        .filter(|(path, _)| scope.is_some_and(|paths| !paths.contains(*path)))
+        .map(|(path, mtime)| (path.clone(), *mtime))
+        .collect();
     let mut seen_paths: std::collections::HashSet<&Path> =
         std::collections::HashSet::with_capacity(scanned.len());
 
@@ -862,10 +1063,15 @@ fn compute_index_diff(
 
         if let Some(&(doc_id, indexed_mtime, indexed_size)) = indexed_files.get(rel_path) {
             // File exists in index - check if modified
-            if *current_mtime != indexed_mtime || *current_size != indexed_size {
+            if *current_mtime != indexed_mtime
+                || *current_size != indexed_size
+                || forced.is_some_and(|paths| paths.contains(rel_path))
+            {
                 modified_files.push((full_path.clone(), rel_path.clone(), doc_id));
             }
-        } else if rejected.get(rel_path) == Some(current_mtime) {
+        } else if rejected.get(rel_path) == Some(current_mtime)
+            && !forced.is_some_and(|paths| paths.contains(rel_path))
+        {
             // Previously rejected (binary sniff etc.) and unchanged since:
             // skip instead of re-reading and re-rejecting it
             rejected_unchanged.push((rel_path.clone(), *current_mtime));
@@ -878,7 +1084,9 @@ fn compute_index_diff(
     // Find deleted files
     let deleted_files: Vec<PathBuf> = indexed_files
         .keys()
-        .filter(|path| !seen_paths.contains(path.as_path()))
+        .filter(|path| {
+            scope.is_none_or(|paths| paths.contains(*path)) && !seen_paths.contains(path.as_path())
+        })
         .cloned()
         .collect();
 
@@ -887,7 +1095,7 @@ fn compute_index_diff(
         modified_files,
         deleted_files,
         rejected_unchanged,
-        indexed_count: indexed_files.len(),
+        indexed_count,
     })
 }
 
@@ -1190,5 +1398,295 @@ mod encoding_tests {
     fn index_eligibility_matches_utf8_verification() {
         assert!(process_file_content("a.txt".into(), b"needle \xff", 0).is_none());
         assert!(process_file_content("a.txt".into(), "needle K Σ".as_bytes(), 0).is_some());
+    }
+}
+
+#[cfg(test)]
+mod scoped_reconciliation_tests {
+    use super::*;
+
+    fn fixture() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        for index in 0..12 {
+            fs::write(
+                temp.path().join(format!("base{index}.rs")),
+                "original marker\n",
+            )
+            .unwrap();
+        }
+        temp
+    }
+
+    fn paths(reader: &IndexReader) -> Vec<PathBuf> {
+        let mut paths: Vec<_> = reader
+            .valid_doc_ids()
+            .iter()
+            .map(|id| {
+                reader
+                    .get_path(reader.get_document(id).unwrap())
+                    .unwrap()
+                    .clone()
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    fn matches(reader: &IndexReader, text: &str) -> Vec<PathBuf> {
+        crate::query::QueryExecutor::new(reader)
+            .execute_files_only(&crate::query::parse_query(text), 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn file_hints_force_preserved_timestamp_edits_and_leave_other_subtrees_alone() {
+        let temp = fixture();
+        let root = temp.path().canonicalize().unwrap();
+        fs::create_dir(root.join("unrelated")).unwrap();
+        fs::write(root.join("unrelated/other.rs"), "beforeother\n").unwrap();
+        build_index(&root, true).unwrap();
+        let before = IndexReader::open(&root).unwrap();
+        let path = root.join("base0.rs");
+        let time = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, "changedx marker\n").unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(time))
+            .unwrap();
+        fs::write(root.join("unrelated/other.rs"), "afterxother\n").unwrap();
+        assert_eq!(
+            reconcile_index_paths(
+                &root,
+                Some(&before),
+                100,
+                &["base0.rs".into(), ".missing-save-temp".into()]
+            )
+            .unwrap(),
+            UpdateOutcome::Incremental
+        );
+        let after = IndexReader::open(&root).unwrap();
+        assert_eq!(matches(&after, "changedx"), vec![PathBuf::from("base0.rs")]);
+        assert!(
+            matches(&after, "afterxother").is_empty(),
+            "a scoped scan visited an unrelated subtree"
+        );
+        assert_eq!(paths(&before), paths(&after));
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn scoped_file_eligibility_matches_a_full_walk_and_keeps_unrelated_rejections() {
+        let temp = fixture();
+        let root = temp.path().canonicalize().unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".gitignore"), "*.skip\nblocked/\n").unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::write(root.join("nested/.ignore"), "denied.rs\n").unwrap();
+        fs::write(root.join("rejected.dat"), b"binary\0\0bytes").unwrap();
+        build_index(&root, true).unwrap();
+        let before = IndexReader::open(&root).unwrap();
+        assert!(
+            before
+                .meta
+                .rejected_files
+                .iter()
+                .any(|(path, _)| path == Path::new("rejected.dat"))
+        );
+        let additions = [
+            "nested/good.rs",
+            "nested/denied.rs",
+            "ignored.skip",
+            "blocked/file.rs",
+            "node_modules/file.rs",
+            ".hidden.rs",
+            "image.png",
+            "empty.rs",
+        ];
+        for name in additions {
+            let path = root.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(
+                path,
+                if name == "empty.rs" {
+                    ""
+                } else {
+                    "newmarker\n"
+                },
+            )
+            .unwrap();
+        }
+        let hints: Vec<_> = additions.into_iter().map(PathBuf::from).collect();
+        reconcile_index_paths(&root, Some(&before), 100, &hints).unwrap();
+        let after = IndexReader::open(&root).unwrap();
+        assert_eq!(
+            matches(&after, "newmarker"),
+            vec![PathBuf::from("nested/good.rs")]
+        );
+        assert_eq!(before.meta.rejected_files, after.meta.rejected_files);
+        let scoped_paths = paths(&after);
+        build_index(&root, true).unwrap();
+        assert_eq!(scoped_paths, paths(&IndexReader::open(&root).unwrap()));
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn scoped_deletions_and_rejected_to_text_changes_replace_exact_paths() {
+        let temp = fixture();
+        let root = temp.path().canonicalize().unwrap();
+        let rejected_path = root.join("rejected.dat");
+        fs::write(&rejected_path, [0; 12]).unwrap();
+        build_index(&root, true).unwrap();
+        let before = IndexReader::open(&root).unwrap();
+        let time = fs::metadata(&rejected_path).unwrap().modified().unwrap();
+        fs::write(&rejected_path, "newcontents\n").unwrap();
+        File::options()
+            .write(true)
+            .open(&rejected_path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(time))
+            .unwrap();
+        fs::remove_file(root.join("base0.rs")).unwrap();
+        reconcile_index_paths(
+            &root,
+            Some(&before),
+            100,
+            &[
+                "rejected.dat".into(),
+                "base0.rs".into(),
+                "missing.tmp".into(),
+            ],
+        )
+        .unwrap();
+        let after = IndexReader::open(&root).unwrap();
+        assert_eq!(
+            matches(&after, "newcontents"),
+            vec![PathBuf::from("rejected.dat")]
+        );
+        assert!(!paths(&after).contains(&PathBuf::from("base0.rs")));
+        assert_eq!(after.valid_doc_ids().len(), 12);
+        assert!(after.meta.rejected_files.is_empty());
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn directory_and_ignore_hints_fall_back_to_full_reconciliation() {
+        let temp = fixture();
+        let root = temp.path().canonicalize().unwrap();
+        fs::create_dir(root.join("subtree")).unwrap();
+        fs::write(root.join("subtree/old.rs"), "subtreemarker\n").unwrap();
+        build_index(&root, true).unwrap();
+        let before = IndexReader::open(&root).unwrap();
+        fs::rename(root.join("subtree"), root.join("renamed")).unwrap();
+        reconcile_index_paths(&root, Some(&before), 100, &["subtree".into()]).unwrap();
+        let renamed = IndexReader::open(&root).unwrap();
+        assert_eq!(
+            matches(&renamed, "subtreemarker"),
+            vec![PathBuf::from("renamed/old.rs")]
+        );
+        fs::write(root.join(".ignore"), "base*.rs\n").unwrap();
+        reconcile_index_paths(&root, Some(&renamed), 100, &[".ignore".into()]).unwrap();
+        let ignored = IndexReader::open(&root).unwrap();
+        assert_eq!(paths(&ignored), vec![PathBuf::from("renamed/old.rs")]);
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_symlinks_obey_the_full_walk_policy() {
+        let temp = fixture();
+        let outside = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::write(outside.path().join("outside.rs"), "outsidemarker\n").unwrap();
+        build_index(&root, true).unwrap();
+        let before = IndexReader::open(&root).unwrap();
+        fs::remove_file(root.join("base0.rs")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("outside.rs"), root.join("base0.rs"))
+            .unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("linked")).unwrap();
+        reconcile_index_paths(
+            &root,
+            Some(&before),
+            100,
+            &["base0.rs".into(), "linked/outside.rs".into()],
+        )
+        .unwrap();
+        let after = IndexReader::open(&root).unwrap();
+        assert!(!paths(&after).contains(&PathBuf::from("base0.rs")));
+        assert!(matches(&after, "outsidemarker").is_empty());
+        let scoped_paths = paths(&after);
+        build_index(&root, true).unwrap();
+        assert_eq!(scoped_paths, paths(&IndexReader::open(&root).unwrap()));
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_hint_reconciles_other_descendants_of_a_replaced_ancestor() {
+        let temp = fixture();
+        let root = temp.path().canonicalize().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        for directory in ["symlinked", "removed", "filed"] {
+            fs::create_dir(root.join(directory)).unwrap();
+            for name in ["first.rs", "second.rs"] {
+                fs::write(root.join(directory).join(name), "descendantmarker\n").unwrap();
+            }
+        }
+        build_index(&root, true).unwrap();
+        for directory in ["symlinked", "removed", "filed"] {
+            let before = IndexReader::open(&root).unwrap();
+            fs::remove_dir_all(root.join(directory)).unwrap();
+            match directory {
+                "symlinked" => {
+                    std::os::unix::fs::symlink(outside.path(), root.join(directory)).unwrap()
+                }
+                "filed" => fs::write(root.join(directory), "replacementmarker\n").unwrap(),
+                _ => {}
+            }
+            reconcile_index_paths(
+                &root,
+                Some(&before),
+                100,
+                &[PathBuf::from(directory).join("first.rs")],
+            )
+            .unwrap();
+            let after = IndexReader::open(&root).unwrap();
+            assert!(
+                !paths(&after)
+                    .iter()
+                    .any(|path| path.starts_with(directory) && path != Path::new(directory))
+            );
+            if directory == "filed" {
+                assert_eq!(
+                    matches(&after, "replacementmarker"),
+                    vec![PathBuf::from(directory)]
+                );
+            }
+        }
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn external_generations_and_untrusted_paths_force_complete_reconciliation() {
+        let temp = fixture();
+        let root = temp.path().canonicalize().unwrap();
+        build_index(&root, true).unwrap();
+        let before = IndexReader::open(&root).unwrap();
+        build_index(&root, true).unwrap();
+        fs::write(root.join("unhinted.rs"), "externalmarker\n").unwrap();
+        reconcile_index_paths(&root, Some(&before), 100, &["base0.rs".into()]).unwrap();
+        let after = IndexReader::open(&root).unwrap();
+        assert_eq!(
+            matches(&after, "externalmarker"),
+            vec![PathBuf::from("unhinted.rs")]
+        );
+        fs::write(root.join("another.rs"), "anothermarker\n").unwrap();
+        reconcile_index_paths(&root, Some(&after), 100, &["../untrusted".into()]).unwrap();
+        assert_eq!(
+            matches(&IndexReader::open(&root).unwrap(), "anothermarker"),
+            vec![PathBuf::from("another.rs")]
+        );
+        crate::utils::remove_index(&root).unwrap();
     }
 }

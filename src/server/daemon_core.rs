@@ -5,7 +5,9 @@
 //! `daemon_windows`: named pipe) only accept connections, frame messages,
 //! and call [`IndexServer::handle_request`].
 
-use crate::index::build::{UpdateOutcome, build_index_with_progress, reconcile_index};
+use crate::index::build::{
+    UpdateOutcome, build_index_with_progress, reconcile_index, reconcile_index_paths,
+};
 use crate::index::reader::IndexReader;
 use crate::index::types::IndexMeta;
 use crate::query::{QueryExecutor, parse_query};
@@ -346,15 +348,34 @@ impl IndexServer {
         // directory or ignore-rule event can affect any number of files, and
         // the startup sentinel may affect none. Let reconciliation measure the
         // real diff before applying the configured rebuild threshold.
-        self.apply_incremental_update(&root_path, lock)
+        let paths: Vec<PathBuf> = batch
+            .created
+            .iter()
+            .chain(&batch.modified)
+            .chain(&batch.deleted)
+            .cloned()
+            .collect();
+        self.apply_incremental_update_paths(&root_path, lock, Some(&paths))
     }
 
     /// Apply an incremental update using delta segments
+    #[cfg(test)]
     fn apply_incremental_update(
         &self,
         root_path: &PathBuf,
         lock: &crate::utils::IndexLock,
     ) -> Result<()> {
+        self.apply_incremental_update_paths(root_path, lock, None)
+    }
+
+    fn apply_incremental_update_paths(
+        &self,
+        root_path: &PathBuf,
+        lock: &crate::utils::IndexLock,
+        paths: Option<&[PathBuf]>,
+    ) -> Result<()> {
+        let trace = std::env::var_os("FXI_TRACE_UPDATES").is_some();
+        let started = Instant::now();
         // Notifications are hints, not an authoritative file list. Reconcile
         // through the same walker as CLI indexing so directory renames, nested
         // ignore rules, removals and symlinks have identical semantics.
@@ -364,11 +385,20 @@ impl IndexServer {
             .unwrap()
             .get(root_path)
             .map(|cached| cached.get_reader());
-        match reconcile_index(
-            root_path,
-            current.as_deref(),
-            self.watcher_config.rebuild_threshold_percent,
-        ) {
+        let outcome = match paths {
+            Some(paths) => reconcile_index_paths(
+                root_path,
+                current.as_deref(),
+                self.watcher_config.rebuild_threshold_percent,
+                paths,
+            ),
+            None => reconcile_index(
+                root_path,
+                current.as_deref(),
+                self.watcher_config.rebuild_threshold_percent,
+            ),
+        };
+        match outcome {
             Ok(UpdateOutcome::Unchanged(generation))
                 if current.as_ref().is_some_and(|reader| {
                     reader.generation_path() == generation
@@ -386,6 +416,7 @@ impl IndexServer {
                 return self.rebuild_with_lock(root_path, lock);
             }
         }
+        let reconciled = Instant::now();
         let refreshed = IndexReader::open(root_path).and_then(|reader| {
             if should_compact(&reader.meta, self.watcher_config.merge_segment_threshold) {
                 crate::index::compact::merge_segments(root_path)?;
@@ -397,6 +428,14 @@ impl IndexServer {
         let reader = refreshed?;
         if let Some(cached) = self.indexes.read().unwrap().get(root_path) {
             cached.set_pending_reader(reader);
+        }
+        if trace {
+            eprintln!(
+                "fxid: update timings reconcile={:.3}ms reopen={:.3}ms total={:.3}ms",
+                reconciled.duration_since(started).as_secs_f64() * 1000.0,
+                reconciled.elapsed().as_secs_f64() * 1000.0,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
         }
         Ok(())
     }
@@ -1066,6 +1105,38 @@ fn should_compact(meta: &IndexMeta, segment_threshold: usize) -> bool {
     new_deltas >= segment_threshold
 }
 
+/// Preserve native paths as reconciliation hints. Every path is "modified"
+/// deliberately: a create/delete pair can describe replacement of an already
+/// indexed file, so cancelling it before inspecting the filesystem loses work.
+/// Incomplete notifications always request the authoritative full scan.
+fn accumulate_native_event(
+    root: &std::path::Path,
+    debouncer: &mut EventDebouncer,
+    event: Result<Event, notify::Error>,
+) {
+    let Ok(event) = event else {
+        debouncer.add_event(PathBuf::new(), ChangeKind::Modified);
+        return;
+    };
+    if event.need_rescan() {
+        debouncer.add_event(PathBuf::new(), ChangeKind::Modified);
+        return;
+    }
+    if matches!(event.kind, EventKind::Access(_)) {
+        return;
+    }
+    if event.paths.is_empty() || matches!(event.kind, EventKind::Any | EventKind::Other) {
+        debouncer.add_event(PathBuf::new(), ChangeKind::Modified);
+        return;
+    }
+    for path in event.paths {
+        match path.strip_prefix(root) {
+            Ok(relative) => debouncer.add_event(relative.to_path_buf(), ChangeKind::Modified),
+            Err(_) => debouncer.add_event(PathBuf::new(), ChangeKind::Modified),
+        }
+    }
+}
+
 /// Run the file watcher thread
 fn run_watcher_thread(
     root_path: PathBuf,
@@ -1107,15 +1178,7 @@ fn run_watcher_thread(
             .min(Duration::from_millis(100));
         match event_rx.recv_timeout(timeout) {
             Ok(event) => {
-                let needs_reconcile = match event {
-                    Ok(event) => !matches!(event.kind, EventKind::Access(_)),
-                    Err(_) => true,
-                };
-                if needs_reconcile {
-                    // No existence/ignore check here: a removed path no longer
-                    // exists, and changes to ignore rules alter membership.
-                    debouncer.add_event(PathBuf::new(), ChangeKind::Modified);
-                }
+                accumulate_native_event(&root_path, &mut debouncer, event);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // Check if debounce window has elapsed
@@ -1562,6 +1625,63 @@ mod tests {
         }
         drop(server);
         crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn native_notifications_preserve_paths_and_replacements() {
+        use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
+        let root = std::path::Path::new("/root");
+        let mut debouncer = EventDebouncer::new(WatcherConfig::default());
+        // A create/delete sequence may replace an existing indexed path.
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Remove(RemoveKind::File),
+        ] {
+            accumulate_native_event(
+                root,
+                &mut debouncer,
+                Ok(Event::new(kind).add_path(root.join("a.rs"))),
+            );
+        }
+        accumulate_native_event(
+            root,
+            &mut debouncer,
+            Ok(
+                Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                    .add_path(root.join("old.rs"))
+                    .add_path(root.join("new.rs")),
+            ),
+        );
+        let mut paths = debouncer.flush().unwrap().modified;
+        paths.sort();
+        assert_eq!(paths, ["a.rs", "new.rs", "old.rs"].map(PathBuf::from));
+    }
+
+    #[test]
+    fn incomplete_native_notifications_always_request_full_reconciliation() {
+        use notify::event::{AccessKind, Flag, ModifyKind};
+        let root = std::path::Path::new("/root");
+        let events = [
+            Err(notify::Error::generic("lost notification")),
+            Ok(Event::new(EventKind::Any).add_path(root.join("a.rs"))),
+            Ok(Event::new(EventKind::Modify(ModifyKind::Any))),
+            Ok(Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(PathBuf::from("/outside/a.rs"))),
+            // A rescan flag takes precedence even over an access event.
+            Ok(Event::new(EventKind::Access(AccessKind::Any)).set_flag(Flag::Rescan)),
+        ];
+        for event in events {
+            let mut debouncer = EventDebouncer::new(WatcherConfig::default());
+            accumulate_native_event(root, &mut debouncer, event);
+            assert_eq!(debouncer.flush().unwrap().modified, [PathBuf::new()]);
+        }
+        let mut debouncer = EventDebouncer::new(WatcherConfig::default());
+        accumulate_native_event(
+            root,
+            &mut debouncer,
+            Ok(Event::new(EventKind::Access(AccessKind::Read)).add_path(root.join("a.rs"))),
+        );
+        assert!(!debouncer.has_pending());
     }
 
     #[test]
