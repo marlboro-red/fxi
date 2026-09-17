@@ -83,11 +83,19 @@ fxi index --force [path]   # Force full rebuild
 Direct content search with ripgrep-compatible output. Automatically uses the daemon for instant results when available, otherwise falls back to loading the index from disk.
 
 ```bash
-fxi "pattern"              # Search for pattern
-fxi "fn main"              # Search for literal text
-fxi "class Foo"            # AND search: files containing both "class" and "Foo"
-fxi '"exact phrase"'       # Phrase search: exact string match
+fxi 'pattern'              # One term: case-insensitive literal search
+fxi 'fn main'              # AND: files containing both "fn" and "main"
+fxi 'class Foo'            # AND: files containing both "class" and "Foo"
+fxi '"fn main"'            # Phrase: exact, case-sensitive text "fn main"
 ```
+
+Shell quotes group an argument; the shell removes them before FXI sees it.
+Consequently, `fxi "fn main"` and `fxi 'fn main'` are identical: the two terms
+can occur separately, in either order, anywhere in the same file. The same rule
+applies to `class Foo`; FXI does not interpret programming-language syntax here.
+To require adjacent text, preserve double quotes inside the argument, as in
+`fxi '"fn main"'`. Bare terms ignore case; quoted phrases are case-sensitive
+unless you add `-i`.
 
 #### CLI Flags
 
