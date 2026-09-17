@@ -21,7 +21,11 @@ pub enum ColorChoice {
 }
 
 #[derive(Parser)]
-#[command(name = "fxi")]
+#[command(
+    name = "fxi",
+    version,
+    after_help = "Examples:\n  fxi error                 Case-insensitive substring\n  fxi 'foo bar'             Both terms in the same file\n  fxi '\"foo bar\"'         Exact phrase\n  fxi --regex 'foo.*bar'    Regular expression\n  fxi -F 'foo-bar'          Literal text\n  fxi -l error src           Restrict results to src\n  fxi -F -- -excluded        Search literal leading punctuation\n\nNo matches exits successfully (0); invalid input and operation failures are errors."
+)]
 #[command(about = "Terminal-first, ultra-fast code search engine")]
 struct Cli {
     #[command(subcommand)]
@@ -30,12 +34,39 @@ struct Cli {
     /// Search pattern (when no subcommand is given)
     pattern: Option<String>,
 
-    /// Additional patterns to search for (-e, can be repeated)
+    /// Alternative patterns in the selected mode (-e, repeat for OR)
     #[arg(short = 'e', long = "regexp", action = clap::ArgAction::Append)]
     patterns: Vec<String>,
 
-    /// Path to search in
-    #[arg(short, long, default_value = ".")]
+    /// Optional file or directory to restrict the search to
+    search_path: Option<PathBuf>,
+
+    /// Treat patterns as literal text (case-sensitive unless -i)
+    #[arg(short = 'F', long, conflicts_with = "regex")]
+    fixed_strings: bool,
+
+    /// Treat patterns as regular expressions (case-sensitive unless -i)
+    #[arg(long)]
+    regex: bool,
+
+    /// Emit structured JSON instead of terminal text
+    #[arg(long, conflicts_with = "null")]
+    json: bool,
+
+    /// Terminate filenames with NUL (requires -l)
+    #[arg(short = '0', long, requires = "files_with_matches")]
+    null: bool,
+
+    /// Group matching lines under filename headings
+    #[arg(long, conflicts_with = "no_heading")]
+    heading: bool,
+
+    /// Always print path:line:text, including in a terminal
+    #[arg(long)]
+    no_heading: bool,
+
+    /// File or directory to restrict the search to (index root is detected separately)
+    #[arg(short, long, default_value = ".", conflicts_with = "search_path")]
     path: PathBuf,
 
     /// Lines of context after match (-A)
@@ -54,7 +85,7 @@ struct Cli {
     #[arg(short = 'i', long)]
     ignore_case: bool,
 
-    /// Invert match: show non-matching lines (-v)
+    /// Unsupported: inverse line matching is not available with indexed search
     #[arg(short = 'v', long)]
     invert_match: bool,
 
@@ -136,7 +167,11 @@ enum DaemonAction {
         watch: bool,
     },
     /// Stop the running daemon
-    Stop,
+    Stop {
+        /// Terminate immediately; pending watcher changes may be lost
+        #[arg(long)]
+        force: bool,
+    },
     /// Check daemon status
     Status,
     /// Run daemon in foreground (for debugging)
@@ -169,6 +204,12 @@ struct GrepOptions {
     files_with_matches: bool,
     count: bool,
     color: ColorChoice,
+    fixed_strings: bool,
+    regex: bool,
+    json: bool,
+    null: bool,
+    heading: bool,
+    no_heading: bool,
 }
 
 impl GrepOptions {
@@ -180,7 +221,7 @@ impl GrepOptions {
 
         Self {
             patterns,
-            path: cli.path.clone(),
+            path: cli.search_path.clone().unwrap_or_else(|| cli.path.clone()),
             after_context: cli.after_context,
             before_context: cli.before_context,
             context: cli.context,
@@ -191,11 +232,37 @@ impl GrepOptions {
             files_with_matches: cli.files_with_matches,
             count: cli.count,
             color: cli.color,
+            fixed_strings: cli.fixed_strings,
+            regex: cli.regex,
+            json: cli.json,
+            null: cli.null,
+            heading: cli.heading,
+            no_heading: cli.no_heading,
         }
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) if is_broken_pipe(&error) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn is_broken_pipe(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe)
+        || error
+            .downcast_ref::<serde_json::Error>()
+            .is_some_and(|e| e.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe))
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -204,37 +271,13 @@ fn main() -> Result<()> {
             force,
             chunk_size,
         }) => {
-            // When the daemon watches this root it owns index freshness:
-            // it reconciled at watch start and applies file events as they
-            // happen, so a scan here would only race its delta writes.
-            // --force still rebuilds locally.
-            if !force
-                && chunk_size.is_none()
-                && let Some(mut client) = server::IndexClient::connect()
-            {
-                let root = utils::find_codebase_root(&path)?;
-                if let Ok((true, pending)) = client.watch_status(Some(&root)) {
-                    if pending == 0 {
-                        println!(
-                            "Index is watched by the daemon and up to date: {}",
-                            root.display()
-                        );
-                    } else {
-                        println!(
-                            "Index is watched by the daemon; {} pending change(s) will be flushed shortly: {}",
-                            pending,
-                            root.display()
-                        );
-                    }
-                    return Ok(());
-                }
-            }
-
             // Auto-detect codebase root. The write lock serializes against
             // a daemon flush or another fxi index on the same root.
             let root = utils::find_codebase_root(&path)?;
             let _lock = utils::IndexLock::acquire(&root)?;
             index::build::build_index_auto(&path, force, chunk_size)?;
+            drop(_lock);
+            reload_running_daemon(&root)?;
         }
         Some(Commands::Search { path }) => {
             tui::run(path, None)?;
@@ -246,13 +289,20 @@ fn main() -> Result<()> {
             let root = utils::find_codebase_root(&path)?;
             let _lock = utils::IndexLock::acquire(&root)?;
             index::compact::compact_segments(&path)?;
+            drop(_lock);
+            reload_running_daemon(&root)?;
         }
         Some(Commands::List) => {
             index::stats::list_indexes()?;
         }
         Some(Commands::Remove { path }) => {
             let root = utils::find_codebase_root(&path)?;
-            utils::remove_index(&root)?;
+            if let Some(mut client) = server::IndexClient::connect() {
+                client.remove(&root)?;
+            } else {
+                let _lock = utils::IndexLock::acquire(&root)?;
+                utils::remove_index(&root)?;
+            }
             println!("Removed index for: {}", root.display());
         }
         Some(Commands::Daemon { action }) => {
@@ -265,7 +315,11 @@ fn main() -> Result<()> {
                 // Direct content search (ripgrep-like)
                 handle_grep_command(opts)?;
             } else {
-                // Interactive TUI mode
+                use std::io::IsTerminal;
+                anyhow::ensure!(
+                    std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+                    "Interactive search needs a terminal. Supply a pattern, or run `fxi --help`; stdin search is not supported"
+                );
                 tui::run(cli.path, None)?;
             }
         }
@@ -274,284 +328,282 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn reload_running_daemon(root: &std::path::Path) -> Result<()> {
+    if let Some(mut client) = server::IndexClient::connect() {
+        let (success, message) = client.reload(Some(root))?;
+        anyhow::ensure!(
+            success,
+            "Index published, but daemon reload failed: {message}"
+        );
+    } else {
+        anyhow::ensure!(
+            !server::is_daemon_running(),
+            "Index published, but the running daemon is unresponsive; restart it before searching"
+        );
+    }
+    Ok(())
+}
+
 fn handle_daemon_command(action: DaemonAction) -> Result<()> {
     use server::{IndexClient, is_daemon_running};
-
+    use std::time::{Duration, Instant};
     match action {
         DaemonAction::Start { watch } => {
             if is_daemon_running() {
-                println!("Daemon is already running");
+                let mut client = IndexClient::connect()
+                    .ok_or_else(|| anyhow::anyhow!("Daemon is running but not responding"))?;
+                let status = client.status()?;
+                anyhow::ensure!(
+                    !watch || status.watch_enabled,
+                    "Daemon is running without watching; run `fxi daemon stop` then `fxi daemon start --watch`"
+                );
+                println!(
+                    "Daemon is already running (watching: {})",
+                    status.watch_enabled
+                );
                 return Ok(());
             }
-
-            println!("Starting fxid daemon...");
             server::daemon::daemonize(watch)?;
-
-            // Wait a moment for daemon to start
-            std::thread::sleep(std::time::Duration::from_millis(500));
-
-            if is_daemon_running() {
-                #[cfg(unix)]
-                println!(
-                    "Daemon started (socket: {})",
-                    server::get_socket_path().display()
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(mut client) = IndexClient::connect()
+                    && client.status().is_ok()
+                {
+                    println!("Daemon started (watching: {watch})");
+                    break;
+                }
+                anyhow::ensure!(
+                    Instant::now() < deadline,
+                    "Daemon did not become ready within 10 seconds; run `fxi daemon foreground` to inspect the error"
                 );
-                #[cfg(windows)]
-                println!("Daemon started (pipe: {})", server::get_pipe_name());
-            } else {
-                #[cfg(unix)]
-                println!("Daemon may have failed to start. Check /tmp/fxid-error.log");
-                #[cfg(windows)]
-                println!("Daemon may have failed to start.");
+                std::thread::sleep(Duration::from_millis(25));
             }
         }
-
-        DaemonAction::Stop => {
+        DaemonAction::Stop { force } => {
             if !is_daemon_running() {
                 println!("Daemon is not running");
                 return Ok(());
             }
-
-            println!("Stopping daemon...");
-
-            // Try graceful shutdown via client first
-            if let Some(mut client) = IndexClient::connect() {
-                let _ = client.shutdown();
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-
-            // Force stop if still running
-            if is_daemon_running() {
+            if force {
                 server::daemon::stop_daemon()?;
+            } else {
+                let mut client = IndexClient::connect().ok_or_else(|| anyhow::anyhow!("Daemon is unresponsive; use `fxi daemon stop --force` to terminate without flushing pending changes"))?;
+                client.shutdown()?;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while is_daemon_running() {
+                    anyhow::ensure!(
+                        Instant::now() < deadline,
+                        "Daemon acknowledged shutdown but has not exited; use `fxi daemon stop --force` if necessary"
+                    );
+                    std::thread::sleep(Duration::from_millis(25));
+                }
             }
-
             println!("Daemon stopped");
         }
-
         DaemonAction::Status => {
             if !is_daemon_running() {
                 println!("Daemon is not running");
                 return Ok(());
             }
-
-            match IndexClient::connect() {
-                Some(mut client) => match client.status() {
-                    Ok(status) => {
-                        println!("fxid daemon status:");
-                        println!("  Uptime: {}s", status.uptime_secs);
-                        println!("  Indexes loaded: {}", status.indexes_loaded);
-                        println!("  Total documents: {}", status.total_docs);
-                        println!("  Queries served: {}", status.queries_served);
-                        println!("  Cache hit rate: {:.1}%", status.cache_hit_rate * 100.0);
-                        println!(
-                            "  Memory (approx): {:.1} MB",
-                            status.memory_bytes as f64 / 1024.0 / 1024.0
-                        );
-                        if status.protocol_version > 0 {
-                            println!("  Protocol version: {}", status.protocol_version);
-                        }
-                        if !status.server_version.is_empty() {
-                            println!("  Server version: {}", status.server_version);
-                        }
-                        if !status.loaded_roots.is_empty() {
-                            println!("  Loaded codebases:");
-                            for root in &status.loaded_roots {
-                                println!("    - {}", root.display());
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        println!("Failed to get status: {}", e);
-                    }
-                },
-                None => {
-                    println!("Daemon is running but not responding");
-                }
+            let mut client = IndexClient::connect()
+                .ok_or_else(|| anyhow::anyhow!("Daemon is running but not responding"))?;
+            let status = client.status()?;
+            println!("fxid daemon status:");
+            println!("  Uptime: {}s", status.uptime_secs);
+            println!("  Watching enabled: {}", status.watch_enabled);
+            println!("  Indexes loaded: {}", status.indexes_loaded);
+            println!("  Live documents: {}", status.total_docs);
+            println!("  Queries served: {}", status.queries_served);
+            println!("  Protocol version: {}", status.protocol_version);
+            println!("  Server version: {}", status.server_version);
+            for root in &status.loaded_roots {
+                println!(
+                    "  {} (watching: {})",
+                    root.display(),
+                    status.watched_roots.contains(root)
+                );
             }
         }
-
         DaemonAction::Foreground { watch } => {
-            if is_daemon_running() {
-                println!(
-                    "Daemon is already running in background. Stop it first with 'fxi daemon stop'"
-                );
-                return Ok(());
-            }
-
-            println!("Running daemon in foreground (Ctrl+C to stop)...");
+            anyhow::ensure!(
+                !is_daemon_running(),
+                "Daemon is already running; stop it with `fxi daemon stop` first"
+            );
             server::daemon::run_foreground(watch)?;
         }
-
         DaemonAction::SocketPath => {
             #[cfg(unix)]
             println!("{}", server::get_socket_path().display());
             #[cfg(windows)]
             println!("{}", server::get_pipe_name());
         }
-
         DaemonAction::Reload { path } => {
             let root = utils::find_codebase_root(&path)?;
-
-            if !is_daemon_running() {
-                println!("Daemon is not running. Start it with 'fxi daemon start'");
-                return Ok(());
-            }
-
-            match IndexClient::connect() {
-                Some(mut client) => match client.reload(Some(&root)) {
-                    Ok((success, message)) => {
-                        if success {
-                            println!("Reloaded: {}", message);
-                        } else {
-                            println!("Reload failed: {}", message);
-                        }
-                    }
-                    Err(e) => {
-                        println!("Failed to reload: {}", e);
-                    }
-                },
-                None => {
-                    println!("Failed to connect to daemon");
-                }
-            }
+            let mut client = IndexClient::connect().ok_or_else(|| {
+                anyhow::anyhow!("Daemon is not responding; start it with `fxi daemon start`")
+            })?;
+            let (success, message) = client.reload(Some(&root))?;
+            anyhow::ensure!(success, "Reload failed: {message}");
+            println!("Reloaded: {message}");
         }
     }
-
     Ok(())
 }
 
 fn handle_grep_command(opts: GrepOptions) -> Result<()> {
-    use server::protocol::ContentSearchOptions;
-    use std::io::IsTerminal;
-
-    // -v (invert match) is not supported with indexed search
-    if opts.invert_match {
-        anyhow::bail!(
-            "--invert-match (-v) is not supported: indexed search only returns matching lines"
-        );
+    use server::protocol::{ContentSearchOptions, ContentSearchResponse};
+    use std::io::{IsTerminal, Write};
+    anyhow::ensure!(
+        !opts.invert_match,
+        "--invert-match (-v) is not supported: indexed search only returns matching lines"
+    );
+    let requested = opts.path.canonicalize()?;
+    let root = utils::find_codebase_root(&requested)?;
+    let scope = requested.strip_prefix(&root)?.to_path_buf();
+    let combined_pattern = build_pattern(&opts.patterns, opts.fixed_strings, opts.regex)?;
+    // Reject invalid queries locally as well, rather than falling back after a server error.
+    let mut parsed = query::try_parse_query(&combined_pattern)?;
+    if opts.word_regexp {
+        parsed.apply_word_boundaries()?;
     }
-
-    // Find codebase root
-    let root = utils::find_codebase_root(&opts.path)?;
-
-    // Build combined pattern for multiple -e flags (OR them together)
-    let combined_pattern = build_pattern(&opts.patterns, opts.word_regexp);
-
-    // Resolve context flags (-C overrides -A and -B)
-    let (ctx_before, ctx_after) = if let Some(c) = opts.context {
-        (c, c)
-    } else {
-        (opts.before_context, opts.after_context)
-    };
-
-    let search_options = ContentSearchOptions {
-        context_before: ctx_before,
-        context_after: ctx_after,
+    anyhow::ensure!(
+        !parsed.options.explicit_limit,
+        "top:N applies to ranked interactive search; use --max-count N for CLI output"
+    );
+    parsed.options.case_insensitive = opts.ignore_case;
+    parsed.filters.search_scope = (!scope.as_os_str().is_empty()).then_some(scope);
+    let (before, after) = opts
+        .context
+        .map(|n| (n, n))
+        .unwrap_or((opts.before_context, opts.after_context));
+    let options = ContentSearchOptions {
+        context_before: before,
+        context_after: after,
         case_insensitive: opts.ignore_case,
-        files_only: opts.files_with_matches, // Optimize for -l mode
+        files_only: opts.files_with_matches,
         compact_files: opts.files_with_matches,
         counts_only: opts.count && !opts.files_with_matches,
+        word_regexp: opts.word_regexp,
     };
-
+    let daemon_response = if let Some(mut client) = server::IndexClient::connect() {
+        match client.content_search(&combined_pattern, Some(&requested), opts.max_count, options) {
+            Ok(response) => Some(response),
+            Err(error) => {
+                eprintln!("Daemon search failed, falling back to direct search: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let response = if let Some(response) = daemon_response {
+        response
+    } else {
+        let started = std::time::Instant::now();
+        let mut response = ContentSearchResponse {
+            matches: Vec::new(),
+            file_paths: None,
+            file_counts: None,
+            duration_ms: 0.0,
+            files_with_matches: 0,
+            resolved_root: Some(root.clone()),
+        };
+        if opts.files_with_matches
+            && let Some(meta) = index::negative_routing::preflight(&root, &parsed)
+        {
+            warn_if_stale_metadata(&meta, &root);
+            response.file_paths = Some(Vec::new());
+        } else {
+            let reader = index::reader::IndexReader::open_for_search_uncached(&root)?;
+            warn_if_stale(&reader, &root);
+            let executor = query::QueryExecutor::new(&reader);
+            if opts.files_with_matches {
+                response.file_paths = Some(if parsed.is_empty() {
+                    Vec::new()
+                } else {
+                    executor.execute_files_only(&parsed, opts.max_count)?
+                });
+            } else if opts.count {
+                response.file_counts = Some(if parsed.is_empty() {
+                    Vec::new()
+                } else {
+                    executor.execute_match_counts(&parsed, opts.max_count)?
+                });
+            } else if !parsed.is_empty() {
+                response.matches = executor
+                    .execute_with_content(&parsed, before, after)?
+                    .into_iter()
+                    .take(if opts.max_count == 0 {
+                        usize::MAX
+                    } else {
+                        opts.max_count
+                    })
+                    .map(|m| server::protocol::ContentMatch {
+                        path: m.path,
+                        line_number: m.line_number,
+                        line_content: m.line_content,
+                        match_start: m.match_start,
+                        match_end: m.match_end,
+                        context_before: m.context_before,
+                        context_after: m.context_after,
+                    })
+                    .collect();
+            }
+        }
+        response.files_with_matches = response
+            .file_paths
+            .as_ref()
+            .map(Vec::len)
+            .or_else(|| response.file_counts.as_ref().map(Vec::len))
+            .unwrap_or_else(|| {
+                response
+                    .matches
+                    .iter()
+                    .map(|m| &m.path)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+            });
+        response.duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+        response
+    };
+    if opts.json {
+        let mut stdout = std::io::stdout().lock();
+        serde_json::to_writer(&mut stdout, &response)?;
+        writeln!(stdout)?;
+        return Ok(());
+    }
     let color = match opts.color {
         ColorChoice::Always => true,
         ColorChoice::Never => false,
-        ColorChoice::Auto => std::io::stdout().is_terminal(),
-    };
-
-    if search_options.counts_only {
-        if let Some(mut client) = server::IndexClient::connect() {
-            match client.content_search(
-                &combined_pattern,
-                Some(&root),
-                opts.max_count,
-                search_options,
-            ) {
-                Ok(response) => {
-                    if let Some(counts) = response.file_counts {
-                        output::print_file_counts(&counts, color)?;
-                    } else {
-                        // Older servers ignore the new option and return full records.
-                        output::print_match_counts(&response.matches, color)?;
-                    }
-                    return Ok(());
-                }
-                Err(e) => eprintln!("Daemon search failed, falling back to direct search: {e}"),
-            }
+        ColorChoice::Auto => {
+            std::io::stdout().is_terminal()
+                && std::env::var_os("NO_COLOR").is_none()
+                && std::env::var("TERM").is_ok_and(|term| term != "dumb")
         }
-        let reader = index::reader::IndexReader::open_for_search_uncached(&root)?;
-        warn_if_stale(&reader, &root);
-        let mut parsed = query::parse_query(&combined_pattern);
-        parsed.options.case_insensitive = opts.ignore_case;
-        let counts = if parsed.is_empty() {
-            Vec::new()
-        } else {
-            query::QueryExecutor::new(&reader).execute_match_counts(&parsed, opts.max_count)?
-        };
-        output::print_file_counts(&counts, color)?;
-        return Ok(());
-    }
-
-    // Try to use daemon for warm search
-    let matches = if let Some(mut client) = server::IndexClient::connect() {
-        match client.content_search(
-            &combined_pattern,
-            Some(&root),
-            opts.max_count,
-            search_options,
-        ) {
-            Ok(response) => {
-                if opts.files_with_matches
-                    && let Some(paths) = response.file_paths
-                {
-                    output::print_file_paths(&paths, color)?;
-                    return Ok(());
-                }
-                response.matches
-            }
-            Err(e) => {
-                eprintln!("Daemon search failed, falling back to direct search: {}", e);
-                do_direct_content_search(
-                    &combined_pattern,
-                    &root,
-                    opts.max_count,
-                    ctx_before,
-                    ctx_after,
-                    opts.ignore_case,
-                    opts.files_with_matches,
-                )?
-            }
-        }
-    } else {
-        // Fall back to direct search without daemon
-        do_direct_content_search(
-            &combined_pattern,
-            &root,
-            opts.max_count,
-            ctx_before,
-            ctx_after,
-            opts.ignore_case,
-            opts.files_with_matches,
-        )?
     };
-
-    // Output results
     if opts.files_with_matches {
-        output::print_files_only(&matches, color)?;
+        let paths = response
+            .file_paths
+            .unwrap_or_else(|| response.matches.into_iter().map(|m| m.path).collect());
+        if opts.null {
+            let mut stdout = std::io::stdout().lock();
+            for path in paths {
+                stdout.write_all(path.as_os_str().as_encoded_bytes())?;
+                stdout.write_all(&[0])?;
+            }
+        } else {
+            output::print_file_paths(&paths, color)?;
+        }
     } else if opts.count {
-        output::print_match_counts(&matches, color)?;
+        if let Some(counts) = response.file_counts {
+            output::print_file_counts(&counts, color)?;
+        } else {
+            output::print_match_counts(&response.matches, color)?;
+        }
     } else {
-        // Use heading style when results span multiple files
-        let use_heading = matches
-            .iter()
-            .map(|m| &m.path)
-            .collect::<std::collections::HashSet<_>>()
-            .len()
-            > 1;
-
-        output::print_content_matches(&matches, color, use_heading)?;
+        let heading = opts.heading || (!opts.no_heading && std::io::stdout().is_terminal());
+        output::print_content_matches(&response.matches, color, heading)?;
     }
-
     Ok(())
 }
 
@@ -590,114 +642,57 @@ fn warn_if_stale_metadata(meta: &index::types::IndexMeta, root: &Path) {
     }
 }
 
-/// Build combined search pattern from multiple patterns
-fn build_pattern(patterns: &[String], word_regexp: bool) -> String {
-    if patterns.is_empty() {
-        return String::new();
-    }
-
-    // For single pattern without special flags, return as-is
-    if patterns.len() == 1 && !word_regexp {
-        return patterns[0].clone();
-    }
-
-    // Build regex pattern for -w (word boundary) and/or multiple patterns
-    let escaped: Vec<String> = patterns
+/// Preserve query semantics when composing OR alternatives; literal/regex modes
+/// encode slash delimiters without depending on the query parser's lexer state.
+fn build_pattern(patterns: &[String], fixed: bool, regex_mode: bool) -> Result<String> {
+    let patterns: Vec<String> = patterns
         .iter()
-        .map(|p| {
-            let escaped = regex::escape(p);
-            if word_regexp {
-                format!(r"\b{}\b", escaped)
+        .map(|pattern| {
+            if fixed || regex_mode {
+                let expression = if fixed {
+                    regex::escape(pattern)
+                } else {
+                    pattern.clone()
+                };
+                // Preserve backslash parity and encode delimiter slashes, including
+                // slashes already escaped by the caller or inside character classes.
+                let mut encoded = String::new();
+                let mut chars = expression.chars();
+                while let Some(ch) = chars.next() {
+                    if ch == '\\' {
+                        if let Some(next) = chars.next() {
+                            if next == '/' {
+                                encoded.push_str("\\x2f");
+                            } else {
+                                encoded.push('\\');
+                                encoded.push(next);
+                            }
+                        } else {
+                            encoded.push(ch);
+                        }
+                    } else if ch == '/' {
+                        encoded.push_str("\\x2f");
+                    } else {
+                        encoded.push(ch);
+                    }
+                }
+                let expression = encoded;
+                format!("re:/{expression}/")
             } else {
-                escaped
+                pattern.clone()
             }
         })
         .collect();
-
-    // Join multiple patterns with OR
-    let combined = if escaped.len() > 1 {
-        escaped.join("|")
+    for pattern in &patterns {
+        query::try_parse_query(pattern)?;
+    }
+    Ok(if patterns.len() == 1 {
+        patterns[0].clone()
     } else {
-        escaped.into_iter().next().unwrap_or_default()
-    };
-
-    // Wrap in regex syntax if needed
-    if word_regexp || patterns.len() > 1 {
-        format!("re:/{}/", combined)
-    } else {
-        combined
-    }
-}
-
-/// Direct content search without daemon
-fn do_direct_content_search(
-    pattern: &str,
-    root: &Path,
-    limit: usize,
-    context_before: u32,
-    context_after: u32,
-    case_insensitive: bool,
-    files_only: bool,
-) -> Result<Vec<server::protocol::ContentMatch>> {
-    use crate::index::reader::IndexReader;
-    use crate::query::{QueryExecutor, parse_query};
-
-    // Case-insensitivity is applied at the plan level: the planner narrows
-    // through the lowercased token index and verifiers ignore case
-    let mut parsed = parse_query(pattern);
-    parsed.options.case_insensitive = case_insensitive;
-    if files_only && let Some(meta) = index::negative_routing::preflight(root, &parsed) {
-        warn_if_stale_metadata(&meta, root);
-        return Ok(Vec::new());
-    }
-
-    // A failed/unsupported preflight retains ordinary index and query checks.
-    let reader = IndexReader::open_for_search_uncached(root)?;
-    warn_if_stale(&reader, root);
-    if parsed.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let executor = QueryExecutor::new(&reader);
-
-    // -l: files-only path stops scanning each file at its first match and
-    // skips per-line match extraction entirely (same as the daemon path)
-    if files_only {
-        let matching_files = executor.execute_files_only(&parsed, limit)?;
-        return Ok(matching_files
-            .into_iter()
-            .map(|path| server::protocol::ContentMatch {
-                path,
-                line_number: 1,
-                line_content: String::new(),
-                match_start: 0,
-                match_end: 0,
-                context_before: vec![],
-                context_after: vec![],
-            })
-            .collect());
-    }
-
-    let matches = executor.execute_with_content(&parsed, context_before, context_after)?;
-
-    // Convert to protocol type and apply limit (0 = unlimited)
-    let iter = matches.into_iter();
-    let limited: Box<dyn Iterator<Item = _>> = if limit == 0 {
-        Box::new(iter)
-    } else {
-        Box::new(iter.take(limit))
-    };
-    let result: Vec<server::protocol::ContentMatch> = limited
-        .map(|m| server::protocol::ContentMatch {
-            path: m.path,
-            line_number: m.line_number,
-            line_content: m.line_content,
-            match_start: m.match_start,
-            match_end: m.match_end,
-            context_before: m.context_before,
-            context_after: m.context_after,
-        })
-        .collect();
-
-    Ok(result)
+        patterns
+            .iter()
+            .map(|p| format!("({p})"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    })
 }

@@ -89,74 +89,59 @@ pub fn print_content_matches(
     }
 
     let colors = Colors::new();
-    let mut current_file: Option<&std::path::Path> = None;
-    let mut last_line_num: Option<u32> = None;
-
+    // Merge overlapping context intervals and promote context to a match when
+    // either role references the same line. Every displayed line appears once.
+    enum Row<'a> {
+        Context(&'a str),
+        Match(&'a ContentMatch),
+    }
+    let mut files: std::collections::BTreeMap<
+        &std::path::Path,
+        std::collections::BTreeMap<u32, Row<'_>>,
+    > = std::collections::BTreeMap::new();
+    let with_context = matches
+        .iter()
+        .any(|m| !m.context_before.is_empty() || !m.context_after.is_empty());
     for m in matches {
-        let is_new_file = current_file.map(|p| p != m.path).unwrap_or(true);
-
-        if is_new_file {
-            if current_file.is_some() {
-                // Add blank line between files
-                writeln!(stdout)?;
-            }
-
-            if heading {
-                // Print filename header
-                stdout.set_color(&colors.path_heading)?;
-                writeln!(stdout, "{}", m.path.display())?;
-                stdout.reset()?;
-            }
-
-            current_file = Some(&m.path);
-            last_line_num = None;
+        let rows = files.entry(m.path.as_path()).or_default();
+        for (number, text) in m.context_before.iter().chain(&m.context_after) {
+            rows.entry(*number).or_insert(Row::Context(text));
         }
-
-        // Print context separator if there's a gap
-        if let Some(last) = last_line_num {
-            let expected_next = last + 1;
-            let first_ctx_line = m
-                .context_before
-                .first()
-                .map(|(n, _)| *n)
-                .unwrap_or(m.line_number);
-
-            if first_ctx_line > expected_next {
+        rows.insert(m.line_number, Row::Match(m));
+    }
+    for (file_index, (path, rows)) in files.into_iter().enumerate() {
+        if file_index != 0 && heading {
+            writeln!(stdout)?;
+        }
+        if heading {
+            stdout.set_color(&colors.path_heading)?;
+            writeln!(stdout, "{}", path.display())?;
+            stdout.reset()?;
+        }
+        let mut previous = None;
+        for (number, row) in rows {
+            if with_context && previous.is_some_and(|last: u32| number > last.saturating_add(1)) {
                 stdout.set_color(&colors.separator)?;
                 writeln!(stdout, "--")?;
                 stdout.reset()?;
             }
+            match row {
+                Row::Context(text) => {
+                    print_context_line(&mut stdout, &colors, path, number, text, heading)?
+                }
+                Row::Match(m) => print_match_line(
+                    &mut stdout,
+                    &colors,
+                    path,
+                    number,
+                    &m.line_content,
+                    m.match_start,
+                    m.match_end,
+                    heading,
+                )?,
+            }
+            previous = Some(number);
         }
-
-        // Print context before
-        for (line_num, content) in &m.context_before {
-            print_context_line(&mut stdout, &colors, &m.path, *line_num, content, heading)?;
-        }
-
-        // Print the match line
-        print_match_line(
-            &mut stdout,
-            &colors,
-            &m.path,
-            m.line_number,
-            &m.line_content,
-            m.match_start,
-            m.match_end,
-            heading,
-        )?;
-
-        // Print context after
-        for (line_num, content) in &m.context_after {
-            print_context_line(&mut stdout, &colors, &m.path, *line_num, content, heading)?;
-        }
-
-        // Track last line for gap detection
-        last_line_num = Some(
-            m.context_after
-                .last()
-                .map(|(n, _)| *n)
-                .unwrap_or(m.line_number),
-        );
     }
 
     stdout.flush()
@@ -242,11 +227,6 @@ fn print_match_line(
     writeln!(stdout)?;
 
     Ok(())
-}
-
-/// Print only filenames (for -l flag)
-pub fn print_files_only(matches: &[ContentMatch], color: bool) -> io::Result<()> {
-    print_path_iter(matches.iter().map(|m| m.path.as_path()), color)
 }
 
 pub fn print_file_paths(paths: &[std::path::PathBuf], color: bool) -> io::Result<()> {

@@ -44,10 +44,17 @@ pub fn get_index_dir(root_path: &Path) -> Result<PathBuf> {
 
 /// Stable container and lock identity, independent of published generation.
 pub fn get_index_container(root_path: &Path) -> Result<PathBuf> {
+    let canonical = root_path
+        .canonicalize()
+        .unwrap_or_else(|_| root_path.to_path_buf());
+    anyhow::ensure!(
+        canonical.to_str().is_some(),
+        "Non-UTF-8 index root paths are not supported; rename the directory to valid UTF-8"
+    );
     let indexes_dir = get_indexes_dir()?;
 
-    // Create a unique folder name from the root path
-    let folder_name = hash_path(root_path);
+    // Validate before hashing; lossy conversion can alias distinct Unix paths.
+    let folder_name = hash_path(&canonical);
     let index_dir = indexes_dir.join(&folder_name);
 
     Ok(index_dir)
@@ -56,8 +63,10 @@ pub fn get_index_container(root_path: &Path) -> Result<PathBuf> {
 /// Hash a path to create a unique folder name
 /// Format: first 8 chars of dir name + hash
 fn hash_path(path: &Path) -> String {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let path_str = canonical.to_string_lossy();
+    let canonical = path;
+    let path_str = canonical
+        .to_str()
+        .expect("index root validated before hashing");
 
     // Get directory name for readability
     let dir_name = canonical
@@ -205,5 +214,17 @@ mod tests {
 
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, hash3);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod invalid_root_tests {
+    #[test]
+    fn non_utf8_root_is_rejected_before_lossy_hashing() {
+        use std::os::unix::ffi::OsStringExt;
+        let root =
+            std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/invalid-root-\xff".to_vec()));
+        let error = super::get_index_container(&root).unwrap_err();
+        assert!(error.to_string().contains("Non-UTF-8"));
     }
 }
