@@ -533,6 +533,11 @@ impl App {
         self.prefetch_adjacent_previews();
     }
 
+    fn refresh_preview(&mut self) {
+        self.prefetch_cache.clear();
+        self.update_preview();
+    }
+
     pub fn scroll_preview_down(&mut self) {
         self.preview_scroll += 1;
     }
@@ -588,6 +593,7 @@ impl App {
                 crossterm::terminal::EnterAlternateScreen,
                 crossterm::event::EnableMouseCapture
             );
+            self.refresh_preview();
         }
     }
 
@@ -968,6 +974,25 @@ mod tests {
         assert_eq!(command.get_program(), r"C:\Program Files\Editor\editor.exe");
         assert!(editor_command("'unclosed", path, 1).is_err());
         assert!(editor_command("", path, 1).is_err());
+    }
+
+    #[test]
+    fn returning_from_editor_refreshes_cached_preview() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = app();
+        app.root_path = directory.path().to_path_buf();
+        app.results.push(SearchMatch {
+            doc_id: 1,
+            path: "edit.rs".into(),
+            line_number: 1,
+            score: 1.0,
+        });
+        std::fs::write(directory.path().join("edit.rs"), "old contents").unwrap();
+        app.update_preview();
+        assert_eq!(app.preview_content.as_deref(), Some("old contents"));
+        std::fs::write(directory.path().join("edit.rs"), "new contents").unwrap();
+        app.refresh_preview();
+        assert_eq!(app.preview_content.as_deref(), Some("new contents"));
     }
 
     #[test]
