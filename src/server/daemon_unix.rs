@@ -10,6 +10,7 @@ use crate::server::{get_pid_path, get_socket_path};
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::{BufReader, BufWriter};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -108,7 +109,22 @@ impl IndexServer {
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
+                    // Wait for readiness rather than delaying every new client
+                    // by a polling sleep. The timeout still bounds shutdown when
+                    // no more clients arrive.
+                    let mut descriptor = libc::pollfd {
+                        fd: listener.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    let result = unsafe { libc::poll(&mut descriptor, 1, 10) };
+                    if result < 0 {
+                        let error = std::io::Error::last_os_error();
+                        if error.kind() != std::io::ErrorKind::Interrupted {
+                            eprintln!("fxid: listener readiness error: {error}");
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                    }
                 }
                 Err(e) => {
                     eprintln!("fxid: accept error: {}", e);
