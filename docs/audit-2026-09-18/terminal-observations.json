@@ -1,0 +1,10 @@
+{
+  "exit_code": 1,
+  "before_echo": true,
+  "after_echo": false,
+  "before_canonical": true,
+  "after_canonical": false,
+  "entered_alternate": true,
+  "left_alternate": false,
+  "output": "\u001b[?1049h\u001b[?1000h\u001b[?1002h\u001b[?1003h\u001b[?1015h\u001b[?1006h\u001b[2JError: No such file or directory (os error 2)\n"
+}

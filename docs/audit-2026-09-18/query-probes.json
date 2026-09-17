@@ -1,0 +1,519 @@
+{
+  "binary": "/Users/cjpark/Desktop/Projects/fxi/target/release/fxi",
+  "sha256": "8879d77ae4b2c6350bf33b1a071bda9dde417d2ff36b3451d6e1cc9107a7c6a2",
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-query-audit-c5di384e",
+  "cli": [
+    {
+      "query": "foo bar",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "a.rs\n1:foo bar\n1:foo bar\n\npunct.txt\n1:foo-bar\n1:foo-bar\n2:foo.bar\n2:foo.bar\n3:foo()\n\nslash.txt\n1:foo/bar\n1:foo/bar\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo bar",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "a.rs:2\npunct.txt:5\nslash.txt:2\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo bar",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "a.rs\npunct.txt\nslash.txt\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo | bar",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "a.rs\n1:foo bar\n1:foo bar\n\nb.py\n1:foo\n\nc.rs\n1:bar\n\nnegative.txt\n2:foo\n\npunct.txt\n1:foo-bar\n1:foo-bar\n2:foo.bar\n2:foo.bar\n3:foo()\n\nslash.txt\n1:foo/bar\n1:foo/bar\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo | bar",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "a.rs:2\nb.py:1\nc.rs:1\nnegative.txt:1\npunct.txt:5\nslash.txt:2\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo | bar",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "a.rs\nb.py\nc.rs\nnegative.txt\npunct.txt\nslash.txt\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo -absent",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "a.rs\n1:foo bar\n1:foo bar\n\nb.py\n1:foo\n1:foo\n\nnegative.txt\n1:irrelevant\n2:foo\n\npunct.txt\n1:foo-bar\n1:foo-bar\n2:foo.bar\n3:foo()\n\nslash.txt\n1:foo/bar\n1:foo/bar\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo -absent",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "a.rs:2\nb.py:2\nnegative.txt:2\npunct.txt:4\nslash.txt:2\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo -absent",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "a.rs\nb.py\nnegative.txt\npunct.txt\nslash.txt\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo -absent line:1",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "a.rs\n1:foo bar\n1:foo bar\n\nb.py\n1:foo\n1:foo\n\nnegative.txt\n1:irrelevant\n\npunct.txt\n1:foo-bar\n1:foo-bar\n\nslash.txt\n1:foo/bar\n1:foo/bar\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo -absent line:1",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "a.rs:2\nb.py:2\nnegative.txt:1\npunct.txt:2\nslash.txt:2\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo -absent line:1",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "a.rs\nb.py\nnegative.txt\npunct.txt\nslash.txt\n",
+      "stderr": ""
+    },
+    {
+      "query": "near:alpha,beta,gamma,2",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "near.txt:3:alpha\n",
+      "stderr": ""
+    },
+    {
+      "query": "near:alpha,beta,gamma,2",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "near.txt:1\n",
+      "stderr": ""
+    },
+    {
+      "query": "near:alpha,beta,gamma,2",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "near.txt\n",
+      "stderr": ""
+    },
+    {
+      "query": "re:/foo\\/bar/",
+      "mode": [],
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Error: regex parse error:\n    foo\\\n       ^\nerror: incomplete escape sequence, reached end of pattern prematurely\n"
+    },
+    {
+      "query": "re:/foo\\/bar/",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Error: regex parse error:\n    foo\\\n       ^\nerror: incomplete escape sequence, reached end of pattern prematurely\n"
+    },
+    {
+      "query": "re:/foo\\/bar/",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Error: regex parse error:\n    foo\\\n       ^\nerror: incomplete escape sequence, reached end of pattern prematurely\n"
+    },
+    {
+      "query": "foo) bar",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "a.rs\n1:foo bar\n\nb.py\n1:foo\n\nnegative.txt\n2:foo\n\npunct.txt\n1:foo-bar\n2:foo.bar\n3:foo()\n\nslash.txt\n1:foo/bar\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo) bar",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "a.rs:1\nb.py:1\nnegative.txt:1\npunct.txt:3\nslash.txt:1\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo) bar",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "a.rs\nb.py\nnegative.txt\npunct.txt\nslash.txt\n",
+      "stderr": ""
+    },
+    {
+      "query": "ext:rs | ext:py",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "b.py:1:\n",
+      "stderr": ""
+    },
+    {
+      "query": "ext:rs | ext:py",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "b.py:1\n",
+      "stderr": ""
+    },
+    {
+      "query": "ext:rs | ext:py",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "b.py\n",
+      "stderr": ""
+    },
+    {
+      "query": "-ext:rs",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "query": "-ext:rs",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "query": "-ext:rs",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "query": "ext:rs foo | ext:py bar",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "b.py:1:foo\n",
+      "stderr": ""
+    },
+    {
+      "query": "ext:rs foo | ext:py bar",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "b.py:1\n",
+      "stderr": ""
+    },
+    {
+      "query": "ext:rs foo | ext:py bar",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "b.py\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo-bar",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "b.py\n1:foo\n1:foo\n\nnegative.txt\n1:irrelevant\n2:foo\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo-bar",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "b.py:2\nnegative.txt:2\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo-bar",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "b.py\nnegative.txt\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo.bar",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "punct.txt:1:foo-bar\npunct.txt:2:foo.bar\npunct.txt:2:foo.bar\npunct.txt:3:foo()\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo.bar",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "punct.txt:4\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo.bar",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "punct.txt\n",
+      "stderr": ""
+    },
+    {
+      "query": "size:>8",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "a.rs\n1:\n\nday_after.txt\n1:\n\nday_before.txt\n1:\n\neight.txt\n1:\n\ninvalid_date.txt\n1:\n\nmidnight.txt\n1:\n\nnear.txt\n1:\n\nnegative.txt\n1:\n\npunct.txt\n1:\n\nslash.txt\n1:\n",
+      "stderr": ""
+    },
+    {
+      "query": "size:>8",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "a.rs:1\nday_after.txt:1\nday_before.txt:1\neight.txt:1\ninvalid_date.txt:1\nmidnight.txt:1\nnear.txt:1\nnegative.txt:1\npunct.txt:1\nslash.txt:1\n",
+      "stderr": ""
+    },
+    {
+      "query": "size:>8",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "a.rs\nday_after.txt\nday_before.txt\neight.txt\ninvalid_date.txt\nmidnight.txt\nnear.txt\nnegative.txt\npunct.txt\nslash.txt\n",
+      "stderr": ""
+    },
+    {
+      "query": "size:<8",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "b.py\n1:\n\nc.rs\n1:\n\neight.txt\n1:\n\nslash.txt\n1:\n",
+      "stderr": ""
+    },
+    {
+      "query": "size:<8",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "b.py:1\nc.rs:1\neight.txt:1\nslash.txt:1\n",
+      "stderr": ""
+    },
+    {
+      "query": "size:<8",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "b.py\nc.rs\neight.txt\nslash.txt\n",
+      "stderr": ""
+    },
+    {
+      "query": "mtime:2101-03-01",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "day_after.txt:1:\n",
+      "stderr": ""
+    },
+    {
+      "query": "mtime:2101-03-01",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "day_after.txt:1\n",
+      "stderr": ""
+    },
+    {
+      "query": "mtime:2101-03-01",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "day_after.txt\n",
+      "stderr": ""
+    },
+    {
+      "query": "mtime:2026-09-18",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "midnight.txt:1:\n",
+      "stderr": ""
+    },
+    {
+      "query": "mtime:2026-09-18",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "midnight.txt:1\n",
+      "stderr": ""
+    },
+    {
+      "query": "mtime:2026-09-18",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "midnight.txt\n",
+      "stderr": ""
+    },
+    {
+      "query": "mtime:2026-02-31",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "invalid_date.txt:1:\n",
+      "stderr": ""
+    },
+    {
+      "query": "mtime:2026-02-31",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "invalid_date.txt:1\n",
+      "stderr": ""
+    },
+    {
+      "query": "mtime:2026-02-31",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "invalid_date.txt\n",
+      "stderr": ""
+    },
+    {
+      "query": "mtime:18446744073709551615",
+      "mode": [],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "query": "mtime:18446744073709551615",
+      "mode": [
+        "-c"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "query": "mtime:18446744073709551615",
+      "mode": [
+        "-l"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "wire": [
+    {
+      "query_prefix": "foo",
+      "query_bytes": 3,
+      "limit": 0,
+      "response_type": "Search",
+      "matches": 100,
+      "first_match": {
+        "path": "a.txt",
+        "line_number": 1,
+        "score": 8.188404
+      }
+    },
+    {
+      "query_prefix": "foo",
+      "query_bytes": 3,
+      "limit": 150,
+      "response_type": "Search",
+      "matches": 100,
+      "first_match": {
+        "path": "a.txt",
+        "line_number": 1,
+        "score": 8.188404
+      }
+    },
+    {
+      "query_prefix": "foo top:0",
+      "query_bytes": 9,
+      "limit": 150,
+      "response_type": "Search",
+      "matches": 150,
+      "first_match": {
+        "path": "a.txt",
+        "line_number": 1,
+        "score": 8.188404
+      }
+    },
+    {
+      "query_prefix": "^99999999999999999999999999999999999999999999999999999:foo",
+      "query_bytes": 58,
+      "limit": 1,
+      "response_type": "Search",
+      "matches": 1,
+      "first_match": {
+        "path": "a.txt",
+        "line_number": 1,
+        "score": null
+      }
+    },
+    {
+      "query_prefix": "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((",
+      "query_bytes": 20003,
+      "limit": 1,
+      "error": "Daemon closed connection"
+    }
+  ],
+  "regex_grid": {
+    "comparisons": 82,
+    "mismatches": []
+  },
+  "daemon_exit_after_queries": -6,
+  "daemon_log": "Running daemon in foreground (Ctrl+C to stop)...\nfxid: config: watch=false, debounce=1ms, delta_flush=0s, merge_segments=15, rebuild_threshold=30%\nfxid: listening on /tmp/fxi-query-audit-c5di384e.sock\nfxid: loading index for /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-query-audit-c5di384e/wire\nfxid: loaded 1 files from /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-query-audit-c5di384e/wire\n\nthread '<unknown>' (2078547) has overflowed its stack\nfatal runtime error: stack overflow, aborting\n"
+}

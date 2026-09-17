@@ -1,0 +1,546 @@
+{
+  "binary": "/Users/cjpark/Desktop/Projects/fxi/target/release/fxi",
+  "sha256": "8879d77ae4b2c6350bf33b1a071bda9dde417d2ff36b3451d6e1cc9107a7c6a2",
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh",
+  "rows": [
+    {
+      "label": "build",
+      "args": [
+        "index",
+        "--force",
+        "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo"
+      ],
+      "code": 0,
+      "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo\nIndexing: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo\nIndex complete\nIndex stored at: /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/indexes/repo-cbe7693112a84fe1/generations/gen-16710-1789656848633840000-0\n",
+      "stderr": ""
+    },
+    {
+      "label": "help",
+      "args": [
+        "--help"
+      ],
+      "code": 0,
+      "stdout": "Terminal-first, ultra-fast code search engine\n\nUsage: fxi [OPTIONS] [PATTERN] [COMMAND]\n\nCommands:\n  index    Build or rebuild the index\n  search   Interactive search TUI\n  stats    Show index statistics\n  compact  Compact delta segments\n  list     List all indexed codebases\n  remove   Remove an index\n  daemon   Start the index server daemon (keeps indexes warm for fast searches)\n  help     Print this message or the help of the given subcommand(s)\n\nArguments:\n  [PATTERN]\n          Search pattern (when no subcommand is given)\n\nOptions:\n  -e, --regexp <PATTERNS>\n          Additional patterns to search for (-e, can be repeated)\n\n  -p, --path <PATH>\n          Path to search in\n          \n          [default: .]\n\n  -A, --after-context <AFTER_CONTEXT>\n          Lines of context after match (-A)\n          \n          [default: 0]\n\n  -B, --before-context <BEFORE_CONTEXT>\n          Lines of context before match (-B)\n          \n          [default: 0]\n\n  -C, --context <CONTEXT>\n          Lines of context (both directions, -C)\n\n  -i, --ignore-case\n          Case insensitive search (-i)\n\n  -v, --invert-match\n          Invert match: show non-matching lines (-v)\n\n  -w, --word-regexp\n          Match whole words only (-w)\n\n  -m, --max-count <MAX_COUNT>\n          Maximum number of results (-m), 0 for unlimited\n          \n          [default: 0]\n\n  -l, --files-with-matches\n          Only print filenames (-l)\n\n  -c, --count\n          Print match count per file (-c)\n\n      --color <COLOR>\n          When to use colors: always, never, auto\n\n          Possible values:\n          - always: Always use colors\n          - never:  Never use colors\n          - auto:   Auto-detect based on terminal\n          \n          [default: auto]\n\n  -h, --help\n          Print help (see a summary with '-h')\n",
+      "stderr": ""
+    },
+    {
+      "label": "version",
+      "args": [
+        "--version"
+      ],
+      "code": 2,
+      "stdout": "",
+      "stderr": "error: unexpected argument '--version' found\n\n  tip: to pass '--version' as a value, use '-- --version'\n\nUsage: fxi [OPTIONS] [PATTERN] [COMMAND]\n\nFor more information, try '--help'.\n"
+    },
+    {
+      "label": "no_args_pipe",
+      "args": [],
+      "code": 1,
+      "stdout": "",
+      "stderr": "Error: Device not configured (os error 6)\n"
+    },
+    {
+      "label": "empty",
+      "args": [
+        ""
+      ],
+      "code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "label": "absent",
+      "args": [
+        "absentUniqueZZZ"
+      ],
+      "code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "label": "invalid_regex",
+      "args": [
+        "re:/[/"
+      ],
+      "code": 1,
+      "stdout": "",
+      "stderr": "Error: regex parse error:\n    [\n    ^\nerror: unclosed character class\n"
+    },
+    {
+      "label": "unsupported_invert",
+      "args": [
+        "-v",
+        "alpha"
+      ],
+      "code": 1,
+      "stdout": "",
+      "stderr": "Error: --invert-match (-v) is not supported: indexed search only returns matching lines\n"
+    },
+    {
+      "label": "subtree",
+      "args": [
+        "-l",
+        "alpha",
+        "-p",
+        "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo/sub"
+      ],
+      "code": 0,
+      "stdout": "a.rs\nb.py\nodd\nname.rs\nsub/c.rs\nupper.rs\n",
+      "stderr": ""
+    },
+    {
+      "label": "single_file",
+      "args": [
+        "-l",
+        "alpha",
+        "-p",
+        "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo/a.rs"
+      ],
+      "code": 0,
+      "stdout": "a.rs\nb.py\nodd\nname.rs\nsub/c.rs\nupper.rs\n",
+      "stderr": ""
+    },
+    {
+      "label": "positional_path",
+      "args": [
+        "alpha",
+        "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo/sub"
+      ],
+      "code": 2,
+      "stdout": "",
+      "stderr": "error: unexpected argument '/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo/sub' found\n\nUsage: fxi [OPTIONS] [PATTERN] [COMMAND]\n\nFor more information, try '--help'.\n"
+    },
+    {
+      "label": "reserved_word",
+      "args": [
+        "stats"
+      ],
+      "code": 0,
+      "stdout": "Index Statistics\n================\n\nRoot path:        /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo\nIndex location:   /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/indexes/repo-cbe7693112a84fe1/generations/gen-16710-1789656848633840000-0\nIndex version:    2\nDocument count:   5\nSegment count:    1\nStop-grams:       0\n\nFiles by language:\n  Rust            4\n  Python          1\n\nIndex size:       1.72 KB\n\nCreated:          2026-09-17 14:54:08 UTC\nUpdated:          2026-09-17 14:54:08 UTC\n",
+      "stderr": ""
+    },
+    {
+      "label": "reserved_escape",
+      "args": [
+        "--",
+        "stats"
+      ],
+      "code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "label": "single_e",
+      "args": [
+        "-l",
+        "-e",
+        "alpha"
+      ],
+      "code": 0,
+      "stdout": "a.rs\nb.py\nodd\nname.rs\nsub/c.rs\nupper.rs\n",
+      "stderr": ""
+    },
+    {
+      "label": "multiple_e",
+      "args": [
+        "-l",
+        "-e",
+        "alpha",
+        "-e",
+        "unmatchedZZZ"
+      ],
+      "code": 0,
+      "stdout": "a.rs\nb.py\nodd\nname.rs\nsub/c.rs\n",
+      "stderr": ""
+    },
+    {
+      "label": "word_case",
+      "args": [
+        "-l",
+        "-w",
+        "alpha"
+      ],
+      "code": 0,
+      "stdout": "a.rs\nb.py\nodd\nname.rs\nsub/c.rs\n",
+      "stderr": ""
+    },
+    {
+      "label": "word_query",
+      "args": [
+        "-l",
+        "-w",
+        "alpha beta"
+      ],
+      "code": 0,
+      "stdout": "a.rs\nsub/c.rs\n",
+      "stderr": ""
+    },
+    {
+      "label": "regex_e",
+      "args": [
+        "-l",
+        "-e",
+        "re:/alpha/",
+        "-e",
+        "re:/beta/"
+      ],
+      "code": 0,
+      "stdout": "a.rs\n",
+      "stderr": ""
+    },
+    {
+      "label": "slash_e",
+      "args": [
+        "-l",
+        "-e",
+        "foo/bar",
+        "-e",
+        "absentZZZ"
+      ],
+      "code": 0,
+      "stdout": "a.rs\n",
+      "stderr": ""
+    },
+    {
+      "label": "slash_word",
+      "args": [
+        "-l",
+        "-w",
+        "foo/bar"
+      ],
+      "code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "label": "context",
+      "args": [
+        "-C",
+        "1",
+        "alpha"
+      ],
+      "code": 0,
+      "stdout": "a.rs\n1:alpha beta\n2-ALPHA\n1-alpha beta\n2:ALPHA\n3-plain\n3-plain\n4:alpha alpha\n5-foo/bar\n\nb.py\n1:alpha\n2-beta\n\nodd\nname.rs\n1:alpha\n\nsub/c.rs\n1:alpha beta\n\nupper.rs\n1:ALPHA\n",
+      "stderr": ""
+    },
+    {
+      "label": "boolean_lines",
+      "args": [
+        "alpha beta"
+      ],
+      "code": 0,
+      "stdout": "a.rs\n1:alpha beta\n1:alpha beta\n2:ALPHA\n--\n4:alpha alpha\n\nb.py\n1:alpha\n2:beta\n\nsub/c.rs\n1:alpha beta\n1:alpha beta\n",
+      "stderr": ""
+    },
+    {
+      "label": "boolean_counts",
+      "args": [
+        "-c",
+        "alpha beta"
+      ],
+      "code": 0,
+      "stdout": "a.rs:4\nb.py:2\nsub/c.rs:2\n",
+      "stderr": ""
+    },
+    {
+      "label": "counts",
+      "args": [
+        "-c",
+        "alpha"
+      ],
+      "code": 0,
+      "stdout": "a.rs:3\nb.py:1\nodd\nname.rs:1\nsub/c.rs:1\nupper.rs:1\n",
+      "stderr": ""
+    },
+    {
+      "label": "limit_counts",
+      "args": [
+        "-c",
+        "-m",
+        "1",
+        "alpha"
+      ],
+      "code": 0,
+      "stdout": "a.rs:1\n",
+      "stderr": ""
+    },
+    {
+      "label": "negative",
+      "args": [
+        "--",
+        "-absentZZZ"
+      ],
+      "code": 0,
+      "stdout": "a.rs\n1:alpha beta\n\nb.py\n1:alpha\n\nodd\nname.rs\n1:alpha\n\nsub/c.rs\n1:alpha beta\n\nupper.rs\n1:ALPHA\n",
+      "stderr": ""
+    },
+    {
+      "label": "hyphen",
+      "args": [
+        "-absentZZZ"
+      ],
+      "code": 2,
+      "stdout": "",
+      "stderr": "error: unexpected argument '-a' found\n\n  tip: to pass '-a' as a value, use '-- -a'\n\nUsage: fxi [OPTIONS] [PATTERN] [COMMAND]\n\nFor more information, try '--help'.\n"
+    },
+    {
+      "label": "bad_filter",
+      "args": [
+        "alpha size:bogus"
+      ],
+      "code": 0,
+      "stdout": "a.rs\n1:alpha beta\n2:ALPHA\n--\n4:alpha alpha\n\nb.py\n1:alpha\n\nodd\nname.rs\n1:alpha\n\nsub/c.rs\n1:alpha beta\n\nupper.rs\n1:ALPHA\n",
+      "stderr": ""
+    },
+    {
+      "label": "bad_glob",
+      "args": [
+        "alpha path:["
+      ],
+      "code": 0,
+      "stdout": "a.rs\n1:alpha beta\n2:ALPHA\n--\n4:alpha alpha\n\nb.py\n1:alpha\n\nodd\nname.rs\n1:alpha\n\nsub/c.rs\n1:alpha beta\n\nupper.rs\n1:ALPHA\n",
+      "stderr": ""
+    },
+    {
+      "label": "filter_or",
+      "args": [
+        "-l",
+        "ext:rs | ext:py"
+      ],
+      "code": 0,
+      "stdout": "b.py\n",
+      "stderr": ""
+    },
+    {
+      "label": "sort",
+      "args": [
+        "alpha sort:nope"
+      ],
+      "code": 0,
+      "stdout": "a.rs\n1:alpha beta\n2:ALPHA\n--\n4:alpha alpha\n\nb.py\n1:alpha\n\nodd\nname.rs\n1:alpha\n\nsub/c.rs\n1:alpha beta\n\nupper.rs\n1:ALPHA\n",
+      "stderr": ""
+    },
+    {
+      "label": "limit_top",
+      "args": [
+        "alpha top:1"
+      ],
+      "code": 0,
+      "stdout": "a.rs\n1:alpha beta\n2:ALPHA\n--\n4:alpha alpha\n\nb.py\n1:alpha\n\nodd\nname.rs\n1:alpha\n\nsub/c.rs\n1:alpha beta\n\nupper.rs\n1:ALPHA\n",
+      "stderr": ""
+    },
+    {
+      "label": "newline_paths",
+      "args": [
+        "-l",
+        "alpha"
+      ],
+      "code": 0,
+      "stdout": "a.rs\nb.py\nodd\nname.rs\nsub/c.rs\nupper.rs\n",
+      "stderr": ""
+    },
+    {
+      "label": "reload_without_daemon",
+      "args": [
+        "daemon",
+        "reload"
+      ],
+      "code": 0,
+      "stdout": "Daemon is not running. Start it with 'fxi daemon start'\n",
+      "stderr": ""
+    },
+    {
+      "label": "status_without_daemon",
+      "args": [
+        "daemon",
+        "status"
+      ],
+      "code": 0,
+      "stdout": "Daemon is not running\n",
+      "stderr": ""
+    },
+    {
+      "label": "bad_path",
+      "args": [
+        "alpha",
+        "-p",
+        "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo/missing"
+      ],
+      "code": 1,
+      "stdout": "",
+      "stderr": "Error: No such file or directory (os error 2)\n"
+    },
+    {
+      "label": "daemon_query",
+      "args": [
+        "-l",
+        "alpha"
+      ],
+      "code": 0,
+      "stdout": "a.rs\nb.py\nodd\nname.rs\nsub/c.rs\nupper.rs\n",
+      "stderr": ""
+    },
+    {
+      "label": "daemon_start_upgrade_watch",
+      "args": [
+        "daemon",
+        "start",
+        "--watch"
+      ],
+      "code": 0,
+      "stdout": "Daemon is already running\n",
+      "stderr": ""
+    },
+    {
+      "label": "daemon_index_after_start_watch",
+      "args": [
+        "index"
+      ],
+      "code": 0,
+      "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo\nIndex is up to date, no changes detected.\n",
+      "stderr": ""
+    },
+    {
+      "label": "daemon_status",
+      "args": [
+        "daemon",
+        "status"
+      ],
+      "code": 0,
+      "stdout": "fxid daemon status:\n  Uptime: 0s\n  Indexes loaded: 1\n  Total documents: 5\n  Queries served: 1\n  Cache hit rate: 0.0%\n  Memory (approx): 1.0 MB\n  Protocol version: 2\n  Server version: 0.1.0\n  Loaded codebases:\n    - /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo\n",
+      "stderr": ""
+    },
+    {
+      "label": "force_with_live_daemon",
+      "args": [
+        "index",
+        "--force"
+      ],
+      "code": 0,
+      "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo\nIndexing: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo\nIndex complete\nIndex stored at: /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/indexes/repo-cbe7693112a84fe1/generations/gen-16751-1789656848856572000-0\n",
+      "stderr": ""
+    },
+    {
+      "label": "query_after_force",
+      "args": [
+        "-l",
+        "freshUniqueAfterForce"
+      ],
+      "code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "label": "reload_after_force",
+      "args": [
+        "daemon",
+        "reload"
+      ],
+      "code": 0,
+      "stdout": "Reloaded: Reloaded 6 files\n",
+      "stderr": ""
+    },
+    {
+      "label": "query_after_reload",
+      "args": [
+        "-l",
+        "freshUniqueAfterForce"
+      ],
+      "code": 0,
+      "stdout": "added.rs\n",
+      "stderr": ""
+    },
+    {
+      "label": "remove_loaded",
+      "args": [
+        "remove",
+        "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo"
+      ],
+      "code": 0,
+      "stdout": "Removed index for: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo\n",
+      "stderr": ""
+    },
+    {
+      "label": "query_after_remove",
+      "args": [
+        "-l",
+        "alpha"
+      ],
+      "code": 0,
+      "stdout": "a.rs\nb.py\nodd\nname.rs\nsub/c.rs\nupper.rs\n",
+      "stderr": ""
+    },
+    {
+      "label": "list_after_remove",
+      "args": [
+        "list"
+      ],
+      "code": 0,
+      "stdout": "No indexed codebases found.\n",
+      "stderr": ""
+    },
+    {
+      "label": "daemon_stop",
+      "args": [
+        "daemon",
+        "stop"
+      ],
+      "code": 0,
+      "stdout": "Stopping daemon...\nDaemon stopped\n",
+      "stderr": ""
+    },
+    {
+      "label": "build_pipe_fixture",
+      "args": [
+        "index",
+        "--force"
+      ],
+      "code": 0,
+      "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo\nIndexing: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo\nIndex complete\nIndex stored at: /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/indexes/repo-cbe7693112a84fe1/generations/gen-16760-1789656850930750000-0\n",
+      "stderr": ""
+    },
+    {
+      "label": "broken_pipe",
+      "code": 1,
+      "stderr": "Error: Broken pipe (os error 32)\n"
+    },
+    {
+      "label": "stats_before_delete",
+      "args": [
+        "stats"
+      ],
+      "code": 0,
+      "stdout": "Index Statistics\n================\n\nRoot path:        /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo\nIndex location:   /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/indexes/repo-cbe7693112a84fe1/generations/gen-16760-1789656850930750000-0\nIndex version:    2\nDocument count:   7\nSegment count:    1\nStop-grams:       0\n\nFiles by language:\n  Rust            6\n  Python          1\n\nIndex size:       41.50 KB\n\nCreated:          2026-09-17 14:54:10 UTC\nUpdated:          2026-09-17 14:54:10 UTC\n",
+      "stderr": ""
+    },
+    {
+      "label": "index_after_delete",
+      "args": [
+        "index"
+      ],
+      "code": 0,
+      "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo\nDetected 1 changes: 0 new, 0 modified, 1 deleted (14.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0002: 0 files indexed, 1 tombstones\n",
+      "stderr": ""
+    },
+    {
+      "label": "stats_after_delete",
+      "args": [
+        "stats"
+      ],
+      "code": 0,
+      "stdout": "Index Statistics\n================\n\nRoot path:        /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/repo\nIndex location:   /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/indexes/repo-cbe7693112a84fe1/generations/gen-16763-1789656850996741000-0\nIndex version:    2\nDocument count:   7\nSegment count:    1\nStop-grams:       0\n\nFiles by language:\n  Rust            6\n  Python          1\n\nIndex size:       41.50 KB\n\nCreated:          2026-09-17 14:54:10 UTC\nUpdated:          2026-09-17 14:54:11 UTC\n",
+      "stderr": ""
+    },
+    {
+      "label": "unindexed_search",
+      "args": [
+        "needle",
+        "-p",
+        "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-cli-audit-7ix17aoh/unindexed"
+      ],
+      "code": 1,
+      "stdout": "",
+      "stderr": "Error: No index found. Run 'fxi index' first.\n"
+    }
+  ]
+}

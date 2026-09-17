@@ -1,0 +1,6 @@
+{
+  "idle_timeout_response": "{\"type\":\"Error\",\"message\":\"Invalid request: Resource temporarily unavailable (os error 35)\"}",
+  "new_client_after_32_seconds": "BrokenPipeError: [Errno 32] Broken pipe",
+  "log": "Running daemon in foreground (Ctrl+C to stop)...\nfxid: config: watch=false, debounce=1ms, delta_flush=0s, merge_segments=15, rebuild_threshold=30%\nfxid: listening on /tmp/fxi-idle-16401.sock\nfxid: too many connections, rejecting\n",
+  "binary_sha256": "8879d77ae4b2c6350bf33b1a071bda9dde417d2ff36b3451d6e1cc9107a7c6a2"
+}

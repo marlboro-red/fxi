@@ -406,6 +406,10 @@ Press `F1` or `?` to show help in the TUI.
 
 ## Performance and validation
 
+The latest [correctness, CLI UX, and architecture audit](docs/audit-2026-09-18/AUDIT.md)
+records unresolved findings with reproductions and a prioritized repair plan.
+Passing tests and benchmark gains do not imply those findings are fixed.
+
 Current measurements, correctness fixes, research experiments, and remaining gaps
 are documented in [the live-update experiments](docs/performance-round7/NOTES.md),
 [the source-pack comparisons](docs/performance-round6/NOTES.md),

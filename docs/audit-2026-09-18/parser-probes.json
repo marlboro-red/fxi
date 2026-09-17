@@ -1,0 +1,43 @@
+{
+  "command": [
+    "rustc",
+    "--edition=2024",
+    "-Awarnings",
+    "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-parser-audit-tyds0ahl/probe.rs",
+    "-o",
+    "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-parser-audit-tyds0ahl/probe"
+  ],
+  "source": "#[path=\"/Users/cjpark/Desktop/Projects/fxi/src/query/parser.rs\"] mod parser; fn main() { let q=std::env::args().nth(1).unwrap(); println!(\"{:?}\",parser::parse_query(&q)); }",
+  "probes": [
+    {
+      "query": "mtime:18446744073709551615",
+      "returncode": 101,
+      "stdout": "",
+      "stderr": "\nthread 'main' (2081067) panicked at /Users/cjpark/Desktop/Projects/fxi/src/query/parser.rs:418:43:\nattempt to add with overflow\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+    },
+    {
+      "query": "\"a\\\"b\"",
+      "returncode": 0,
+      "stdout": "Query { root: And([Phrase(\"a\\\\\"), Literal(\"b\"), Phrase(\"\")]), filters: QueryFilters { path: None, filename: None, ext: None, lang: None, size_min: None, size_max: None, line_start: None, line_end: None, mtime_min: None, mtime_max: None }, options: QueryOptions { sort: Score, limit: 100, case_insensitive: false } }\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo.bar",
+      "returncode": 0,
+      "stdout": "Query { root: And([Literal(\"foo\"), Literal(\".bar\")]), filters: QueryFilters { path: None, filename: None, ext: None, lang: None, size_min: None, size_max: None, line_start: None, line_end: None, mtime_min: None, mtime_max: None }, options: QueryOptions { sort: Score, limit: 100, case_insensitive: false } }\n",
+      "stderr": ""
+    },
+    {
+      "query": "foo-bar",
+      "returncode": 0,
+      "stdout": "Query { root: And([Literal(\"foo\"), Not(Literal(\"bar\"))]), filters: QueryFilters { path: None, filename: None, ext: None, lang: None, size_min: None, size_max: None, line_start: None, line_end: None, mtime_min: None, mtime_max: None }, options: QueryOptions { sort: Score, limit: 100, case_insensitive: false } }\n",
+      "stderr": ""
+    },
+    {
+      "query": "^99999999999999999999999999999999999999999999999999999:foo",
+      "returncode": 0,
+      "stdout": "Query { root: BoostedLiteral { text: \"foo\", boost: inf }, filters: QueryFilters { path: None, filename: None, ext: None, lang: None, size_min: None, size_max: None, line_start: None, line_end: None, mtime_min: None, mtime_max: None }, options: QueryOptions { sort: Score, limit: 100, case_insensitive: false } }\n",
+      "stderr": ""
+    }
+  ]
+}

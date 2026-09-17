@@ -1,0 +1,25 @@
+{
+  "audited_commit": "aaf0b148ba73cec568ba3f973fc88f09194e9a65",
+  "recorded_at_utc": "2026-09-17T14:56:41.728004+00:00",
+  "production_changes": false,
+  "rust_all_targets_passed": true,
+  "rust_test_executions": 774,
+  "extension_tests_passed": 91,
+  "extension_typecheck_passed": true,
+  "cli_lifecycle_observations": 54,
+  "query_cli_cases": 54,
+  "query_wire_probes": 5,
+  "standalone_parser_probes": 5,
+  "independent_regex_comparisons": 82,
+  "regex_oracle_fixture_files": 80,
+  "regex_mismatches": 0,
+  "pty_error_cleanup_probe": "reproduced terminal state leak",
+  "extension_socket_characterization_tests": 2,
+  "unix_idle_connection_probe": "64 slots remain occupied past timeout",
+  "path_bytes_probe": "unsupported by current macOS filesystem; code inspection only",
+  "notes": [
+    "Rust library tests also execute in the CLI binary; count is executions, not distinct cases.",
+    "Current speed comparisons were not rerun; performance priorities distinguish earlier pinned measurements from hypotheses.",
+    "Disposable daemon only was deliberately crashed; user daemon and source repositories untouched."
+  ]
+}

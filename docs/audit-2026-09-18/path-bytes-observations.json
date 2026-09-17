@@ -1,0 +1,4 @@
+{
+  "status": "unsupported_on_this_filesystem",
+  "error": "[Errno 92] Illegal byte sequence: b'/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-path-audit-ixx4jqfq/repo/bad-\\xff.rs'"
+}

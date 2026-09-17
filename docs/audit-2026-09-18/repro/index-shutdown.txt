@@ -1,0 +1,5 @@
+initial Search
+shutdown {'type': 'ShuttingDown'}
+daemon still alive after graceful ack: True
+disk search 0  
+fixture /var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-audit-stop-uhqz0lr4
