@@ -149,7 +149,7 @@ impl QueryPlanner {
         }
 
         QueryPlan {
-            steps: self.steps.drain(..).collect(),
+            steps: std::mem::take(&mut self.steps),
             verification,
         }
     }

@@ -144,27 +144,27 @@ pub fn is_daemon_running() -> bool {
     }
 
     // Read PID and check if process exists
-    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            // Try to open the process to check if it exists
-            #[link(name = "kernel32")]
-            unsafe extern "system" {
-                fn OpenProcess(
-                    dwDesiredAccess: u32,
-                    bInheritHandle: i32,
-                    dwProcessId: u32,
-                ) -> *mut std::ffi::c_void;
-                fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
-            }
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_path)
+        && let Ok(pid) = pid_str.trim().parse::<u32>()
+    {
+        // Try to open the process to check if it exists
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn OpenProcess(
+                dwDesiredAccess: u32,
+                bInheritHandle: i32,
+                dwProcessId: u32,
+            ) -> *mut std::ffi::c_void;
+            fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+        }
 
-            const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 
-            unsafe {
-                let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-                if !handle.is_null() {
-                    CloseHandle(handle);
-                    return true;
-                }
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if !handle.is_null() {
+                CloseHandle(handle);
+                return true;
             }
         }
     }

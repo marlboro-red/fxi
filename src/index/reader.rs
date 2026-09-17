@@ -1313,7 +1313,9 @@ fn read_documents_version(index_path: &Path, version: u32) -> Result<Vec<Documen
         "Index count exceeds file bounds"
     );
     Ok(data[4..]
-        .chunks_exact(30)
+        .as_chunks::<30>()
+        .0
+        .iter()
         .take(count)
         .map(|record| {
             let raw_mtime = le64(&record[16..]);

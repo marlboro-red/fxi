@@ -34,7 +34,7 @@ fn main() -> anyhow::Result<()> {
         );
         let count = u32::from_le_bytes(dict[..4].try_into()?);
         anyhow::ensure!(count as usize == (dict.len() - 4) / 20, "invalid count");
-        for entry in dict[4..].chunks_exact(20) {
+        for entry in dict[4..].as_chunks::<20>().0 {
             let offset = usize::try_from(u64::from_le_bytes(entry[4..12].try_into()?))?;
             let length = u32::from_le_bytes(entry[12..16].try_into()?) as usize;
             let frequency = u32::from_le_bytes(entry[16..20].try_into()?);
