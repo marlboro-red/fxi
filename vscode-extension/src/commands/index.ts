@@ -20,19 +20,27 @@ export function registerIndexCommands(
         vscode.TaskScope.Workspace,
         "Build Index",
         "fxi",
-        new vscode.ShellExecution(bin, ["index", "--force", root])
+        new vscode.ProcessExecution(bin, ["index", "--force", root])
       );
 
       // After the task completes, reload the index in the daemon
       const disposable = vscode.tasks.onDidEndTaskProcess((e) => {
-        if (e.execution.task === task && e.exitCode === 0 && client.connected) {
-          client.reload(root).catch(() => {});
-        }
+        if (e.execution.task !== task) { return; }
         disposable.dispose();
+        if (e.exitCode === 0 && client.connected) {
+          client.reload(root).then((result) => {
+            if (!result.success) { vscode.window.showErrorMessage(`FXI reload failed: ${result.message}`); }
+          }).catch((error) => vscode.window.showErrorMessage(`FXI reload failed: ${error}`));
+        }
       });
       context.subscriptions.push(disposable);
 
-      await vscode.tasks.executeTask(task);
+      try {
+        await vscode.tasks.executeTask(task);
+      } catch (error) {
+        disposable.dispose();
+        vscode.window.showErrorMessage(`Failed to start indexing: ${error}`);
+      }
     })
   );
 }

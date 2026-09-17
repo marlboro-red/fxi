@@ -93,3 +93,7 @@ export enum TextEditorRevealType {
   InCenterIfOutsideViewport = 2,
   AtTop = 3,
 }
+
+export class ProcessExecution {
+  constructor(public process: string, public args?: string[]) {}
+}

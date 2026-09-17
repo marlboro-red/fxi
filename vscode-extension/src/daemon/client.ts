@@ -74,6 +74,8 @@ export class DaemonClient extends EventEmitter {
   private handleDisconnect(): void {
     if (this.socket) {
       this.socket.removeAllListeners();
+      // An already queued connection error can arrive after disposal.
+      this.socket.on("error", () => {});
       this.socket.destroy();
       this.socket = null;
     }
@@ -334,6 +336,8 @@ export class DaemonClient extends EventEmitter {
     this.legacyQueue = [];
     if (this.socket) {
       this.socket.removeAllListeners();
+      // An already queued connection error can arrive after disposal.
+      this.socket.on("error", () => {});
       this.socket.destroy();
       this.socket = null;
     }

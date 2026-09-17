@@ -1,15 +1,7 @@
 import * as vscode from "vscode";
+import { execFile } from "child_process";
 import { DaemonClient } from "../daemon/client";
 import { getBinaryPath } from "../ui/workspace";
-
-function shellQuote(s: string): string {
-  if (process.platform === "win32") {
-    // PowerShell / cmd: wrap in double quotes, escape inner double quotes
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  // Unix: wrap in single quotes, escape inner single quotes
-  return `'${s.replace(/'/g, "'\\''")}'`;
-}
 
 export function registerDaemonCommands(
   context: vscode.ExtensionContext,
@@ -18,8 +10,16 @@ export function registerDaemonCommands(
   context.subscriptions.push(
     vscode.commands.registerCommand("fxi.startDaemon", async () => {
       const bin = getBinaryPath();
-      const terminal = vscode.window.createTerminal({ name: "FXI Daemon", hideFromUser: true });
-      terminal.sendText(`${shellQuote(bin)} daemon start --watch`);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          execFile(bin, ["daemon", "start", "--watch"], { timeout: 15000 }, (error) => {
+            if (error) { reject(error); } else { resolve(); }
+          });
+        });
+      } catch (error) {
+        vscode.window.showErrorMessage(`Failed to start FXI daemon: ${error}`);
+        return;
+      }
 
       // Try to connect with retries to verify daemon actually started
       let connected = false;

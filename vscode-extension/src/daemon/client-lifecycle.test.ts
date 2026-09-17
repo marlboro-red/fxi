@@ -39,6 +39,7 @@ describe('pending socket ownership', () => {
     client.dispose();
     expect(socket.destroy).toHaveBeenCalledOnce();
     socket.emit('connect');
+    expect(() => socket.emit('error', new Error('late connection error'))).not.toThrow();
     expect(client.connected).toBe(false);
     client.dispose();
   });
