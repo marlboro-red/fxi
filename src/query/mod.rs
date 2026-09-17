@@ -47,7 +47,8 @@ pub mod scorer;
 #[allow(unused_imports)]
 pub use executor::ContentMatchResult;
 pub use executor::QueryExecutor;
-pub use parser::parse_query;
+#[allow(unused_imports)] // Both entry points remain part of the public library API.
+pub use parser::{parse_query, try_parse_query};
 // Re-exports for public API
 #[allow(unused_imports)]
 pub use parser::{Query, QueryNode};

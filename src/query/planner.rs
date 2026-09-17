@@ -45,6 +45,7 @@ pub enum PlanStep {
 /// Filter step for post-narrowing
 #[derive(Debug)]
 pub struct FilterStep {
+    pub search_scope: Option<std::path::PathBuf>,
     pub path_glob: Option<String>,
     pub filename: Option<String>,
     pub extension: Option<String>,
@@ -92,9 +93,18 @@ pub enum VerificationStep {
 
 impl QueryPlan {
     /// Create a query plan from a parsed query
+    #[allow(dead_code)] // Retained public library API; executors use the fallible entry point.
     pub fn from_query(query: &Query) -> Self {
+        Self::try_from_query(query).unwrap_or_else(|_| Self {
+            steps: Vec::new(),
+            verification: Some(VerificationStep::Regex("(".into())),
+        })
+    }
+
+    pub fn try_from_query(query: &Query) -> Result<Self, super::parser::QueryError> {
+        query.validate()?;
         let mut planner = QueryPlanner::new(query.options.case_insensitive);
-        planner.plan(query)
+        Ok(planner.plan(query))
     }
 }
 
@@ -123,7 +133,8 @@ impl QueryPlanner {
         // comparisons) are far more expensive than the index lookups above,
         // so they should only see the already-narrowed candidate set instead
         // of scanning every document in the index.
-        if query.filters.path.is_some()
+        if query.filters.search_scope.is_some()
+            || query.filters.path.is_some()
             || query.filters.filename.is_some()
             || query.filters.ext.is_some()
             || query.filters.lang.is_some()
@@ -135,6 +146,7 @@ impl QueryPlanner {
             || query.filters.line_end.is_some()
         {
             self.steps.push(PlanStep::Filter(FilterStep {
+                search_scope: query.filters.search_scope.clone(),
                 path_glob: query.filters.path.clone(),
                 filename: query.filters.filename.clone(),
                 extension: query.filters.ext.clone(),
@@ -158,6 +170,7 @@ impl QueryPlanner {
     fn plan_node(&mut self, node: &QueryNode) -> (Vec<PlanStep>, Option<VerificationStep>) {
         match node {
             QueryNode::Empty => (Vec::new(), None),
+            QueryNode::Invalid(_) => unreachable!("queries are validated before planning"),
 
             QueryNode::Literal(text) => (
                 literal_steps(text, true),

@@ -98,11 +98,19 @@ impl Scorer {
         score += self.recency_bonus(ctx.mtime);
 
         // Apply boost multiplier (default 1.0 if not set)
-        let boost = if ctx.boost > 0.0 { ctx.boost } else { 1.0 };
+        let boost = if ctx.boost.is_finite() && ctx.boost > 0.0 {
+            ctx.boost
+        } else {
+            1.0
+        };
         score *= boost;
 
         // Ensure score is non-negative
-        score.max(0.1)
+        if score.is_nan() {
+            0.1
+        } else {
+            score.clamp(0.1, f32::MAX)
+        }
     }
 
     /// Calculate score contribution from match count
@@ -143,6 +151,26 @@ impl Scorer {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn extreme_public_scoring_inputs_stay_finite_and_json_safe() {
+        for weight in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN, f32::MAX, 1.0] {
+            let scorer = Scorer::new(ScoringWeights {
+                match_count_weight: weight,
+                ..Default::default()
+            });
+            for boost in [f32::INFINITY, f32::NAN, f32::MAX, 0.0, 1.0] {
+                let score = scorer.calculate_score(&ScoreContext {
+                    match_count: usize::MAX,
+                    boost,
+                    ..Default::default()
+                });
+                assert!(score.is_finite());
+                assert!(score >= 0.1);
+                assert_ne!(serde_json::to_string(&score).unwrap(), "null");
+            }
+        }
+    }
 
     #[test]
     fn test_default_weights() {

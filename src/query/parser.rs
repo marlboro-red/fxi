@@ -9,6 +9,9 @@ pub struct Query {
 /// Query AST node
 #[derive(Debug, Clone)]
 pub enum QueryNode {
+    /// Bounded compatibility-parser error, rejected by every executor.
+    #[allow(dead_code)] // Compatibility library API; the CLI uses strict parsing.
+    Invalid(QueryError),
     /// Simple literal search
     Literal(String),
     /// Simple literal search with boost
@@ -34,6 +37,8 @@ pub enum QueryNode {
 /// Query filters
 #[derive(Debug, Clone, Default)]
 pub struct QueryFilters {
+    /// Root-relative file or subtree selected by the client (component prefix).
+    pub search_scope: Option<std::path::PathBuf>,
     /// Path glob pattern (path:src/*.rs)
     pub path: Option<String>,
     /// Filename pattern (file:foo or file:*.rs)
@@ -56,6 +61,10 @@ pub struct QueryFilters {
 impl QueryFilters {
     /// Check if any filter is set
     pub fn has_any(&self) -> bool {
+        self.search_scope.is_some() || self.has_query_filters()
+    }
+
+    fn has_query_filters(&self) -> bool {
         self.path.is_some()
             || self.filename.is_some()
             || self.ext.is_some()
@@ -76,6 +85,8 @@ pub struct QueryOptions {
     pub sort: SortOrder,
     /// Maximum results
     pub limit: usize,
+    /// True when `top:` explicitly set the limit.
+    pub explicit_limit: bool,
     /// Case-insensitive matching (-i): phrases and regexes ignore case.
     /// Bare token searches are case-insensitive regardless of this flag.
     pub case_insensitive: bool,
@@ -86,6 +97,7 @@ impl Default for QueryOptions {
         Self {
             sort: SortOrder::Score,
             limit: 100,
+            explicit_limit: false,
             case_insensitive: false,
         }
     }
@@ -99,16 +111,59 @@ pub enum SortOrder {
     Path,
 }
 
-/// Parse a query string into a Query structure
-pub fn parse_query(input: &str) -> Query {
-    let mut parser = QueryParser::new(input);
-    parser.parse()
+/// Maximum accepted source bytes, AST nodes and recursive group depth.
+/// Keeping these modest also bounds recursive planning, verification and drop.
+pub const MAX_QUERY_BYTES: usize = 64 * 1024;
+pub const MAX_QUERY_NODES: usize = 1024;
+pub const MAX_QUERY_DEPTH: usize = 32;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryError {
+    pub message: String,
+    pub offset: usize,
 }
 
-/// Query parser
+impl std::fmt::Display for QueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} at byte {}", self.message, self.offset)
+    }
+}
+impl std::error::Error for QueryError {}
+
+type ParseResult<T> = Result<T, QueryError>;
+
+/// Compatibility API: invalid input becomes an error node. Interactive and
+/// command-line clients should use `try_parse_query` to display the error.
+#[allow(dead_code)] // Retained public library API, unused by the strict CLI.
+pub fn parse_query(input: &str) -> Query {
+    try_parse_query(input).unwrap_or_else(|error| Query {
+        root: QueryNode::Invalid(error),
+        filters: QueryFilters::default(),
+        options: QueryOptions::default(),
+    })
+}
+
+/// Parse a complete, bounded query, rejecting malformed or ambiguous syntax.
+pub fn try_parse_query(input: &str) -> ParseResult<Query> {
+    if input.len() > MAX_QUERY_BYTES {
+        return Err(QueryError {
+            message: format!("Query exceeds {MAX_QUERY_BYTES} bytes"),
+            offset: 0,
+        });
+    }
+    let query = QueryParser::new(input).parse()?;
+    query.validate()?;
+    Ok(query)
+}
+
 struct QueryParser<'a> {
     input: &'a str,
     pos: usize,
+    depth: usize,
+    unary: usize,
+    nodes: usize,
+    directives: usize,
+    seen_fields: std::collections::HashSet<String>,
     filters: QueryFilters,
     options: QueryOptions,
 }
@@ -118,381 +173,530 @@ impl<'a> QueryParser<'a> {
         Self {
             input,
             pos: 0,
+            depth: 0,
+            unary: 0,
+            nodes: 0,
+            directives: 0,
+            seen_fields: std::collections::HashSet::new(),
             filters: QueryFilters::default(),
             options: QueryOptions::default(),
         }
     }
 
-    fn parse(&mut self) -> Query {
-        let root = self.parse_or();
-        Query {
+    fn error(&self, message: impl Into<String>) -> QueryError {
+        QueryError {
+            message: message.into(),
+            offset: self.pos,
+        }
+    }
+
+    fn parse(&mut self) -> ParseResult<Query> {
+        self.skip_whitespace();
+        let root = if self.is_eof() {
+            QueryNode::Empty
+        } else {
+            self.parse_or()?
+        };
+        self.skip_whitespace();
+        if !self.is_eof() {
+            return Err(self.error("Unexpected closing delimiter"));
+        }
+        if self
+            .filters
+            .size_min
+            .zip(self.filters.size_max)
+            .is_some_and(|(a, b)| a > b)
+            || self
+                .filters
+                .mtime_min
+                .zip(self.filters.mtime_max)
+                .is_some_and(|(a, b)| a > b)
+        {
+            return Err(self.error("Filter range is empty or reversed"));
+        }
+        Ok(Query {
             root,
             filters: self.filters.clone(),
             options: self.options.clone(),
-        }
+        })
     }
 
-    fn parse_or(&mut self) -> QueryNode {
-        let mut nodes = vec![self.parse_and()];
-
+    fn parse_or(&mut self) -> ParseResult<QueryNode> {
+        let directives_before = self.directives;
+        let mut nodes = vec![self.parse_and()?];
         self.skip_whitespace();
         while self.consume_char('|') {
             self.skip_whitespace();
-            nodes.push(self.parse_and());
+            nodes.push(self.parse_and()?);
             self.skip_whitespace();
         }
-
-        if nodes.len() == 1 {
+        if nodes.len() > 1 && self.directives != directives_before {
+            return Err(self.error("Filters/options are global; write `filter:value (a | b)`"));
+        }
+        Ok(if nodes.len() == 1 {
             nodes.pop().unwrap()
         } else {
             QueryNode::Or(nodes)
-        }
+        })
     }
 
-    fn parse_and(&mut self) -> QueryNode {
+    fn parse_and(&mut self) -> ParseResult<QueryNode> {
         let mut nodes = Vec::new();
-
+        let mut parsed_any = false;
         loop {
             self.skip_whitespace();
-
-            if self.is_eof() || self.peek_char() == Some(')') || self.peek_char() == Some('|') {
+            if self.is_eof() || matches!(self.peek_char(), Some(')' | '|')) {
                 break;
             }
-
-            nodes.push(self.parse_unary());
+            parsed_any = true;
+            let node = self.parse_unary()?;
+            if !matches!(node, QueryNode::Empty) {
+                nodes.push(node);
+            }
         }
-
-        match nodes.len() {
+        if !parsed_any {
+            return Err(self.error("Expected a search term"));
+        }
+        Ok(match nodes.len() {
             0 => QueryNode::Empty,
             1 => nodes.pop().unwrap(),
             _ => QueryNode::And(nodes),
-        }
+        })
     }
 
-    fn parse_unary(&mut self) -> QueryNode {
-        self.skip_whitespace();
-
-        if self.consume_char('-') {
-            let inner = self.parse_primary();
-            return QueryNode::Not(Box::new(inner));
+    fn parse_unary(&mut self) -> ParseResult<QueryNode> {
+        self.nodes += 1;
+        if self.nodes > MAX_QUERY_NODES {
+            return Err(self.error("Query has too many terms"));
         }
-
-        // Handle boost prefix ^term or ^N:term (e.g., ^foo, ^2:foo, ^1.5:term)
+        self.skip_whitespace();
+        if self.consume_char('-') {
+            self.unary += 1;
+            let inner = self.parse_primary()?;
+            self.unary -= 1;
+            return Ok(QueryNode::Not(Box::new(inner)));
+        }
         if self.consume_char('^') {
-            // Try to parse optional boost value
-            let mut boost = 2.0_f32; // Default boost value
-            let boost_start = self.pos;
-
-            // Check for explicit boost value like ^2:term or ^1.5:term
-            while !self.is_eof() {
-                let ch = self.peek_char().unwrap();
-                if ch.is_ascii_digit() || ch == '.' {
-                    self.advance();
-                } else if ch == ':' {
-                    let boost_str = &self.input[boost_start..self.pos];
-                    if let Ok(b) = boost_str.parse::<f32>() {
-                        boost = b;
-                    }
-                    self.advance(); // consume ':'
-                    break;
-                } else {
-                    // No explicit boost value, reset position
-                    self.pos = boost_start;
-                    break;
-                }
+            let start = self.pos;
+            while self
+                .peek_char()
+                .is_some_and(|c| c.is_ascii_digit() || c == '.')
+            {
+                self.advance();
             }
-
-            let inner = self.parse_primary();
+            let boost = if self.consume_char(':') {
+                let value = &self.input[start..self.pos - 1];
+                let parsed = value
+                    .parse::<f32>()
+                    .map_err(|_| self.error("Invalid boost"))?;
+                if !parsed.is_finite() || parsed < 0.0 {
+                    return Err(self.error("Boost must be finite and non-negative"));
+                }
+                parsed
+            } else {
+                self.pos = start;
+                2.0
+            };
+            self.unary += 1;
+            let inner = self.parse_primary()?;
+            self.unary -= 1;
             return match inner {
-                QueryNode::Literal(text) => QueryNode::BoostedLiteral { text, boost },
-                QueryNode::Phrase(text) => QueryNode::BoostedPhrase { text, boost },
-                other => other, // Can't boost complex nodes, return as-is
+                QueryNode::Literal(text) => Ok(QueryNode::BoostedLiteral { text, boost }),
+                QueryNode::Phrase(text) => Ok(QueryNode::BoostedPhrase { text, boost }),
+                _ => Err(self.error("Only literals and phrases can be boosted")),
             };
         }
-
         self.parse_primary()
     }
 
-    fn parse_primary(&mut self) -> QueryNode {
+    fn parse_primary(&mut self) -> ParseResult<QueryNode> {
         self.skip_whitespace();
-
-        // Parenthesized expression
         if self.consume_char('(') {
-            let node = self.parse_or();
-            self.consume_char(')');
-            return node;
+            if self.depth >= MAX_QUERY_DEPTH {
+                return Err(self.error("Query nesting is too deep"));
+            }
+            self.depth += 1;
+            let node = self.parse_or()?;
+            self.depth -= 1;
+            if !self.consume_char(')') {
+                return Err(self.error("Unclosed parenthesized expression"));
+            }
+            return Ok(node);
         }
-
-        // Quoted phrase
         if self.peek_char() == Some('"') {
-            return self.parse_phrase();
+            return self.parse_phrase().map(QueryNode::Phrase);
         }
-
-        // Regex
         if self.remaining().starts_with("re:/") {
             return self.parse_regex();
         }
-
-        // Field filter or literal
         self.parse_term()
     }
 
-    fn parse_phrase(&mut self) -> QueryNode {
+    fn parse_phrase(&mut self) -> ParseResult<String> {
         self.consume_char('"');
-        let start = self.pos;
-
-        while !self.is_eof() && self.peek_char() != Some('"') {
+        let mut text = String::new();
+        while let Some(ch) = self.peek_char() {
             self.advance();
-        }
-
-        let phrase = self.input[start..self.pos].to_string();
-        self.consume_char('"');
-
-        QueryNode::Phrase(phrase)
-    }
-
-    fn parse_regex(&mut self) -> QueryNode {
-        // Skip "re:/"
-        self.pos += 4;
-        let start = self.pos;
-
-        // Find closing /
-        while !self.is_eof() && self.peek_char() != Some('/') {
-            self.advance();
-        }
-
-        let pattern = self.input[start..self.pos].to_string();
-        self.consume_char('/');
-
-        QueryNode::Regex(pattern)
-    }
-
-    fn parse_term(&mut self) -> QueryNode {
-        let start = self.pos;
-
-        // Check for field prefix
-        while !self.is_eof() {
-            let ch = self.peek_char().unwrap();
-            if ch.is_alphanumeric() || ch == '_' || ch == ':' {
+            if ch == '"' {
+                return Ok(text);
+            }
+            if ch == '\\' && matches!(self.peek_char(), Some('"' | '\\')) {
+                text.push(self.peek_char().unwrap());
                 self.advance();
-                if ch == ':' {
-                    let field = &self.input[start..self.pos - 1];
-                    return self.parse_field(field);
+            } else {
+                text.push(ch);
+            }
+        }
+        Err(self.error("Unclosed quoted phrase"))
+    }
+
+    fn parse_regex(&mut self) -> ParseResult<QueryNode> {
+        self.pos += 4;
+        let mut pattern = String::new();
+        // 0: first class token, 1: after initial ^, 2: class has content.
+        let mut classes: Vec<u8> = Vec::new();
+        while let Some(ch) = self.peek_char() {
+            self.advance();
+            if ch == '\\' {
+                let next = self
+                    .peek_char()
+                    .ok_or_else(|| self.error("Unclosed regex escape"))?;
+                self.advance();
+                // Slash is a query delimiter, not a Rust regex metacharacter.
+                if next != '/' {
+                    pattern.push('\\');
+                }
+                pattern.push(next);
+                if let Some(state) = classes.last_mut() {
+                    *state = 2;
+                }
+            } else if ch == '/' && classes.is_empty() {
+                // Extended-mode whitespace can make a leading `]` literal
+                // even when the cheap delimiter scan saw class contents.
+                // Let the regex parser resolve that ambiguous boundary.
+                let unclosed_class = regex_syntax::ast::parse::Parser::new()
+                    .parse(&pattern)
+                    .is_err_and(|error| {
+                        matches!(error.kind(), regex_syntax::ast::ErrorKind::ClassUnclosed)
+                    });
+                if unclosed_class {
+                    classes.push(2);
+                    pattern.push('/');
+                } else {
+                    return Ok(QueryNode::Regex(pattern));
                 }
             } else {
-                break;
-            }
-        }
-
-        // Regular word
-        let word = self.input[start..self.pos].to_string();
-        if word.is_empty() {
-            // Try to consume any non-whitespace
-            while !self.is_eof() {
-                let ch = self.peek_char().unwrap();
-                if ch.is_whitespace() || ch == '|' || ch == ')' || ch == '(' {
-                    break;
+                if ch == '[' {
+                    if let Some(state) = classes.last_mut() {
+                        *state = 2;
+                    }
+                    classes.push(0);
+                } else if let Some(state) = classes.last_mut() {
+                    if ch == ']' && *state == 2 {
+                        classes.pop();
+                    } else if ch == '^' && *state == 0 {
+                        *state = 1;
+                    } else {
+                        *state = 2;
+                    }
                 }
-                self.advance();
+                pattern.push(ch);
             }
-            let word = self.input[start..self.pos].to_string();
-            if word.is_empty() {
-                return QueryNode::Empty;
-            }
-            return QueryNode::Literal(word);
         }
-
-        QueryNode::Literal(word)
+        Err(self.error("Unclosed regex; expected `/`"))
     }
 
-    fn parse_field(&mut self, field: &str) -> QueryNode {
-        let value_start = self.pos;
-
-        // Read value until whitespace or special char
-        while !self.is_eof() {
-            let ch = self.peek_char().unwrap();
-            if ch.is_whitespace() || ch == '|' || ch == ')' {
+    fn parse_term(&mut self) -> ParseResult<QueryNode> {
+        let start = self.pos;
+        // Field prefixes are recognized only at the start of a term.
+        while self
+            .peek_char()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        {
+            self.advance();
+        }
+        if self.consume_char(':') {
+            let field = self.input[start..self.pos - 1].to_string();
+            if matches!(
+                field.to_ascii_lowercase().as_str(),
+                "path"
+                    | "file"
+                    | "name"
+                    | "ext"
+                    | "lang"
+                    | "size"
+                    | "line"
+                    | "mtime"
+                    | "near"
+                    | "sort"
+                    | "top"
+            ) {
+                return self.parse_field(&field);
+            }
+        }
+        self.pos = start;
+        let mut internal_parens = 0usize;
+        while let Some(ch) = self.peek_char() {
+            if ch.is_whitespace() || ch == '|' || (ch == ')' && internal_parens == 0) {
                 break;
+            }
+            if ch == '(' {
+                internal_parens += 1;
+            }
+            if ch == ')' {
+                internal_parens -= 1;
             }
             self.advance();
         }
+        if self.pos == start {
+            return Err(self.error("Expected a search term"));
+        }
+        Ok(QueryNode::Literal(self.input[start..self.pos].to_string()))
+    }
 
-        let value = self.input[value_start..self.pos].to_string();
-
-        match field.to_lowercase().as_str() {
-            "path" => {
-                self.filters.path = Some(value);
-                QueryNode::Empty
+    fn parse_field(&mut self, field: &str) -> ParseResult<QueryNode> {
+        let field = field.to_ascii_lowercase();
+        let value = if self.peek_char() == Some('"') {
+            self.parse_phrase()?
+        } else {
+            let start = self.pos;
+            while self
+                .peek_char()
+                .is_some_and(|c| !c.is_whitespace() && c != '|' && c != ')')
+            {
+                self.advance();
             }
-            "file" | "name" => {
-                self.filters.filename = Some(value);
-                QueryNode::Empty
+            self.input[start..self.pos].to_string()
+        };
+        if value.is_empty() {
+            return Err(self.error(format!("Missing value for {field}")));
+        }
+        if field == "near" {
+            return self.parse_near_query(&value);
+        }
+        if self.depth != 0 || self.unary != 0 {
+            return Err(self.error("Filters/options cannot be grouped, negated or boosted"));
+        }
+        if !matches!(field.as_str(), "sort" | "top") {
+            self.directives += 1;
+        }
+        let canonical = if field == "name" { "file" } else { &field };
+        let key = if matches!(canonical, "size" | "mtime") {
+            format!(
+                "{canonical}{}",
+                value
+                    .chars()
+                    .next()
+                    .filter(|c| *c == '>' || *c == '<')
+                    .unwrap_or('=')
+            )
+        } else {
+            canonical.to_string()
+        };
+        if !self.seen_fields.insert(key) {
+            return Err(self.error(format!("Duplicate {field} filter/option")));
+        }
+        match field.as_str() {
+            "path" | "file" | "name" => {
+                if value.contains(['*', '?', '[', ']', '{', '}']) {
+                    globset::Glob::new(&value)
+                        .map_err(|e| self.error(format!("Invalid glob: {e}")))?;
+                }
+                if field == "path" {
+                    self.filters.path = Some(value);
+                } else {
+                    self.filters.filename = Some(value);
+                }
             }
-            "ext" => {
-                self.filters.ext = Some(value);
-                QueryNode::Empty
-            }
+            "ext" => self.filters.ext = Some(value),
             "lang" => {
+                if !matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "rust"
+                        | "rs"
+                        | "python"
+                        | "py"
+                        | "javascript"
+                        | "js"
+                        | "typescript"
+                        | "ts"
+                        | "go"
+                        | "java"
+                        | "c"
+                        | "cpp"
+                        | "c++"
+                        | "ruby"
+                        | "rb"
+                        | "shell"
+                        | "sh"
+                        | "bash"
+                        | "unknown"
+                        | "other"
+                ) {
+                    return Err(self.error("Unknown language filter"));
+                }
                 self.filters.lang = Some(value);
-                QueryNode::Empty
             }
             "size" => {
-                self.parse_size_filter(&value);
-                QueryNode::Empty
+                let (min, n) = if let Some(n) = value.strip_prefix('>') {
+                    (true, n)
+                } else if let Some(n) = value.strip_prefix('<') {
+                    (false, n)
+                } else {
+                    return Err(self.error("Size requires >N or <N"));
+                };
+                let n: u64 = n.parse().map_err(|_| self.error("Invalid size"))?;
+                let bound = if min {
+                    n.checked_add(1)
+                } else {
+                    n.checked_sub(1)
+                }
+                .ok_or_else(|| self.error("Size bound cannot match any file"))?;
+                if min {
+                    self.filters.size_min = Some(bound);
+                } else {
+                    self.filters.size_max = Some(bound);
+                }
             }
             "line" => {
-                self.parse_line_filter(&value);
-                QueryNode::Empty
+                let (a, b) = value.split_once('-').unwrap_or((&value, &value));
+                let a: u32 = a.parse().map_err(|_| self.error("Invalid starting line"))?;
+                let b: u32 = b.parse().map_err(|_| self.error("Invalid ending line"))?;
+                if a == 0 || b < a {
+                    return Err(self.error("Line range must be positive and ordered"));
+                }
+                self.filters.line_start = Some(a);
+                self.filters.line_end = Some(b);
             }
             "mtime" => {
-                self.parse_mtime_filter(&value);
-                QueryNode::Empty
-            }
-            "near" => {
-                // Parse near:term1,term2,distance
-                self.parse_near_query(&value)
+                if let Some(n) = value.strip_prefix('>') {
+                    if self.seen_fields.contains("mtime=") {
+                        return Err(self.error("Conflicting mtime filters"));
+                    }
+                    self.filters.mtime_min = Some(
+                        Self::parse_timestamp(n)
+                            .and_then(|n| n.checked_add(1))
+                            .ok_or_else(|| self.error("Invalid mtime lower bound"))?,
+                    );
+                } else if let Some(n) = value.strip_prefix('<') {
+                    if self.seen_fields.contains("mtime=") {
+                        return Err(self.error("Conflicting mtime filters"));
+                    }
+                    self.filters.mtime_max = Some(
+                        Self::parse_timestamp(n)
+                            .and_then(|n| n.checked_sub(1))
+                            .ok_or_else(|| self.error("Invalid mtime upper bound"))?,
+                    );
+                } else {
+                    if self.seen_fields.contains("mtime>") || self.seen_fields.contains("mtime<") {
+                        return Err(self.error("Conflicting mtime filters"));
+                    }
+                    let n = Self::parse_timestamp(&value)
+                        .ok_or_else(|| self.error("Invalid date or timestamp"))?;
+                    self.filters.mtime_min = Some(n);
+                    self.filters.mtime_max = Some(
+                        n.checked_add(86399)
+                            .ok_or_else(|| self.error("Timestamp range overflows"))?,
+                    );
+                }
             }
             "sort" => {
-                self.parse_sort(&value);
-                QueryNode::Empty
+                self.options.sort = match value.to_ascii_lowercase().as_str() {
+                    "score" => SortOrder::Score,
+                    "recency" | "recent" | "mtime" => SortOrder::Recency,
+                    "path" | "name" => SortOrder::Path,
+                    _ => return Err(self.error("Unknown sort order")),
+                }
             }
             "top" => {
-                if let Ok(n) = value.parse() {
-                    self.options.limit = n;
-                }
-                QueryNode::Empty
+                self.options.limit = value
+                    .parse()
+                    .map_err(|_| self.error("Invalid result limit"))?;
+                self.options.explicit_limit = true;
             }
-            _ => {
-                // Unknown field, treat as literal
-                QueryNode::Literal(format!("{}:{}", field, value))
-            }
+            _ => unreachable!(),
         }
-    }
-
-    fn parse_size_filter(&mut self, value: &str) {
-        if let Some(rest) = value.strip_prefix('>')
-            && let Ok(n) = rest.parse()
-        {
-            self.filters.size_min = Some(n);
-        } else if let Some(rest) = value.strip_prefix('<')
-            && let Ok(n) = rest.parse()
-        {
-            self.filters.size_max = Some(n);
-        }
-    }
-
-    fn parse_line_filter(&mut self, value: &str) {
-        if let Some((start, end)) = value.split_once('-') {
-            self.filters.line_start = start.parse().ok();
-            self.filters.line_end = end.parse().ok();
-        } else if let Ok(n) = value.parse() {
-            self.filters.line_start = Some(n);
-            self.filters.line_end = Some(n);
-        }
-    }
-
-    fn parse_sort(&mut self, value: &str) {
-        self.options.sort = match value.to_lowercase().as_str() {
-            "recency" | "recent" | "mtime" => SortOrder::Recency,
-            "path" | "name" => SortOrder::Path,
-            _ => SortOrder::Score,
-        };
-    }
-
-    fn parse_mtime_filter(&mut self, value: &str) {
-        // Parse mtime:>timestamp, mtime:<timestamp, or mtime:YYYY-MM-DD
-        if let Some(rest) = value.strip_prefix('>') {
-            self.filters.mtime_min = Self::parse_timestamp(rest);
-        } else if let Some(rest) = value.strip_prefix('<') {
-            self.filters.mtime_max = Self::parse_timestamp(rest);
-        } else if value.contains('-') && value.len() >= 10 {
-            // Parse as date: YYYY-MM-DD (start of day)
-            if let Some(ts) = Self::parse_date(value) {
-                // Set both min and max for a specific day
-                self.filters.mtime_min = Some(ts);
-                self.filters.mtime_max = Some(ts + 86400); // Next day
-            }
-        } else if let Ok(n) = value.parse::<u64>() {
-            // Direct timestamp
-            self.filters.mtime_min = Some(n);
-            self.filters.mtime_max = Some(n + 86400);
-        }
+        Ok(QueryNode::Empty)
     }
 
     fn parse_timestamp(s: &str) -> Option<u64> {
-        // First try parsing as a direct timestamp
-        if let Ok(n) = s.parse::<u64>() {
-            return Some(n);
+        if s.bytes().all(|b| b.is_ascii_digit()) && !s.is_empty() {
+            s.parse().ok()
+        } else {
+            Self::parse_date(s)
         }
-        // Try parsing as YYYY-MM-DD date
-        Self::parse_date(s)
     }
 
     fn parse_date(s: &str) -> Option<u64> {
-        // Parse YYYY-MM-DD format
-        let parts: Vec<&str> = s.split('-').collect();
-        if parts.len() >= 3 {
-            let year: i32 = parts[0].parse().ok()?;
-            let month: u32 = parts[1].parse().ok()?;
-            let day: u32 = parts[2].parse().ok()?;
-
-            // Simple calculation: days since Unix epoch
-            // Note: This is approximate, ignoring leap seconds
-            if year >= 1970 && (1..=12).contains(&month) && (1..=31).contains(&day) {
-                let days_since_epoch = (year - 1970) as u64 * 365
-                    + ((year - 1969) / 4) as u64  // Leap years
-                    + days_before_month(month, is_leap_year(year))
-                    + (day - 1) as u64;
-                return Some(days_since_epoch * 86400);
-            }
+        if s.len() != 10 || s.as_bytes()[4] != b'-' || s.as_bytes()[7] != b'-' {
+            return None;
         }
-        None
+        let year: i32 = s.get(..4)?.parse().ok()?;
+        let month: u32 = s.get(5..7)?.parse().ok()?;
+        let day: u32 = s.get(8..)?.parse().ok()?;
+        if year < 1970 || !(1..=12).contains(&month) {
+            return None;
+        }
+        let lengths = [
+            31,
+            if is_leap_year(year) { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        if day == 0 || day > lengths[(month - 1) as usize] {
+            return None;
+        }
+        let leap_days = |y: i32| y / 4 - y / 100 + y / 400;
+        let days = (year - 1970) as u64 * 365
+            + (leap_days(year - 1) - leap_days(1969)) as u64
+            + days_before_month(month, is_leap_year(year))
+            + (day - 1) as u64;
+        days.checked_mul(86400)
     }
 
-    fn parse_near_query(&self, value: &str) -> QueryNode {
-        // Parse near:term1,term2[,distance] format
-        let parts: Vec<&str> = value.split(',').collect();
-        if parts.len() >= 2 {
-            // Check if the last element is a numeric distance
-            let last = parts.last().unwrap().trim();
-            let (term_parts, distance) = if let Ok(d) = last.parse::<u32>() {
-                // Last element is a distance - use all but last as terms
-                (&parts[..parts.len() - 1], d)
+    fn parse_near_query(&self, value: &str) -> ParseResult<QueryNode> {
+        let parts: Vec<_> = value.split(',').collect();
+        let (terms, distance) =
+            if parts.len() >= 3 && parts.last().unwrap().bytes().all(|b| b.is_ascii_digit()) {
+                (
+                    &parts[..parts.len() - 1],
+                    parts
+                        .last()
+                        .unwrap()
+                        .parse::<u32>()
+                        .map_err(|_| self.error("Invalid proximity distance"))?,
+                )
             } else {
-                // Last element is NOT a number - treat ALL elements as terms, use default distance
-                (&parts[..], 10u32)
+                (parts.as_slice(), 10)
             };
-
-            let terms: Vec<String> = term_parts
-                .iter()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-
-            if terms.len() >= 2 {
-                return QueryNode::Near { terms, distance };
-            } else if terms.len() == 1 {
-                // If only one term, treat as literal
-                return QueryNode::Literal(terms.into_iter().next().unwrap());
-            }
+        if terms.len() < 2 || terms.iter().any(|t| t.is_empty()) {
+            return Err(self.error("near requires at least two nonempty terms"));
         }
-        QueryNode::Empty
+        Ok(QueryNode::Near {
+            terms: terms.iter().map(|s| s.to_string()).collect(),
+            distance,
+        })
     }
 
     fn skip_whitespace(&mut self) {
-        while !self.is_eof() && self.peek_char().map(|c| c.is_whitespace()).unwrap_or(false) {
+        while self.peek_char().is_some_and(char::is_whitespace) {
             self.advance();
         }
     }
-
     fn is_eof(&self) -> bool {
         self.pos >= self.input.len()
     }
-
     fn peek_char(&self) -> Option<char> {
         self.input[self.pos..].chars().next()
     }
-
     fn consume_char(&mut self, expected: char) -> bool {
         if self.peek_char() == Some(expected) {
             self.advance();
@@ -501,13 +705,11 @@ impl<'a> QueryParser<'a> {
             false
         }
     }
-
     fn advance(&mut self) {
         if let Some(ch) = self.peek_char() {
             self.pos += ch.len_utf8();
         }
     }
-
     fn remaining(&self) -> &str {
         &self.input[self.pos..]
     }
@@ -529,6 +731,98 @@ fn days_before_month(month: u32, leap: bool) -> u64 {
 }
 
 impl Query {
+    /// Validate public AST inputs as well as parsed strings before recursive work.
+    pub fn validate(&self) -> ParseResult<()> {
+        let mut stack = vec![(&self.root, 0usize)];
+        let mut nodes = 0usize;
+        let mut bytes = 0usize;
+        while let Some((node, depth)) = stack.pop() {
+            nodes += 1;
+            if depth > MAX_QUERY_DEPTH * 3 || nodes > MAX_QUERY_NODES * 3 {
+                return Err(QueryError {
+                    message: "Query AST exceeds complexity limit".into(),
+                    offset: 0,
+                });
+            }
+            match node {
+                QueryNode::Invalid(error) => return Err(error.clone()),
+                QueryNode::And(children) | QueryNode::Or(children) => {
+                    if children.len() > MAX_QUERY_NODES {
+                        return Err(QueryError {
+                            message: "Too many Boolean branches".into(),
+                            offset: 0,
+                        });
+                    }
+                    stack.extend(children.iter().map(|child| (child, depth + 1)));
+                }
+                QueryNode::Not(child) => stack.push((child, depth + 1)),
+                QueryNode::BoostedLiteral { text, boost }
+                | QueryNode::BoostedPhrase { text, boost } => {
+                    if !boost.is_finite() || *boost < 0.0 {
+                        return Err(QueryError {
+                            message: "Boost must be finite and non-negative".into(),
+                            offset: 0,
+                        });
+                    }
+                    bytes = bytes.saturating_add(text.len());
+                }
+                QueryNode::Literal(text) | QueryNode::Phrase(text) | QueryNode::Regex(text) => {
+                    bytes = bytes.saturating_add(text.len())
+                }
+                QueryNode::Near { terms, .. } => {
+                    if terms.len() > MAX_QUERY_NODES {
+                        return Err(QueryError {
+                            message: "Too many proximity terms".into(),
+                            offset: 0,
+                        });
+                    }
+                    bytes = terms.iter().fold(bytes, |n, s| n.saturating_add(s.len()));
+                }
+                QueryNode::Empty => {}
+            }
+            if bytes > MAX_QUERY_BYTES * 4 {
+                return Err(QueryError {
+                    message: "Query AST text is too large".into(),
+                    offset: 0,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply whole-word matching structurally, preserving each leaf's case mode.
+    pub fn apply_word_boundaries(&mut self) -> ParseResult<()> {
+        self.validate()?;
+        fn rewrite(node: &QueryNode) -> ParseResult<QueryNode> {
+            Ok(match node {
+                QueryNode::Invalid(error) => return Err(error.clone()),
+                QueryNode::Literal(s) => {
+                    QueryNode::Regex(format!("(?i:\\b(?:{})\\b)", regex::escape(s)))
+                }
+                QueryNode::Phrase(s) => QueryNode::Regex(format!("\\b(?:{})\\b", regex::escape(s))),
+                QueryNode::Regex(s) => QueryNode::Regex(format!("\\b(?:{s})\\b")),
+                QueryNode::And(v) => {
+                    QueryNode::And(v.iter().map(rewrite).collect::<ParseResult<_>>()?)
+                }
+                QueryNode::Or(v) => {
+                    QueryNode::Or(v.iter().map(rewrite).collect::<ParseResult<_>>()?)
+                }
+                QueryNode::Not(v) => QueryNode::Not(Box::new(rewrite(v)?)),
+                QueryNode::Empty => QueryNode::Empty,
+                QueryNode::BoostedLiteral { .. }
+                | QueryNode::BoostedPhrase { .. }
+                | QueryNode::Near { .. } => {
+                    return Err(QueryError {
+                        message: "Whole-word mode does not support boosts or near queries".into(),
+                        offset: 0,
+                    });
+                }
+            })
+        }
+        self.root = rewrite(&self.root)?;
+        Ok(())
+    }
+
     /// Get the raw text for simple literal/phrase queries
     #[allow(dead_code)]
     pub fn get_search_text(&self) -> Option<&str> {
@@ -540,13 +834,148 @@ impl Query {
 
     /// Check if query is empty (no search term AND no filters)
     pub fn is_empty(&self) -> bool {
-        matches!(self.root, QueryNode::Empty) && !self.filters.has_any()
+        matches!(self.root, QueryNode::Empty) && !self.filters.has_query_filters()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_parser_rejects_malformed_scoped_and_unbounded_queries() {
+        for input in [
+            "foo) bar",
+            "(foo",
+            "()",
+            "foo |",
+            "| foo",
+            "-",
+            "^",
+            "\"unclosed",
+            "re:/foo",
+            "ext:",
+            "ext:rs | ext:py",
+            "-ext:rs",
+            "(ext:rs foo)",
+            "^ext:rs",
+            "ext:rs ext:py",
+            "size:bogus",
+            "size:>18446744073709551615",
+            "size:<0",
+            "line:0",
+            "line:3-2",
+            "line:2-x",
+            "mtime:2026-02-31",
+            "mtime:2100-02-29",
+            "mtime:18446744073709551615",
+            "mtime:2026-01-01-extra",
+            "sort:nope",
+            "top:abc",
+            "path:[",
+            "file:[",
+            "lang:nonesuch",
+            "near:foo",
+            "near:foo,,2",
+            "^99999999999999999999999999999999999999999999999999999:foo",
+        ] {
+            assert!(try_parse_query(input).is_err(), "{input}");
+            assert!(parse_query(input).validate().is_err(), "legacy: {input}");
+        }
+        let nested = format!("{}foo{}", "(".repeat(10000), ")".repeat(10000));
+        let wide = "foo ".repeat(MAX_QUERY_NODES + 1);
+        let large = "x".repeat(MAX_QUERY_BYTES + 1);
+        for input in [&nested, &wide, &large] {
+            assert!(try_parse_query(input).is_err());
+            assert!(parse_query(input).validate().is_err());
+        }
+        assert!(try_parse_query("ext:rs (foo | bar) top:7").is_ok());
+        assert!(try_parse_query("foo | bar top:7").is_ok());
+    }
+
+    #[test]
+    fn punctuation_and_delimiters_preserve_literal_intent() {
+        for input in [
+            "foo-bar",
+            "foo.bar",
+            "foo()",
+            "foo(bar)",
+            "std::vector",
+            "src/foo.rs",
+        ] {
+            assert!(
+                matches!(try_parse_query(input).unwrap().root,QueryNode::Literal(s) if s==input),
+                "{input}"
+            );
+        }
+        assert!(
+            matches!(try_parse_query(r#""a\"b\\c""#).unwrap().root,QueryNode::Phrase(s) if s=="a\"b\\c")
+        );
+        for (input, expected) in [
+            (r"re:/foo\/bar/", "foo/bar"),
+            (r"re:/[/]/", "[/]"),
+            (r"re:/[]/]/", "[]/]"),
+            (r"re:/[^]/]/", "[^]/]"),
+            (r"re:/(?x)[ ]/]/", "(?x)[ ]/]"),
+            (r"re:/foo\\/", r"foo\\"),
+        ] {
+            assert!(
+                matches!(try_parse_query(input).unwrap().root,QueryNode::Regex(s) if s==expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            try_parse_query(r#"path:"with space/*.rs" foo"#)
+                .unwrap()
+                .filters
+                .path
+                .as_deref(),
+            Some("with space/*.rs")
+        );
+    }
+
+    #[test]
+    fn calendar_and_comparison_bounds_are_exact() {
+        assert_eq!(QueryParser::parse_date("1970-01-01"), Some(0));
+        assert_eq!(QueryParser::parse_date("2000-03-01"), Some(951868800));
+        assert_eq!(QueryParser::parse_date("2101-03-01"), Some(4139078400));
+        assert_eq!(QueryParser::parse_date("2400-02-29"), Some(13574563200));
+        let q = try_parse_query("mtime:2026-09-18 size:>8 size:<10").unwrap();
+        assert_eq!(q.filters.size_min, Some(9));
+        assert_eq!(q.filters.size_max, Some(9));
+        assert_eq!(
+            q.filters.mtime_max.unwrap() - q.filters.mtime_min.unwrap(),
+            86399
+        );
+        assert!(try_parse_query("top:0 foo").unwrap().options.explicit_limit);
+        assert!(!try_parse_query("foo").unwrap().options.explicit_limit);
+    }
+
+    #[test]
+    fn word_mode_preserves_literal_case_and_structural_boolean_meaning() {
+        let mut query = try_parse_query(r#"(foo-bar | "Exact Case") -re:/skip\/this/"#).unwrap();
+        query.apply_word_boundaries().unwrap();
+        let QueryNode::And(nodes) = query.root else {
+            panic!("expected AND")
+        };
+        let QueryNode::Or(branches) = &nodes[0] else {
+            panic!("expected OR")
+        };
+        assert!(matches!(&branches[0],QueryNode::Regex(s) if s==r"(?i:\b(?:foo\-bar)\b)"));
+        assert!(matches!(&branches[1],QueryNode::Regex(s) if s==r"\b(?:Exact Case)\b"));
+        assert!(
+            try_parse_query("^2:foo")
+                .unwrap()
+                .apply_word_boundaries()
+                .is_err()
+        );
+        assert!(
+            try_parse_query("near:foo,bar")
+                .unwrap()
+                .apply_word_boundaries()
+                .is_err()
+        );
+    }
 
     #[test]
     fn test_simple_query() {
@@ -593,14 +1022,14 @@ mod tests {
     #[test]
     fn test_mtime_filter_min() {
         let q = parse_query("mtime:>1704067200 test");
-        assert_eq!(q.filters.mtime_min, Some(1704067200));
+        assert_eq!(q.filters.mtime_min, Some(1704067201));
         assert!(q.filters.mtime_max.is_none());
     }
 
     #[test]
     fn test_mtime_filter_max() {
         let q = parse_query("mtime:<1704067200 test");
-        assert_eq!(q.filters.mtime_max, Some(1704067200));
+        assert_eq!(q.filters.mtime_max, Some(1704067199));
         assert!(q.filters.mtime_min.is_none());
     }
 
@@ -609,10 +1038,10 @@ mod tests {
         let q = parse_query("mtime:2024-01-01 test");
         assert!(q.filters.mtime_min.is_some());
         assert!(q.filters.mtime_max.is_some());
-        // The mtime_max should be 86400 seconds (1 day) after mtime_min
+        // Inclusive upper bound ends one second before the next day.
         assert_eq!(
             q.filters.mtime_max.unwrap() - q.filters.mtime_min.unwrap(),
-            86400
+            86399
         );
     }
 
@@ -676,7 +1105,7 @@ mod tests {
         let q = parse_query("ext:rs path:src mtime:>1704067200 ^important");
         assert_eq!(q.filters.ext, Some("rs".to_string()));
         assert_eq!(q.filters.path, Some("src".to_string()));
-        assert_eq!(q.filters.mtime_min, Some(1704067200));
+        assert_eq!(q.filters.mtime_min, Some(1704067201));
         // The query root contains the boosted term (filters produce Empty nodes that get filtered)
         match &q.root {
             QueryNode::BoostedLiteral { text, boost } => {
@@ -756,7 +1185,7 @@ mod tests {
     #[test]
     fn test_size_filter_min() {
         let q = parse_query("size:>1000 test");
-        assert_eq!(q.filters.size_min, Some(1000));
+        assert_eq!(q.filters.size_min, Some(1001));
         assert_eq!(q.filters.size_max, None);
     }
 
@@ -764,14 +1193,14 @@ mod tests {
     fn test_size_filter_max() {
         let q = parse_query("size:<5000 test");
         assert_eq!(q.filters.size_min, None);
-        assert_eq!(q.filters.size_max, Some(5000));
+        assert_eq!(q.filters.size_max, Some(4999));
     }
 
     #[test]
     fn test_size_filter_both() {
         let q = parse_query("size:>100 size:<10000 test");
-        assert_eq!(q.filters.size_min, Some(100));
-        assert_eq!(q.filters.size_max, Some(10000));
+        assert_eq!(q.filters.size_min, Some(101));
+        assert_eq!(q.filters.size_max, Some(9999));
     }
 
     #[test]
@@ -876,7 +1305,7 @@ mod tests {
         assert_eq!(q.filters.filename, Some("*.rs".to_string()));
         assert_eq!(q.filters.ext, Some("rs".to_string()));
         assert_eq!(q.filters.lang, Some("rust".to_string()));
-        assert_eq!(q.filters.size_min, Some(100));
+        assert_eq!(q.filters.size_min, Some(101));
         assert_eq!(q.filters.path, Some("src/*".to_string()));
         assert_eq!(q.options.sort, SortOrder::Recency);
         assert_eq!(q.options.limit, 20);
@@ -886,8 +1315,8 @@ mod tests {
     #[test]
     fn test_mtime_filter_both() {
         let q = parse_query("mtime:>1700000000 mtime:<1710000000 test");
-        assert_eq!(q.filters.mtime_min, Some(1700000000));
-        assert_eq!(q.filters.mtime_max, Some(1710000000));
+        assert_eq!(q.filters.mtime_min, Some(1700000001));
+        assert_eq!(q.filters.mtime_max, Some(1709999999));
     }
 
     // ========================================================================
@@ -938,17 +1367,16 @@ mod tests {
 
     #[test]
     fn test_paren_empty() {
-        // () should produce Empty
+        // Empty groups are rejected.
         let q = parse_query("()");
-        assert!(matches!(q.root, QueryNode::Empty));
+        assert!(matches!(q.root, QueryNode::Invalid(_)));
     }
 
     #[test]
     fn test_paren_unclosed() {
-        // Unclosed paren should not panic - graceful degradation
+        // Unclosed groups retain a safe error for legacy executor callers.
         let q = parse_query("(foo | bar");
-        // Should still parse the contents
-        assert!(!matches!(q.root, QueryNode::Empty));
+        assert!(matches!(q.root, QueryNode::Invalid(_)));
     }
 
     #[test]
@@ -1069,8 +1497,8 @@ mod tests {
         // near:foo has no commas, so parts.len() < 2 → Empty
         let q = parse_query("near:foo");
         assert!(
-            matches!(&q.root, QueryNode::Empty),
-            "Single-term near (no commas) should become Empty, got {:?}",
+            matches!(&q.root, QueryNode::Invalid(_)),
+            "Single-term near (no commas) should be rejected, got {:?}",
             q.root
         );
     }
@@ -1129,16 +1557,14 @@ mod tests {
     #[test]
     fn test_line_filter_zero() {
         let q = parse_query("line:0 test");
-        assert_eq!(q.filters.line_start, Some(0));
-        assert_eq!(q.filters.line_end, Some(0));
+        assert!(matches!(q.root, QueryNode::Invalid(_)));
     }
 
     #[test]
     fn test_line_filter_reversed_range() {
-        // line:200-100 - parser should still store what's given
+        // Reversed line ranges are rejected.
         let q = parse_query("line:200-100 test");
-        assert_eq!(q.filters.line_start, Some(200));
-        assert_eq!(q.filters.line_end, Some(100));
+        assert!(matches!(q.root, QueryNode::Invalid(_)));
     }
 
     // ========================================================================
@@ -1148,7 +1574,7 @@ mod tests {
     #[test]
     fn test_size_filter_zero() {
         let q = parse_query("size:>0 test");
-        assert_eq!(q.filters.size_min, Some(0));
+        assert_eq!(q.filters.size_min, Some(1));
     }
 
     #[test]

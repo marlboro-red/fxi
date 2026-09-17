@@ -249,7 +249,7 @@ impl<'a> QueryExecutor<'a> {
 
     /// Execute a query and return matches
     pub fn execute(&self, query: &Query) -> Result<Vec<SearchMatch>> {
-        let plan = QueryPlan::from_query(query);
+        let plan = QueryPlan::try_from_query(query)?;
         let candidates = self.execute_plan(&plan)?;
 
         let limit = query.options.limit;
@@ -265,7 +265,7 @@ impl<'a> QueryExecutor<'a> {
 
         let estimated_total = all_matches.len() * 2;
         let mut results = Vec::with_capacity(estimated_total.min(if limit > 0 {
-            limit * 2
+            limit.saturating_mul(2)
         } else {
             estimated_total
         }));
@@ -340,7 +340,7 @@ impl<'a> QueryExecutor<'a> {
         context_before: u32,
         context_after: u32,
     ) -> Result<Vec<ContentMatchResult>> {
-        let plan = QueryPlan::from_query(query);
+        let plan = QueryPlan::try_from_query(query)?;
         let candidates = self.execute_plan(&plan)?;
 
         let verified = self.find_verified_matches(&candidates, &plan, None)?;
@@ -416,7 +416,7 @@ impl<'a> QueryExecutor<'a> {
         query: &Query,
         limit: usize,
     ) -> Result<Vec<(PathBuf, usize)>> {
-        let plan = QueryPlan::from_query(query);
+        let plan = QueryPlan::try_from_query(query)?;
         let candidates = self.execute_plan(&plan)?;
         let cache_scan = self.reader.should_cache_scan(&candidates);
         let (line_start, line_end) = Self::extract_line_filter(&plan.steps);
@@ -467,10 +467,14 @@ impl<'a> QueryExecutor<'a> {
                             .count()
                     }
                 } else {
-                    Self::verify_content_static(&content, verification, id)
-                        .iter()
-                        .filter(|(line, _, _, _)| accepts_line(*line))
-                        .count()
+                    let (matched, hits) = Self::verify_content_matches(&content, verification, id);
+                    if matched && hits.is_empty() && line_start.is_none() && line_end.is_none() {
+                        1 // A file-level predicate match, with no fabricated content line.
+                    } else {
+                        hits.iter()
+                            .filter(|(line, _, _, _)| accepts_line(*line))
+                            .count()
+                    }
                 }
             } else {
                 1
@@ -504,7 +508,7 @@ impl<'a> QueryExecutor<'a> {
     /// 2. Skips context extraction
     /// 3. Returns minimal data per file
     pub fn execute_files_only(&self, query: &Query, file_limit: usize) -> Result<Vec<PathBuf>> {
-        let plan = QueryPlan::from_query(query);
+        let plan = QueryPlan::try_from_query(query)?;
         let candidates = self.execute_plan(&plan)?;
         if candidates.is_empty() {
             return Ok(Vec::new());
@@ -1082,29 +1086,36 @@ impl<'a> QueryExecutor<'a> {
         filter: &FilterStep,
         candidates: Option<&RoaringBitmap>,
     ) -> Result<RoaringBitmap> {
-        let path_matcher = filter.path_glob.as_ref().map(|g| {
-            globset::GlobBuilder::new(g)
-                .literal_separator(true)
-                .build()
-                .unwrap_or_else(|_| Glob::new("*").unwrap())
-                .compile_matcher()
-        });
+        let path_matcher = filter
+            .path_glob
+            .as_ref()
+            .map(|g| {
+                globset::GlobBuilder::new(g)
+                    .literal_separator(true)
+                    .build()
+                    .map(|glob| glob.compile_matcher())
+            })
+            .transpose()?;
 
-        let filename_matcher = filter.filename.as_ref().map(|pattern| {
-            let pattern_lower = pattern.to_lowercase();
-            if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
-                match Glob::new(&pattern_lower) {
-                    Ok(glob) => FilenameMatcher::Glob(glob.compile_matcher()),
-                    Err(_) => FilenameMatcher::Exact(pattern_lower),
+        let filename_matcher = filter
+            .filename
+            .as_ref()
+            .map(|pattern| {
+                let pattern_lower = pattern.to_lowercase();
+                if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
+                    Glob::new(&pattern_lower)
+                        .map(|glob| FilenameMatcher::Glob(glob.compile_matcher()))
+                } else {
+                    Ok(FilenameMatcher::Exact(pattern_lower))
                 }
-            } else {
-                FilenameMatcher::Exact(pattern_lower)
-            }
-        });
+            })
+            .transpose()?;
 
         let language_filter = filter.language.as_deref().map(parse_language);
-        let needs_path =
-            path_matcher.is_some() || filename_matcher.is_some() || filter.extension.is_some();
+        let needs_path = path_matcher.is_some()
+            || filename_matcher.is_some()
+            || filter.extension.is_some()
+            || filter.search_scope.is_some();
 
         let mut result = RoaringBitmap::new();
 
@@ -1120,6 +1131,12 @@ impl<'a> QueryExecutor<'a> {
                 } else {
                     None
                 };
+
+                if let Some(scope) = &filter.search_scope
+                    && !path.is_some_and(|path| path.starts_with(scope))
+                {
+                    return;
+                }
 
                 // Path filter
                 if let Some(ref matcher) = path_matcher
@@ -1381,7 +1398,11 @@ impl<'a> QueryExecutor<'a> {
                     None => continue,
                 };
 
-                let mut file_matches = Self::verify_content_static(&content, verification, doc_id);
+                let (matched, mut file_matches) =
+                    Self::verify_content_matches(&content, verification, doc_id);
+                if !matched {
+                    continue;
+                }
 
                 // Apply line filter if specified
                 if line_start.is_some() || line_end.is_some() {
@@ -1392,8 +1413,8 @@ impl<'a> QueryExecutor<'a> {
                     });
                 }
 
-                if !file_matches.is_empty() {
-                    total_matches += file_matches.len();
+                if !file_matches.is_empty() || (line_start.is_none() && line_end.is_none()) {
+                    total_matches += file_matches.len().max(1);
                     results.push((doc_id, full_path, rel_path, mtime, file_matches));
                 }
             }
@@ -1415,8 +1436,11 @@ impl<'a> QueryExecutor<'a> {
 
                     let content = self.reader.read_file_for_scan(&full_path, cache_scan)?;
 
-                    let mut file_matches =
-                        Self::verify_content_static(&content, verification, doc_id);
+                    let (matched, mut file_matches) =
+                        Self::verify_content_matches(&content, verification, doc_id);
+                    if !matched {
+                        return None;
+                    }
 
                     // Apply line filter if specified
                     if line_start.is_some() || line_end.is_some() {
@@ -1427,10 +1451,10 @@ impl<'a> QueryExecutor<'a> {
                         });
                     }
 
-                    if file_matches.is_empty() {
+                    if file_matches.is_empty() && (line_start.is_some() || line_end.is_some()) {
                         None
                     } else {
-                        match_count.fetch_add(file_matches.len(), Ordering::Relaxed);
+                        match_count.fetch_add(file_matches.len().max(1), Ordering::Relaxed);
                         Some((doc_id, full_path, rel_path, mtime, file_matches))
                     }
                 })
@@ -1544,73 +1568,79 @@ impl<'a> QueryExecutor<'a> {
         verification: &VerificationStep,
         doc_id: DocId,
     ) -> Vec<(u32, String, usize, usize)> {
-        match verification {
-            VerificationStep::Literal(text) => {
-                Self::find_literal_matches_static(content, text, false, doc_id)
-            }
-            VerificationStep::BoostedLiteral { text, boost: _ } => {
-                // Boosted literal: same matching as regular literal
-                // The boost is applied during scoring, not matching
-                Self::find_literal_matches_static(content, text, false, doc_id)
-            }
-            VerificationStep::Phrase {
-                text,
-                case_insensitive,
-            }
-            | VerificationStep::BoostedPhrase {
-                text,
-                case_insensitive,
-                ..
-            } => Self::find_literal_matches_static(content, text, !case_insensitive, doc_id),
-            VerificationStep::Regex(pattern) => {
-                // Use cached regex compilation for performance
-                if let Some(re) = get_regex_cache().get_or_compile(pattern) {
-                    Self::find_regex_matches_static(content, &re, doc_id)
-                } else {
-                    Vec::new()
-                }
-            }
-            VerificationStep::Near { terms, distance } => {
-                Self::find_proximity_matches_static(content, terms, *distance, doc_id)
-            }
-            VerificationStep::And(steps) => {
-                // All must have at least one match
-                let mut all_matches: Option<Vec<(u32, String, usize, usize)>> = None;
+        Self::verify_content_matches(content, verification, doc_id).1
+    }
 
-                for step in steps {
-                    let step_matches = Self::verify_content_static(content, step, doc_id);
-                    if step_matches.is_empty() {
-                        return Vec::new();
-                    }
-
-                    all_matches = Some(match all_matches {
-                        Some(mut existing) => {
-                            existing.extend(step_matches);
-                            existing
+    fn verify_content_matches(
+        content: &str,
+        verification: &VerificationStep,
+        doc_id: DocId,
+    ) -> (bool, Vec<FileMatch>) {
+        fn evaluate(
+            content: &str,
+            step: &VerificationStep,
+            doc_id: DocId,
+        ) -> (bool, Vec<FileMatch>) {
+            let hits = match step {
+                VerificationStep::And(steps) => {
+                    let mut hits = Vec::new();
+                    for step in steps {
+                        let (matched, more) = evaluate(content, step, doc_id);
+                        if !matched {
+                            return (false, Vec::new());
                         }
-                        None => step_matches,
-                    });
+                        hits.extend(more);
+                    }
+                    return (true, hits);
                 }
-
-                all_matches.unwrap_or_default()
-            }
-            VerificationStep::Or(steps) => {
-                let mut all_matches = Vec::new();
-                for step in steps {
-                    all_matches.extend(Self::verify_content_static(content, step, doc_id));
+                VerificationStep::Or(steps) => {
+                    let mut matched = false;
+                    let mut hits = Vec::new();
+                    for step in steps {
+                        let (yes, more) = evaluate(content, step, doc_id);
+                        matched |= yes;
+                        if yes {
+                            hits.extend(more);
+                        }
+                    }
+                    return (matched, hits);
                 }
-                all_matches
-            }
-            VerificationStep::Not(inner) => {
-                let inner_matches = Self::verify_content_static(content, inner, doc_id);
-                if inner_matches.is_empty() {
-                    // Return a "match" indicating the file doesn't contain the pattern
-                    vec![(1, content.lines().next().unwrap_or("").to_string(), 0, 0)]
-                } else {
-                    Vec::new()
+                VerificationStep::Not(inner) => {
+                    return (!QueryExecutor::has_match(content, inner), Vec::new());
                 }
-            }
+                VerificationStep::Literal(text) | VerificationStep::BoostedLiteral { text, .. } => {
+                    QueryExecutor::find_literal_matches_static(content, text, false, doc_id)
+                }
+                VerificationStep::Phrase {
+                    text,
+                    case_insensitive,
+                }
+                | VerificationStep::BoostedPhrase {
+                    text,
+                    case_insensitive,
+                    ..
+                } => QueryExecutor::find_literal_matches_static(
+                    content,
+                    text,
+                    !case_insensitive,
+                    doc_id,
+                ),
+                VerificationStep::Regex(pattern) => get_regex_cache()
+                    .get_or_compile(pattern)
+                    .map(|re| QueryExecutor::find_regex_matches_static(content, &re, doc_id))
+                    .unwrap_or_default(),
+                VerificationStep::Near { terms, distance } => {
+                    QueryExecutor::find_proximity_matches_static(content, terms, *distance, doc_id)
+                }
+            };
+            (!hits.is_empty(), hits)
         }
+        let (matched, mut hits) = evaluate(content, verification, doc_id);
+        // Every output mode counts unique matching lines. Keep the earliest
+        // positive span on each line until the wire format supports span lists.
+        hits.sort_unstable_by_key(|(line, _, start, end)| (*line, *start, *end));
+        hits.dedup_by_key(|(line, _, _, _)| *line);
+        (matched, hits)
     }
 
     /// Find proximity matches: all terms must appear within distance lines of each other (static)
@@ -1643,31 +1673,49 @@ impl<'a> QueryExecutor<'a> {
             term_lines.push(hits.iter().map(|(line, _, _, _)| *line).collect::<Vec<_>>());
         }
 
-        // Find line combinations where all terms are within distance
-        let lines: Vec<&str> = content.lines().collect();
-        let mut matches = Vec::new();
-
-        // Start with lines containing the first term
-        for (idx, &first_line) in term_lines[0].iter().enumerate() {
-            // Check if all other terms have a match within distance
-            // (each term's line list is sorted, so binary search the window)
-            let all_within_distance = term_lines[1..].iter().all(|other_term_lines| {
-                let lo = first_line.saturating_sub(distance);
-                let hi = first_line.saturating_add(distance);
-                let i = other_term_lines.partition_point(|&l| l < lo);
-                i < other_term_lines.len() && other_term_lines[i] <= hi
-            });
-
-            if all_within_distance {
-                // Found a valid proximity match - return the first term's match
-                let line_idx = (first_line - 1) as usize;
-                if let Some(&line) = lines.get(line_idx) {
-                    let (start, end) = first_term_spans[idx];
-                    matches.push((first_line, line.to_string(), start, end));
+        // Sweep a shared window, rather than independent +/-distance windows
+        // around the first term. This makes document truth permutation invariant.
+        let mut events: Vec<_> = term_lines
+            .iter()
+            .enumerate()
+            .flat_map(|(term, lines)| lines.iter().map(move |&line| (line, term)))
+            .collect();
+        events.sort_unstable();
+        let mut counts = vec![0usize; terms.len()];
+        let mut covered = 0usize;
+        let mut left = 0usize;
+        let mut coverage_delta = vec![0isize; term_lines[0].len() + 1];
+        for right in 0..events.len() {
+            let (line, term) = events[right];
+            if counts[term] == 0 {
+                covered += 1;
+            }
+            counts[term] += 1;
+            while line - events[left].0 > distance {
+                let old_term = events[left].1;
+                counts[old_term] -= 1;
+                if counts[old_term] == 0 {
+                    covered -= 1;
                 }
+                left += 1;
+            }
+            if covered == terms.len() {
+                let lo = term_lines[0].partition_point(|&n| n < events[left].0);
+                let hi = term_lines[0].partition_point(|&n| n <= line);
+                coverage_delta[lo] += 1;
+                coverage_delta[hi] -= 1;
             }
         }
-
+        let lines: Vec<_> = content.lines().collect();
+        let mut coverage = 0isize;
+        let mut matches = Vec::new();
+        for (idx, &line) in term_lines[0].iter().enumerate() {
+            coverage += coverage_delta[idx];
+            if coverage > 0 {
+                let (start, end) = first_term_spans[idx];
+                matches.push((line, lines[(line - 1) as usize].to_string(), start, end));
+            }
+        }
         matches
     }
 
@@ -1825,6 +1873,161 @@ mod tests {
     use tempfile::TempDir;
 
     /// Create a test index with multiple files for comprehensive testing
+    #[test]
+    fn boolean_lines_counts_negation_and_scope_have_independent_expected_results() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::create_dir(dir.path().join("submarine")).unwrap();
+        fs::write(dir.path().join("sub/a.txt"), "irrelevant\nfoo bar\nfoo\n").unwrap();
+        fs::write(dir.path().join("submarine/bar.txt"), "bar\n").unwrap();
+        crate::index::build::build_index(dir.path(), false).unwrap();
+        let reader = IndexReader::open(dir.path()).unwrap();
+        let executor = QueryExecutor::new(&reader);
+        for text in ["foo foo", "foo | foo", "foo -absent", "foo (bar | -absent)"] {
+            let query = parse_query(text);
+            let content = executor.execute_with_content(&query, 0, 0).unwrap();
+            assert_eq!(
+                content
+                    .iter()
+                    .map(|m| (m.path.clone(), m.line_number, m.line_content.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (PathBuf::from("sub/a.txt"), 2, "foo bar"),
+                    (PathBuf::from("sub/a.txt"), 3, "foo")
+                ],
+                "{text}"
+            );
+            assert_eq!(
+                executor.execute_match_counts(&query, 0).unwrap(),
+                vec![(PathBuf::from("sub/a.txt"), 2)],
+                "{text}"
+            );
+            assert_eq!(
+                executor.execute_files_only(&query, 0).unwrap(),
+                vec![PathBuf::from("sub/a.txt")],
+                "{text}"
+            );
+            assert_eq!(executor.execute(&query).unwrap().len(), 2, "{text}");
+        }
+        let query = parse_query("foo -absent line:1");
+        assert!(
+            executor
+                .execute_with_content(&query, 0, 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(executor.execute_files_only(&query, 0).unwrap().is_empty());
+        assert!(executor.execute_match_counts(&query, 0).unwrap().is_empty());
+        let query = parse_query("-foo");
+        assert_eq!(
+            executor.execute_files_only(&query, 0).unwrap(),
+            vec![PathBuf::from("submarine/bar.txt")]
+        );
+        let content = executor.execute_with_content(&query, 0, 0).unwrap();
+        assert_eq!(content.len(), 1);
+        assert!(
+            content[0].line_content.is_empty(),
+            "negative predicate is a file match, not an invented line"
+        );
+        let mut query = parse_query("bar");
+        query.filters.search_scope = Some(PathBuf::from("sub"));
+        assert_eq!(
+            executor.execute_files_only(&query, 1).unwrap(),
+            vec![PathBuf::from("sub/a.txt")]
+        );
+        assert!(
+            executor
+                .execute(&query)
+                .unwrap()
+                .iter()
+                .all(|hit| hit.path == Path::new("sub/a.txt")),
+            "ranked filename fallback must obey implicit scope too"
+        );
+        query.filters.search_scope = Some(PathBuf::from("submarine/bar.txt"));
+        assert_eq!(
+            executor.execute_files_only(&query, 1).unwrap(),
+            vec![PathBuf::from("submarine/bar.txt")]
+        );
+        for malformed in ["re:/[/", "foo)bar", &"(".repeat(10000)] {
+            let query = parse_query(malformed);
+            assert!(executor.execute(&query).is_err());
+            assert!(executor.execute_files_only(&query, 0).is_err());
+            assert!(executor.execute_with_content(&query, 0, 0).is_err());
+            assert!(executor.execute_match_counts(&query, 0).is_err());
+        }
+    }
+
+    #[test]
+    fn proximity_requires_one_shared_window_for_every_permutation() {
+        let orders = [
+            vec!["alpha", "beta", "gamma"],
+            vec!["beta", "alpha", "gamma"],
+            vec!["gamma", "beta", "alpha"],
+        ];
+        for order in orders {
+            let terms = order.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            assert!(
+                QueryExecutor::find_proximity_matches_static(
+                    "beta\nx\nalpha\nx\ngamma\n",
+                    &terms,
+                    2,
+                    0
+                )
+                .is_empty()
+            );
+            assert!(
+                !QueryExecutor::find_proximity_matches_static("beta\nalpha\ngamma\n", &terms, 2, 0)
+                    .is_empty()
+            );
+            assert!(
+                !QueryExecutor::find_proximity_matches_static(
+                    "beta\nx\nalpha\nx\ngamma\n",
+                    &terms,
+                    4,
+                    0
+                )
+                .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn exact_size_and_date_boundaries_filter_real_documents() {
+        let dir = TempDir::new().unwrap();
+        for (name, bytes, stamp) in [
+            ("before.txt", 7, 1789689599u64),
+            ("boundary.txt", 8, 1789776000u64),
+            ("inside.txt", 9, 1789689600u64),
+        ] {
+            let path = dir.path().join(name);
+            fs::write(&path, "x".repeat(bytes)).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(
+                    fs::FileTimes::new().set_modified(
+                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(stamp),
+                    ),
+                )
+                .unwrap();
+        }
+        crate::index::build::build_index(dir.path(), false).unwrap();
+        let reader = IndexReader::open(dir.path()).unwrap();
+        let executor = QueryExecutor::new(&reader);
+        for (query, expected) in [
+            ("size:>8", "inside.txt"),
+            ("size:<8", "before.txt"),
+            ("mtime:2026-09-18", "inside.txt"),
+        ] {
+            assert_eq!(
+                executor.execute_files_only(&parse_query(query), 0).unwrap(),
+                vec![PathBuf::from(expected)],
+                "{query}"
+            );
+        }
+    }
+
     #[test]
     fn source_snapshot_survives_in_place_rewrite_and_truncation() {
         let dir = tempfile::tempdir().unwrap();
@@ -2436,10 +2639,8 @@ def format_warning(msg: str) -> str:
             VerificationStep::Not(Box::new(VerificationStep::Literal("println".to_string())));
 
         let matches = QueryExecutor::verify_content_static(content, &verification, 1);
-        assert!(
-            !matches.is_empty(),
-            "NOT should produce a match when term is absent"
-        );
+        assert!(matches.is_empty(), "NOT must not fabricate a content line");
+        assert!(QueryExecutor::has_match(content, &verification));
     }
 
     #[test]
