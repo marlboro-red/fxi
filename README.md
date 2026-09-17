@@ -1,446 +1,265 @@
 # fxi
 
-A terminal-first, ultra-fast code search engine built in Rust.
+FXI is an indexed code-search tool for the terminal, with a persistent daemon,
+an interactive terminal UI, and a VS Code extension. It uses immutable index
+segments to narrow candidates, then verifies matches against source content.
 
-## Features
+Build an index once, use the daemon for repeated searches, and enable watching
+when you want saved changes to appear automatically. FXI has its own query
+language; a plain query is **not automatically a regular expression**.
 
-- **Indexed code search** with conservative regex planning and verified candidate matches
-- **Ripgrep-like CLI**: Familiar flags (`-i`, `-A`, `-B`, `-C`, `-l`, `-c`)
-- **Persistent daemon**: Keeps indexes warm for instant searches
-- **Regex-aware indexing**: Conservative trigram plans, with token and position data available for structured queries
-- **Rich query syntax**: Boolean operators, proximity search, field filters, regex
-- **Interactive TUI**: Real-time search with vim-style keybindings
-- **Instant preview**: File preview with matched line highlighting
-- **File watching**: Daemon auto-updates indexes when files change (`--watch`)
-- **Incremental updates**: Delta segments for efficient index maintenance
-- **Cross-platform**: Unix sockets (Linux/macOS) and Windows named pipes
-- **Respects .gitignore**: Automatic filtering of ignored files
-- **Skips symlinks**: Like ripgrep, only real files are indexed (no duplicate results from links)
-- **Centralized indexes**: Stored in app data, not in project directories
-- **Auto-detection**: Finds codebase root from any subdirectory
+## Install and start
 
-## Installation
+Requires Rust 1.88 or newer.
 
-```bash
-cargo build --release
+```sh
+cargo install --path .
+fxi index /path/to/project
+fxi daemon start --watch
+fxi -p /path/to/project 'error'
 ```
 
-## VS Code Extension
+For a local build without installation, run `cargo build --release` and use
+`target/release/fxi` (`target/release/fxi.exe` on Windows).
 
-A VS Code extension is available in the `vscode-extension/` directory.
+`fxi index` detects the codebase root, usually the nearest Git root. A watched
+daemon loads roots as they are searched; starting it does not immediately load
+and watch every index on disk. Without the daemon, searches read the saved index.
 
-### Building and Installing
+## Choose what your query means
 
-```bash
-cd vscode-extension
-npm install
-npm run build
-npx @vscode/vsce package
-code --install-extension fxi-0.1.0.vsix
+| Command | Meaning |
+|---|---|
+| `fxi 'error'` | Case-insensitive literal substring: also matches `Error` and `errors`. |
+| `fxi 'fn main'` | Both terms anywhere in the same file, in either order. |
+| `fxi 'class Foo'` | The same AND rule: both `class` and `Foo`, ignoring case. |
+| `fxi '"fn main"'` | Adjacent, case-sensitive phrase `fn main`. |
+| `fxi -F 'fn main'` | Treat the whole argument as case-sensitive literal text. |
+| `fxi --regex 'fn\s+main'` | A regular expression. |
+| `fxi -i -F 'fn main'` | Literal text, ignoring case. |
+
+Shell quotes group an argument and disappear before FXI receives it. Thus
+`fxi "fn main"` and `fxi 'fn main'` both pass `fn main`, which FXI parses as two
+terms. `fxi '"fn main"'` keeps the inner double quotes for FXI's phrase parser.
+Use `-F` when you want spaces, punctuation, operators, or field names treated as
+ordinary text. In the TUI and VS Code search box, type `"fn main"` directly;
+there is no shell to quote for.
+
+Queries use file-level Boolean matching: in `foo bar`, the terms can be on
+different lines. Content output shows contributing matching lines. Negation
+excludes files satisfying its operand; it is not inverse line matching.
+
+## Command-line search
+
+```sh
+fxi 'TODO' src                    # Restrict results to src
+fxi -p src/parser.rs 'error'      # Restrict results to one file
+fxi -l 'ext:rs error'             # Matching filenames only
+fxi -c 'error'                    # Count matching lines per file
+fxi -C 2 'panic'                  # Two lines of surrounding context
+fxi -w -F 'main'                  # Whole-word literal
+fxi -e 'TODO' -e 'FIXME'         # Either query
+fxi --regex -e 'warn.*' -e 'error.*'
+fxi -F -- '-excluded'             # Literal beginning with a minus
+fxi -- stats                     # Search the word "stats", not the subcommand
+fxi --json 'error'               # Structured output
+fxi -l -0 'error'                # NUL-terminated paths for scripts
 ```
 
-### Features
+A search path restricts returned files; the index root is detected separately.
+Searching from a subdirectory defaults to that subdirectory's scope. Indexing,
+statistics, compaction, and the TUI operate on the detected codebase root.
 
-- Sidebar search panel with real-time results
-- Click to open files at matching lines
-- Context lines and files-only mode
-- Daemon status indicator in the status bar
-- Keyboard shortcut: `Ctrl+Shift+I` (macOS: `Cmd+Shift+I`)
+| Option | Behavior |
+|---|---|
+| `-F`, `--fixed-strings` | Literal-text mode. |
+| `--regex` | Regular-expression mode. |
+| `-e PATTERN` | Repeatable alternatives in the selected mode; does not itself switch to regex. |
+| `-i`, `--ignore-case` | Ignore case, including phrases and regexes. Bare terms already ignore case. |
+| `-w`, `--word-regexp` | Require word boundaries for search terms. |
+| `-l`, `--files-with-matches` | Print matching paths once each. |
+| `-c`, `--count` | Print matching-line counts per file. |
+| `-m N`, `--max-count N` | Global output limit, not ripgrep's per-file limit; `0` means unlimited. |
+| `-A N`, `-B N`, `-C N` | Context after, before, or both. An explicit `-C` takes precedence. |
+| `-p PATH`, `--path PATH` | Restrict to a file or directory. A positional search path is also accepted. |
+| `--heading`, `--no-heading` | Group under file headings, or always print `path:line:text`. |
+| `--json` | Structured output for the selected output mode. |
+| `-0`, `--null` | NUL-terminate filenames; requires `-l`. |
+| `--color auto\|always\|never` | Control terminal coloring. |
 
-### Commands
+Terminal output uses file headings by default; redirected output uses
+`path:line:text`. No matches is a successful exit (`0`). Invalid queries and
+operation failures are errors. `-v` is explicitly unsupported. This is familiar
+grep-style output, not full ripgrep compatibility; see [the matching contract](docs/SEMANTICS.md).
 
-All accessible via the Command Palette (`Ctrl+Shift+P`):
+## Query language
 
-| Command | Description |
-|---------|-------------|
-| `FXI: Search` | Focus the search panel |
-| `FXI: Build Index` | Build index for the workspace |
-| `FXI: Reload Index` | Reload index from disk |
-| `FXI: Start Daemon` | Start the fxi daemon |
-| `FXI: Stop Daemon` | Stop the fxi daemon |
-| `FXI: Daemon Status` | Show daemon status |
+The default mode, TUI, and extension accept these expressions:
 
-### Settings
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `fxi.binaryPath` | `"fxi"` | Path to the fxi executable |
-| `fxi.defaultLimit` | `200` | Maximum search results (0 = unlimited) |
-| `fxi.defaultContextLines` | `2` | Context lines shown with results |
-
-## Usage
-
-### Build Index
-
-```bash
-fxi index                  # Index current directory (auto-detects git root)
-fxi index [path]           # Index a specific directory
-fxi index --force [path]   # Force full rebuild
+```text
+foo bar                         both terms in a file
+foo | bar                       either term
+(foo | bar) baz                 grouping
+foo -bar                        foo, excluding files matching bar
+"exact phrase"                  case-sensitive adjacent text
+re:/foo.*bar/                   explicit regex inside a larger query
+near:foo,bar,5                  terms near each other by line number
+ext:rs foo                      file extension filter
+lang:rust foo                   language filter
+file:config.rs                  exact basename
+file:config*                    basename glob
+path:src/**/*.rs foo            relative-path glob
+size:>1000 size:<10000 foo       strict byte-size bounds
+line:100-200 TODO               inclusive line range
+mtime:>2024-01-01 fix           modification-time filter
 ```
 
-### Search (ripgrep-like)
+Use `fxi -l 'file:config*'` or `fxi -l 'ext:rs'` for metadata-only file searches.
+Filters are global query constraints; they cannot be placed inside Boolean
+branches to express branch-local conditions. Invalid syntax, malformed dates,
+unknown filters, duplicate directives, and unfinished groups are errors.
 
-Direct content search with ripgrep-compatible output. Automatically uses the daemon for instant results when available, otherwise falls back to loading the index from disk.
+The ranked TUI also accepts `^foo`, `^3:foo`, `sort:score`, `sort:recency`,
+`sort:path`, and `top:100` (`top:0` means unlimited). Ranked searches can include
+filename matches. Ordinary CLI and extension content searches match file content;
+use `file:` for filenames. For CLI limits use `-m`, not `top:`.
 
-```bash
-fxi 'pattern'              # One term: case-insensitive literal search
-fxi 'fn main'              # AND: files containing both "fn" and "main"
-fxi 'class Foo'            # AND: files containing both "class" and "Foo"
-fxi '"fn main"'            # Phrase: exact, case-sensitive text "fn main"
+## Freshness and the daemon
+
+```sh
+fxi index                        # Reconcile source files with the stored index
+fxi index --force                # Full rebuild
+fxi daemon start                  # Keep loaded indexes warm
+fxi daemon start --watch          # Also watch saved changes
+fxi daemon status
+fxi daemon reload /path/to/project
+fxi daemon stop                   # Graceful shutdown
+fxi daemon stop --force           # Explicit forced termination if necessary
+fxi daemon foreground --watch    # Show daemon diagnostics
+fxi daemon socket-path
 ```
 
-Shell quotes group an argument; the shell removes them before FXI sees it.
-Consequently, `fxi "fn main"` and `fxi 'fn main'` are identical: the two terms
-can occur separately, in either order, anywhere in the same file. The same rule
-applies to `class Foo`; FXI does not interpret programming-language syntax here.
-To require adjacent text, preserve double quotes inside the argument, as in
-`fxi '"fn main"'`. Bare terms ignore case; quoted phrases are case-sensitive
-unless you add `-i`.
+**Search visibility** means a save appears in daemon queries. **Persistence**
+means it has also reached the saved on-disk index. These are separate steps.
+Small watched updates become searchable through immutable in-memory index
+snapshots before publication. Defaults are a 1 ms quiet debounce and a 100 ms
+maximum event age; neither is an end-to-end latency guarantee. Persistence
+batches wait for 250 ms of quiet or ten seconds of continuous updates. Larger
+updates use the durable path.
 
-#### CLI Flags
+Watchers reconcile when a root is loaded and periodically repair missed events.
+An explicit `fxi index` reconciles the source tree. Reload refreshes a daemon
+reader from the saved index; it is not a substitute for indexing source changes.
+Graceful shutdown drains pending work before acknowledging completion; forced
+termination can discard unpublished changes. A watched restart reconciles the
+source tree. Direct disk readers can lag a daemon's live view.
 
-Flags match ripgrep conventions for familiarity.
+Watching is triggered by filesystem notifications and bounded update work.
+Publication, compaction, large branch switches, and notification delivery can
+still delay visibility. See [freshness semantics](docs/SEMANTICS.md#freshness)
+for exact bounds, configuration and failure behavior.
 
-| Flag | Long | Description |
-|------|------|-------------|
-| `-e PAT` | `--regexp` | Pattern to search (can be repeated for OR) |
-| `-i` | `--ignore-case` | Case insensitive search |
-| `-w` | `--word-regexp` | Match whole words only |
-| `-A NUM` | `--after-context` | Show NUM lines after each match |
-| `-B NUM` | `--before-context` | Show NUM lines before each match |
-| `-C NUM` | `--context` | Show NUM lines before and after (overrides -A/-B) |
-| `-l` | `--files-with-matches` | Only print filenames, not matching lines |
-| `-c` | `--count` | Print match count per file |
-| `-m NUM` | `--max-count` | Limit to NUM results (default: unlimited) |
-| `-p PATH` | `--path` | Search in specific directory |
-| | `--color=WHEN` | When to use colors: `always`, `never`, `auto` (default: auto) |
+## Interactive terminal UI
 
-**Differences from ripgrep:**
+Run `fxi`, `fxi search`, or `fxi search /path/to/project`. Type a query and press
+**Enter**. Searches run in the background; repeated submissions coalesce to the
+latest query. F5 rebuilds in the background under the normal index writer lock.
+Previews read at most 1 MiB per file and may omit the end of a large file.
 
-- `-v` (invert match) is not supported (indexed search only returns matching lines)
-- Token search is case-insensitive by default for better code search recall
+| Key | Action |
+|---|---|
+| `Enter` in search | Submit query. |
+| `↑` / `↓`, `Tab` / `Shift+Tab` | Select a result. |
+| `Ctrl+p` | Switch between search and preview. |
+| `Ctrl+w` / `Ctrl+h` | Delete a word / character from the query. |
+| `F1` | Show help. |
+| `F5` in search | Rebuild the index. |
+| `Esc` in search | Clear the query; exit if already empty. |
+| `Ctrl+c` / `Ctrl+q` | Exit. |
 
-#### Examples
+After submitting a query, search-mode navigation also accepts `gg`, `G`,
+`Ctrl+a/e`, and `Ctrl+d/u`. Typing resumes query editing. In preview mode,
+`j/k` scroll, `n/N` select the next/previous result, `gg/G` jump, and
+`Enter` or `o` opens the file in `$EDITOR`; `q` or `Esc` returns to search.
 
-```bash
-# Basic searches
-fxi "TODO"                 # Find all TODOs
-fxi "fn main"              # Find main functions (AND: both terms)
-fxi '"fn main"'            # Find exact phrase "fn main"
+`EDITOR` may contain quoted executable paths and arguments, such as
+`EDITOR='code --wait'`. FXI passes arguments directly, without shell expansion.
+Known editors receive a line-location argument; unknown editors receive the file
+path. Launch failures appear in the TUI status.
 
-# Case insensitive
-fxi -i "error"             # Match "error", "Error", "ERROR", etc.
+## VS Code
 
-# Word boundary
-fxi -w "main"              # Match "main" but not "domain" or "mainly"
+See the [extension setup and usage guide](vscode-extension/README.md). The sidebar
+search uses the same query language, opens matches in the editor, and supports
+context and files-only output. Searches run on Enter or the Search button.
+The shortcut is **Ctrl+Alt+F**, or **Cmd+Alt+F** on macOS.
 
-# Multiple patterns (OR)
-fxi -e "TODO" -e "FIXME"   # Find lines with TODO or FIXME
-fxi -e "error" -e "warn"   # Find error or warning messages
+## Index management and coverage
 
-# Context lines
-fxi -A 2 "panic"           # Show 2 lines after each match
-fxi -B 2 "panic"           # Show 2 lines before each match
-fxi -C 3 "panic"           # Show 3 lines before and after
-fxi -A 2 -B 1 "panic"      # 1 line before, 2 lines after
-
-# Output modes
-fxi -l "struct"            # List only filenames with matches
-fxi -c "impl"              # Count matches per file
-
-# Limit results
-fxi -m 10 "use std"        # Show only first 10 matches
-fxi -m 1000 "TODO"         # Increase limit for thorough search
-
-# Search different directory
-fxi -p ../other-project "pattern"
-
-# Combine flags
-fxi -i -C 2 -m 50 "fixme"  # Case insensitive, with context, limited
+```sh
+fxi list
+fxi stats /path/to/project
+fxi compact /path/to/project
+fxi remove /path/to/project
 ```
 
-#### Output Format
+Indexes live outside the source tree. `FXI_INDEXES` overrides their location.
 
-Results are displayed in ripgrep-style format with colors:
-
-```
-src/main.rs
-42:    let query = pattern.to_string();
-43-    // context line after
---
-src/server/daemon.rs
-128:    fn handle_search(&self, query: String) {
-```
-
-- **Filename**: magenta (printed once per file as heading)
-- **Line number**: green (`:` for match, `-` for context)
-- **Match text**: red/bold highlighting
-- **Separator**: `--` between non-contiguous matches
-
-#### Performance
-
-The daemon keeps immutable index readers loaded and reuses bounded, metadata-validated content snapshots. Every query is verified; full-result memoization is disabled. Latency depends on candidate volume, file sizes, and output mode. See the reproducible benchmarks below.
-
-```bash
-# Keep indexes loaded for repeated searches
-fxi daemon start
-
-# Searches now reuse the loaded index
-fxi '"class Browser"'  # Search an exact phrase
-```
-
-### Interactive TUI
-
-```bash
-fxi                        # Launch interactive TUI
-fxi search                 # Same as above
-fxi search [path]          # TUI for specific directory
-```
-
-### Daemon (for instant searches)
-
-```bash
-fxi daemon start           # Start daemon in background
-fxi daemon start --watch   # Start with file watching (auto-updates indexes)
-fxi daemon stop            # Stop the daemon
-fxi daemon status          # Check daemon status and stats
-fxi daemon reload [path]   # Reload index for a path
-fxi daemon foreground      # Run in foreground (for debugging)
-fxi daemon foreground --watch  # Foreground with file watching
-```
-
-The daemon keeps indexes loaded in memory. Searches automatically use it when available, falling back to direct index loading otherwise.
-
-#### File Watching
-
-With `--watch`, the daemon monitors indexed directories for file changes and automatically updates indexes. Changes are debounced to handle rapid edits (e.g., IDE auto-save, git operations). The watcher respects `.gitignore` rules and skips common non-source directories (`node_modules`, `target`, `.git`, etc.).
-
-Small updates become searchable through an immutable in-memory index before
-disk publication. The default quiet debounce is 1 ms, with a 100 ms maximum
-event age; these are scheduling windows, not guaranteed end-to-end latencies.
-Disk writes are grouped until 250 ms of quiet or ten seconds of continuous
-updates. Large batches use the durable update path. See
-[freshness semantics](docs/SEMANTICS.md#freshness) for bounds and recovery behavior.
-
-When a watcher starts for a root, the daemon first reconciles the index with one incremental scan, so changes made while the daemon was down are picked up. While a root is watched, `fxi index` skips its own tree walk — the daemon owns freshness — and reports pending updates instead. Those changes may already be searchable in memory while awaiting disk publication. `fxi index --force` still rebuilds locally.
-
-### Manage Indexes
-
-```bash
-fxi list                   # List all indexed codebases
-fxi stats [path]           # Show index statistics
-fxi remove <path>          # Remove index for a codebase
-fxi compact [path]         # Compact delta segments
-```
-
-## Index Storage
-
-Indexes are stored centrally in your app data directory (not in project folders):
-
-| Platform | Location |
-|----------|----------|
-| Linux | `~/.local/share/fxi/indexes/` |
+| Platform | Default index directory |
+|---|---|
+| Linux | `~/.local/share/fxi/indexes/` (respects `XDG_DATA_HOME`) |
 | macOS | `~/Library/Application Support/fxi/indexes/` |
 | Windows | `%LOCALAPPDATA%/fxi/indexes/` |
 
-Each codebase gets a unique folder based on a hash of its root path:
+Each root has a container with a `CURRENT` manifest, immutable generations,
+segment files, and a writer lock. Older generations stay leased while readers
+use them. Do not edit index files manually.
 
-```
-~/.local/share/fxi/
-└── indexes/
-    ├── myproject-a1b2c3d4e5f6g7h8/
-    │   ├── meta.json
-    │   ├── docs.bin
-    │   ├── paths.bin
-    │   └── segments/
-    │       └── seg_0001/
-    │           ├── grams.dict
-    │           ├── grams.postings
-    │           ├── tokens.dict
-    │           ├── tokens.postings
-    │           └── bloom.bin
-    └── another-repo-i9j0k1l2m3n4o5p6/
-        └── ...
-```
+Coverage follows ignore rules and configured eligibility limits. Hidden paths,
+symlinks, common generated/dependency directories, known binary types,
+non-UTF-8 content, and oversized files can be excluded. Searching an index is not
+an exhaustive scan of every byte on disk. [SEMANTICS.md](docs/SEMANTICS.md)
+documents these exclusions and what stale indexes can miss.
 
-### Subdirectory Support
+## Performance, resources, and evidence
 
-fxi automatically detects your codebase root by looking for a `.git` directory:
+Performance depends on query shape, output mode, corpus, cache state and platform.
+FXI is not the best tool on every measured workload. The reports retain losing
+cases as well as wins:
 
-```bash
-$ cd ~/projects/myapp/src/components/Button
-$ fxi stats
-Root path:      /home/user/projects/myapp    # Auto-detected!
-Index location: ~/.local/share/fxi/indexes/myapp-...
-Document count: 1234
-```
+- [Update visibility](docs/performance-round7/NOTES.md): short saves, atomic replacement and bursts on macOS.
+- [Source packs and common-tool comparisons](docs/performance-round6/NOTES.md): build cost, disk/RSS, cold-process and warm-server results; remaining phrase and absence gaps.
+- [Earlier verification and cache experiments](docs/performance-round5/NOTES.md).
+- [Current correctness and UX audit](docs/audit-2026-09-18/AUDIT.md): findings, repairs and remaining work.
 
-## Search Semantics
+These are measurements of pinned historical revisions and configurations, not a
+fresh benchmark of every subsequent fix. “Up to 400×” and million-file
+extrapolations from the original benchmarks are not accepted as current evidence.
 
-The full contract for what fxi matches, what it can miss, and how fresh
-results are — including every documented divergence from ripgrep — is in
-[docs/SEMANTICS.md](docs/SEMANTICS.md).
+The daemon shares a content cache across readers. `FXI_CACHE_MIB` sets its retained
+text budget (`0` disables it; range 0–4096, default 1024). This is not a total RSS
+limit. Index metadata, active results, positions and build/update work add memory.
+`FXI_SEARCH_PARALLELISM` adjusts verification task count; benchmark your workload
+before tuning it.
 
-## Query Syntax
+Optional Unix source packs (`FXI_SOURCE_PACK=1 fxi index --force PATH`) trade extra
+disk/build work for faster broad one-shot files-only searches. They are not enabled
+by default. [Round six](docs/performance-round6/NOTES.md) describes this tradeoff
+and the separate experimental negative-routing option.
 
-### Literals and Phrases
+## Development
 
-```
-foo bar                    # AND: both terms must match
-"exact phrase"             # Exact phrase match
-^foo                       # Boosted term (default 2x priority)
-^3:foo                     # Boosted term with custom weight
+```sh
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+python3 scripts/test_benchmarks.py
 ```
 
-Searches automatically match both file content AND filenames - typing `config` will find files containing "config" as well as files named `config.json`, `config.rs`, etc.
-
-### Boolean Operators
-
-```
-foo | bar                  # OR: either term matches
--foo                       # NOT: exclude matches
-(foo | bar) baz            # Grouping
-```
-
-### Proximity Search
-
-```
-near:foo,bar,5             # Terms within 5 lines of each other
-near:foo,bar,abc           # Default distance (10 lines) if not numeric
-```
-
-### Regex
-
-```
-re:/foo.*bar/              # Regex pattern
-```
-
-### File Search
-
-Find files by name without content matching:
-
-```
-file:config                # Files with "config" in the name
-file:*.json                # Files matching glob pattern
-ext:rs                     # All .rs files
-path:src/utils/*           # All files in src/utils/
-```
-
-### Field Filters
-
-Combine filters with a search term:
-
-```
-ext:rs foo                 # Search "foo" in .rs files only
-path:src/*.rs bar          # Search "bar" in files matching glob
-lang:rust baz              # Search "baz" in Rust files
-size:>1000 test            # Search in files larger than 1KB
-size:<10000 test           # Search in files smaller than 10KB
-line:100-200 TODO          # Search within line range
-mtime:>2024-01-01 fix      # Search in recently modified files
-```
-
-### Options
-
-```
-sort:recency               # Sort by modification time
-sort:path                  # Sort by path
-top:100                    # Limit results
-```
-
-## TUI Keybindings
-
-Press `F1` or `?` to show help in the TUI.
-
-### Search Mode
-
-| Key | Action |
-|-----|--------|
-| `↑/↓` or `Tab/Shift+Tab` | Navigate results |
-| `Ctrl+d` / `Ctrl+u` | Page down / up |
-| `gg` or `Ctrl+a` | First result |
-| `G` or `Ctrl+e` | Last result |
-| `Enter` | Execute search / Open file |
-| `Ctrl+p` | Toggle preview mode |
-| `Ctrl+w` | Delete word |
-| `F5` | Rebuild index |
-| `Esc` | Clear query / Exit |
-| `Ctrl+c` | Exit |
-
-### Preview Mode
-
-| Key | Action |
-|-----|--------|
-| `j/k` | Scroll down / up |
-| `Ctrl+d` / `Ctrl+u` | Half-page down / up |
-| `Ctrl+f` / `Ctrl+b` | Full page down / up |
-| `gg` / `G` | Top / Bottom |
-| `n` / `N` | Next / Previous result |
-| `o` or `Enter` | Open file in editor |
-| `q` or `Esc` | Back to search |
-
-## Architecture
-
-```
-+------------------+
-|      TUI         |
-+---------+--------+
-          |
-+---------v--------+
-|   Query Engine   |
-|  - Parser        |
-|  - Planner       |
-|  - Executor      |
-+---------+--------+
-          |
-+---------v--------+
-|   Index Reader   |
-|  (mmap segments) |
-+---------+--------+
-          |
-+---------v--------+
-|  On-Disk Index   |
-|  (app data dir)  |
-+------------------+
-```
-
-## Performance and validation
-
-The latest [correctness, CLI UX, and architecture audit](docs/audit-2026-09-18/AUDIT.md)
-records unresolved findings with reproductions and a prioritized repair plan.
-Passing tests and benchmark gains do not imply those findings are fixed.
-
-Current measurements, correctness fixes, research experiments, and remaining gaps
-are documented in [the live-update experiments](docs/performance-round7/NOTES.md),
-[the source-pack comparisons](docs/performance-round6/NOTES.md),
-[the source verification and position experiments](docs/performance-round5/NOTES.md),
-[the broader comparisons and cache experiments](docs/performance-round4/NOTES.md),
-[the watcher and metadata experiments](docs/performance-round3/NOTES.md),
-[the indexing and query experiments](docs/performance-round2/NOTES.md), and
-[the first engineering report](docs/audit-2026-09-17/PROGRESS.md).
-The [benchmark harness](docs/audit-2026-09-17/benchmark.py) compares full matching
-file sets against ripgrep on every run, with pinned Redis, CPython, and Linux corpora,
-interleaved samples, and separate direct/server measurements.
-
-Earlier Linux/Chromium “up to 400x” claims and million-file extrapolations are
-not accepted as current evidence. The [audit](docs/audit-2026-09-17/AUDIT.md)
-explains the scope, cache, and correctness problems in the old methodology.
-
-Search worker concurrency can be explored with `FXI_SEARCH_PARALLELISM` (positive
-integer). The default bounds source-file read tasks independently of index build
-workers. Long-lived readers share one process-wide content cache, retaining at
-most 1 GiB of text and 131,072 entries across all roots. Storage is allocated on
-demand, and metadata is checked before reuse. Set `FXI_CACHE_MIB` before starting
-the daemon to change the text budget (0 disables caching; valid range 0–4096).
-One-shot CLI searches bypass content caching. These limits cover retained cache
-contents, not index construction, active results, or total process RSS.
+Benchmark tools under `scripts/` validate matching file sets and retain raw
+samples. Keep compilation and tests outside timing windows; distinguish warm API
+latency from CLI startup and output serialization.
 
 ## License
 
 MIT
-
-For the optional Unix source-pack experiment, build with
-`FXI_SOURCE_PACK=1 fxi index --force PATH`. It trades extra disk space and build
-work for faster broad one-shot files-only searches. See the
-[round-six measurements and limitations](docs/performance-round6/NOTES.md) and
-[source-pack semantics](docs/SEMANTICS.md#optional-source-packs).

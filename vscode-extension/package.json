@@ -1,13 +1,13 @@
 {
   "name": "fxi",
   "displayName": "fxi",
-  "description": "Ultra-fast code search powered by the fxi daemon",
+  "description": "Indexed code search powered by the fxi daemon",
   "version": "0.1.0",
   "publisher": "fxi",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/user/fxi"
+    "url": "https://github.com/marlboro-red/fxi"
   },
   "icon": "media/icon.png",
   "keywords": [

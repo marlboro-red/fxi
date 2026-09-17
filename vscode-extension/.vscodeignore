@@ -8,4 +8,3 @@ vitest.config.ts
 package-lock.json
 .gitignore
 *.vsix
-media/icon.svg
