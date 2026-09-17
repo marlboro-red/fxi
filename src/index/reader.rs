@@ -301,18 +301,19 @@ impl SegmentReader {
 
         let trigram_postings = MappedBytes::open(&segment_path.join("grams.postings"))?;
 
-        // Validate each immutable gram record once.
-        let mut previous_gram = None;
-        for entry in trigram_dict.iter() {
+        // Validate every payload before exposing the segment. Large segments
+        // use the existing Rayon pool so a single base segment does not serialize
+        // validation; small segments avoid scheduling overhead.
+        let validate_entry = |index: usize| -> Result<()> {
+            let entry = trigram_dict.entry(index);
             anyhow::ensure!(
                 posting_range_fits(entry.offset, entry.length, trigram_postings.len()),
                 "Truncated trigram postings"
             );
             anyhow::ensure!(
-                previous_gram.is_none_or(|gram| gram < entry.trigram),
+                index == 0 || trigram_dict.entry(index - 1).trigram < entry.trigram,
                 "Unsorted trigram dictionary"
             );
-            previous_gram = Some(entry.trigram);
             let bytes = &trigram_postings
                 [entry.offset as usize..entry.offset as usize + entry.length as usize];
             crate::utils::encoding::validate_document_postings(
@@ -320,6 +321,14 @@ impl SegmentReader {
                 entry.doc_freq,
                 &allowed_docs,
             )?;
+            Ok(())
+        };
+        if trigram_postings.len() >= 1024 * 1024 && trigram_dict.count >= 512 {
+            (0..trigram_dict.count)
+                .into_par_iter()
+                .try_for_each(validate_entry)?;
+        } else {
+            (0..trigram_dict.count).try_for_each(validate_entry)?;
         }
         // Line maps are NOT loaded here - loaded lazily on first access
 
@@ -2182,6 +2191,32 @@ mod tests {
         crate::index::build::build_index(&root_path, false).expect("Failed to build index");
 
         (temp_dir, root_path)
+    }
+
+    #[test]
+    fn large_segment_parallel_validation_rejects_late_corruption() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut dictionary = 1024u32.to_le_bytes().to_vec();
+        for gram in 0..1024u32 {
+            dictionary.extend_from_slice(&gram.to_le_bytes());
+            dictionary.extend_from_slice(&(u64::from(gram) * 1024).to_le_bytes());
+            dictionary.extend_from_slice(&1024u32.to_le_bytes());
+            dictionary.extend_from_slice(&1024u32.to_le_bytes());
+        }
+        let postings = vec![1u8; 1024 * 1024];
+        let allowed = Arc::new((1..=1024).collect::<RoaringBitmap>());
+        let open = || SegmentReader::open(directory.path(), 1, false, false, allowed.clone());
+        fs::write(directory.path().join("grams.dict"), &dictionary).unwrap();
+        fs::write(directory.path().join("grams.postings"), &postings).unwrap();
+        assert_eq!(open().unwrap().get_trigram_docs(1023).len(), 1024);
+        let mut bad = postings.clone();
+        *bad.last_mut().unwrap() = 0; // Duplicate document at the end of the final task.
+        fs::write(directory.path().join("grams.postings"), bad).unwrap();
+        assert!(open().is_err());
+        fs::write(directory.path().join("grams.postings"), postings).unwrap();
+        dictionary[4 + 1023 * 20..4 + 1023 * 20 + 4].copy_from_slice(&0u32.to_le_bytes());
+        fs::write(directory.path().join("grams.dict"), dictionary).unwrap();
+        assert!(open().is_err());
     }
 
     #[test]
