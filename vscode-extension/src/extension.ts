@@ -20,6 +20,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // Webview search panel
   const searchProvider = new SearchPanelProvider(context.extensionUri, client);
   context.subscriptions.push(
+    searchProvider,
     vscode.window.registerWebviewViewProvider(
       SearchPanelProvider.viewType,
       searchProvider

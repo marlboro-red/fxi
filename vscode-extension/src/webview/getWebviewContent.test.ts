@@ -198,3 +198,20 @@ describe("getWebviewContent", () => {
     expect(html).not.toMatch(/onchange\s*=/i);
   });
 });
+
+
+describe("UTF-8 protocol highlighting", () => {
+  const html = getWebviewContent("test", 200, 2);
+  const source = html.slice(html.indexOf("    function escapeHtml("), html.indexOf("    function renderMatchGroup("));
+  const highlight = new Function(`${source}; return highlightLine;`)() as (s: string, a: number, b: number) => string;
+  it.each(["é needle", "中 needle", "😀 needle", "é needle", "< needle"])("highlights byte offsets in %s", (line) => {
+    const start = new TextEncoder().encode(line.slice(0, line.indexOf("needle"))).length;
+    expect(highlight(line, start, start + 6)).toContain('<span class="match-highlight">needle</span>');
+    expect(highlight(line, start, start + 6)).not.toContain("< needle");
+  });
+  it("handles empty and malformed boundaries safely", () => {
+    expect(highlight("é needle", 1, 2)).toBe("é needle");
+    expect(highlight("é needle", 3, 3)).toBe("é needle");
+    expect(highlight("é needle", 3, 100)).toBe("é needle");
+  });
+});

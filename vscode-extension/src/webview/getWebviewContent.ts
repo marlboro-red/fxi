@@ -442,13 +442,21 @@ export function getWebviewContent(
     }
 
     function highlightLine(lineContent, matchStart, matchEnd) {
-      if (matchStart >= matchEnd || matchStart >= lineContent.length) {
+      // The protocol carries UTF-8 byte offsets; DOM strings use UTF-16 units.
+      const bytes = new TextEncoder().encode(lineContent);
+      if (!Number.isInteger(matchStart) || !Number.isInteger(matchEnd)
+          || matchStart < 0 || matchStart >= matchEnd || matchEnd > bytes.length) {
         return escapeHtml(lineContent);
       }
-      const before = escapeHtml(lineContent.slice(0, matchStart));
-      const match = escapeHtml(lineContent.slice(matchStart, matchEnd));
-      const after = escapeHtml(lineContent.slice(matchEnd));
-      return before + '<span class="match-highlight">' + match + '</span>' + after;
+      const decoder = new TextDecoder('utf-8', { fatal: true });
+      try {
+        const before = escapeHtml(decoder.decode(bytes.subarray(0, matchStart)));
+        const match = escapeHtml(decoder.decode(bytes.subarray(matchStart, matchEnd)));
+        const after = escapeHtml(decoder.decode(bytes.subarray(matchEnd)));
+        return before + '<span class="match-highlight">' + match + '</span>' + after;
+      } catch {
+        return escapeHtml(lineContent);
+      }
     }
 
     function renderMatchGroup(m) {

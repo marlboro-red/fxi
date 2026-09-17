@@ -43,30 +43,31 @@ export class DaemonClient extends EventEmitter {
 
     const socketPath = getSocketPath();
     const socket = net.createConnection({ path: socketPath });
+    this.socket = socket; // Own connecting sockets so disposal and retries cannot race.
     socket.setTimeout(CONNECT_TIMEOUT_MS);
 
     socket.on("connect", () => {
+      if (this.disposed || this.socket !== socket) { socket.destroy(); return; }
       socket.setTimeout(0); // Clear connect timeout
-      this.socket = socket;
       this._connected = true;
       this.emit("connectionChange", true);
     });
 
     socket.on("data", (data: Buffer) => {
-      this.onData(data);
+      if (this.socket === socket && !this.disposed) { this.onData(data); }
     });
 
     socket.on("error", () => {
-      this.handleDisconnect();
+      if (this.socket === socket) { this.handleDisconnect(); }
     });
 
     socket.on("close", () => {
-      this.handleDisconnect();
+      if (this.socket === socket) { this.handleDisconnect(); }
     });
 
     socket.on("timeout", () => {
       socket.destroy();
-      this.handleDisconnect();
+      if (this.socket === socket) { this.handleDisconnect(); }
     });
   }
 
