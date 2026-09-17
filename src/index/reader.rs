@@ -1,34 +1,40 @@
 pub use crate::index::source_positions::SourceSnapshot;
 use crate::index::types::*;
 use crate::utils::{BloomFilter, delta_decode, delta_decode_bitmap, delta_decode_intersect};
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 use anyhow::{Context, Result};
 use lru::LruCache;
 use memmap2::Mmap;
 use rayon::prelude::*;
 use roaring::RoaringBitmap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 /// Empty posting files are valid, but cannot be memory mapped on every OS.
-struct MappedBytes(Option<Mmap>);
+enum MappedBytes {
+    Mapped(Mmap),
+    Owned(Vec<u8>),
+}
 impl MappedBytes {
     fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
-        Ok(Self(if file.metadata()?.len() == 0 {
-            None
+        Ok(if file.metadata()?.len() == 0 {
+            Self::Owned(Vec::new())
         } else {
-            Some(unsafe { Mmap::map(&file)? })
-        }))
+            Self::Mapped(unsafe { Mmap::map(&file)? })
+        })
     }
 }
 impl std::ops::Deref for MappedBytes {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        self.0.as_deref().unwrap_or(&[])
+        match self {
+            Self::Mapped(bytes) => bytes,
+            Self::Owned(bytes) => bytes,
+        }
     }
 }
 
@@ -325,6 +331,121 @@ impl SegmentReader {
             reader.ensure_tokens()?;
         }
         Ok(reader)
+    }
+
+    /// Encode the ordinary immutable segment representation into owned bytes.
+    /// Reusing the existing decoders keeps memory and disk query semantics equal.
+    fn from_memory(
+        segment_id: SegmentId,
+        files: Vec<(DocId, crate::index::build::ProcessedFile)>,
+    ) -> Result<Self> {
+        fn checked_len(len: usize) -> Result<u32> {
+            u32::try_from(len).context("Memory-delta posting capacity exhausted")
+        }
+        let mut grams: BTreeMap<Trigram, Vec<DocId>> = BTreeMap::new();
+        let mut tokens: BTreeMap<String, Vec<DocId>> = BTreeMap::new();
+        let mut positions: BTreeMap<String, BTreeMap<DocId, Vec<u32>>> = BTreeMap::new();
+        let mut line_maps = HashMap::with_capacity(files.len());
+        for (doc_id, file) in files {
+            for gram in file.trigrams {
+                grams.entry(gram).or_default().push(doc_id);
+            }
+            for (token, position) in file.token_positions {
+                let token = file
+                    .tokens
+                    .get(token as usize)
+                    .context("Memory-delta position references a missing token")?;
+                positions
+                    .entry(token.clone())
+                    .or_default()
+                    .entry(doc_id)
+                    .or_default()
+                    .push(position);
+            }
+            for token in file.tokens {
+                tokens.entry(token).or_default().push(doc_id);
+            }
+            line_maps.insert(doc_id, file.line_offsets);
+        }
+
+        let gram_count = checked_len(grams.len())?;
+        let mut gram_dictionary = gram_count.to_le_bytes().to_vec();
+        let mut gram_postings = Vec::new();
+        let mut bloom = BloomFilter::new(grams.len().max(1), 0.01);
+        for (gram, mut docs) in grams {
+            docs.sort_unstable();
+            docs.dedup();
+            let offset = gram_postings.len();
+            crate::utils::delta_encode(&docs, &mut gram_postings);
+            gram_dictionary.extend_from_slice(&gram.to_le_bytes());
+            gram_dictionary.extend_from_slice(&(offset as u64).to_le_bytes());
+            gram_dictionary
+                .extend_from_slice(&checked_len(gram_postings.len() - offset)?.to_le_bytes());
+            gram_dictionary.extend_from_slice(&checked_len(docs.len())?.to_le_bytes());
+            bloom.insert(gram);
+        }
+        let mut token_dictionary = checked_len(tokens.len())?.to_le_bytes().to_vec();
+        let mut token_offsets = Vec::with_capacity(tokens.len());
+        let mut token_postings = Vec::new();
+        let mut token_positions = Vec::new();
+        for (token, mut docs) in tokens {
+            docs.sort_unstable();
+            docs.dedup();
+            let postings_offset = token_postings.len();
+            crate::utils::delta_encode(&docs, &mut token_postings);
+            let positions_offset = token_positions.len();
+            if let Some(doc_positions) = positions.get_mut(&token) {
+                for positions in doc_positions.values_mut() {
+                    positions.sort_unstable();
+                    positions.dedup();
+                    checked_len(positions.len())?;
+                }
+                let references: Vec<_> = doc_positions
+                    .iter()
+                    .map(|(&id, positions)| (id, positions.as_slice()))
+                    .collect();
+                crate::utils::encode_position_postings(&references, &mut token_positions);
+            }
+            token_offsets.push(token_dictionary.len());
+            token_dictionary.extend_from_slice(
+                &u16::try_from(token.len())
+                    .context("Memory-delta token exceeds format limit")?
+                    .to_le_bytes(),
+            );
+            token_dictionary.extend_from_slice(token.as_bytes());
+            token_dictionary.extend_from_slice(&(postings_offset as u64).to_le_bytes());
+            token_dictionary.extend_from_slice(
+                &checked_len(token_postings.len() - postings_offset)?.to_le_bytes(),
+            );
+            token_dictionary.extend_from_slice(&checked_len(docs.len())?.to_le_bytes());
+            token_dictionary.extend_from_slice(&(positions_offset as u64).to_le_bytes());
+            token_dictionary.extend_from_slice(
+                &checked_len(token_positions.len() - positions_offset)?.to_le_bytes(),
+            );
+        }
+        Ok(Self {
+            source_pack: OnceLock::from(None),
+            segment_id,
+            trigram_dict: TrigramDict {
+                data: MappedBytes::Owned(gram_dictionary),
+                count: gram_count as usize,
+            },
+            trigram_postings: MappedBytes::Owned(gram_postings),
+            tokens: OnceLock::from(Ok(TokenIndex {
+                dictionary: TokenDict {
+                    data: MappedBytes::Owned(token_dictionary),
+                    offsets: token_offsets,
+                    has_positions: true,
+                },
+                postings: MappedBytes::Owned(token_postings),
+                positions: Some(MappedBytes::Owned(token_positions)),
+            })),
+            required_positions: true,
+            line_maps: OnceLock::from(line_maps),
+            // All lazy cells are populated; this path is never opened.
+            segment_path: PathBuf::new(),
+            bloom_filter: Some(bloom),
+        })
     }
 
     fn ensure_tokens(&self) -> Result<()> {
@@ -637,9 +758,90 @@ impl DocumentLookup {
     }
 }
 
+/// The durable path table is immutable and shared by its memory snapshots.
+/// Only paths first introduced by a memory delta need cloning on the next one.
+#[derive(Clone)]
+struct PathTable {
+    base: Arc<Vec<PathBuf>>,
+    base_lookup: Arc<OnceLock<BasePathLookup>>,
+    appended: Vec<PathBuf>,
+}
+
+struct BasePathLookup {
+    /// Equal legacy paths use their last path-table ID, matching disk writers.
+    ids: AHashMap<PathBuf, PathId>,
+    aliased_ids: AHashSet<PathId>,
+}
+
+impl PathTable {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self {
+            base: Arc::new(paths),
+            base_lookup: Arc::new(OnceLock::new()),
+            appended: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn get(&self, index: usize) -> Option<&PathBuf> {
+        if index < self.base.len() {
+            self.base.get(index)
+        } else {
+            self.appended.get(index - self.base.len())
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.base.len() + self.appended.len()
+    }
+
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = &PathBuf> {
+        self.base.iter().chain(&self.appended)
+    }
+
+    fn push(&mut self, path: PathBuf) {
+        self.appended.push(path);
+    }
+
+    fn prepared_lookup(&self) -> &BasePathLookup {
+        self.base_lookup.get_or_init(|| {
+            let mut ids = AHashMap::with_capacity(self.base.len());
+            let mut aliased_ids = AHashSet::new();
+            for (index, path) in self.base.iter().enumerate() {
+                // Disk path counts are validated u32 values when loaded.
+                let id = index as PathId;
+                if let Some(previous) = ids.insert(path.clone(), id) {
+                    aliased_ids.remove(&previous);
+                    aliased_ids.insert(id);
+                }
+            }
+            BasePathLookup { ids, aliased_ids }
+        })
+    }
+
+    /// Return the canonical path ID and whether older IDs name the same path.
+    fn find(&self, path: &Path) -> Option<(PathId, bool)> {
+        let base = self.prepared_lookup();
+        let mut appended = self
+            .appended
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, candidate)| candidate.as_path() == path);
+        if let Some((index, _)) = appended.next() {
+            let id = (self.base.len() + index) as PathId;
+            return Some((id, appended.next().is_some() || base.ids.contains_key(path)));
+        }
+        base.ids
+            .get(path)
+            .map(|&id| (id, base.aliased_ids.contains(&id)))
+    }
+}
+
 /// Memory-mapped index reader for fast queries
 pub struct IndexReader {
-    _generation_lease: Option<File>,
+    _generation_lease: Option<Arc<File>>,
     root_path: PathBuf,
     #[allow(dead_code)]
     index_path: PathBuf,
@@ -648,8 +850,8 @@ pub struct IndexReader {
     documents: Vec<Document>,
     /// O(1) lookup index: doc_id -> index in documents Vec
     doc_id_to_index: DocumentLookup,
-    paths: Vec<PathBuf>,
-    segments: Vec<SegmentReader>,
+    paths: PathTable,
+    segments: Vec<Arc<SegmentReader>>,
     /// O(1) stop-gram lookup (converted from Vec on load)
     stop_grams: AHashSet<Trigram>,
     /// LRU cache for file contents (speeds up repeated queries on same files)
@@ -690,11 +892,11 @@ impl IndexReader {
         if self.segments.len() <= 4 {
             self.segments
                 .iter()
-                .try_for_each(SegmentReader::ensure_tokens)
+                .try_for_each(|segment| segment.ensure_tokens())
         } else {
             self.segments
                 .par_iter()
-                .try_for_each(SegmentReader::ensure_tokens)
+                .try_for_each(|segment| segment.ensure_tokens())
         }
     }
 
@@ -750,6 +952,7 @@ impl IndexReader {
                                     meta.has_positions,
                                     load_tokens,
                                 )
+                                .map(Arc::new)
                                 .with_context(|| {
                                     format!("Cannot open segment {seg_id}; rebuild the index")
                                 })
@@ -762,7 +965,7 @@ impl IndexReader {
 
         let segments = segments?;
         let documents = documents_result?;
-        let paths = paths_result?;
+        let paths = PathTable::new(paths_result?);
 
         let doc_id_to_index = DocumentLookup::new(&documents);
 
@@ -773,7 +976,7 @@ impl IndexReader {
         let file_cache = SharedContentCache::acquire();
 
         Ok(Self {
-            _generation_lease: generation_lease,
+            _generation_lease: generation_lease.map(Arc::new),
             root_path,
             index_path,
             meta,
@@ -789,6 +992,202 @@ impl IndexReader {
             valid_docs_cache: OnceLock::new(),
             path_order_cache: OnceLock::new(),
         })
+    }
+
+    /// Derive a query-ready immutable snapshot without publishing index files.
+    /// Every replacement gets complete postings and positions, so the ordinary
+    /// planner, filters, exclusions and verifiers retain their normal semantics.
+    /// The caller must retain a separate durable reader for disk reconciliation:
+    /// this snapshot shares its generation identity but includes memory-only IDs.
+    pub(crate) fn with_memory_delta(
+        &self,
+        files: Vec<crate::index::build::ProcessedFile>,
+        removed: &[PathBuf],
+    ) -> Result<Self> {
+        fn valid_relative(path: &Path) -> bool {
+            !path.as_os_str().is_empty()
+                && path
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
+        }
+        let mut replacements = HashSet::with_capacity(files.len() + removed.len());
+        for file in &files {
+            anyhow::ensure!(
+                valid_relative(&file.rel_path),
+                "Invalid memory-delta file path"
+            );
+            anyhow::ensure!(
+                replacements.insert(file.rel_path.clone()),
+                "Duplicate memory-delta file path"
+            );
+            anyhow::ensure!(
+                !file.flags.is_stale() && !file.flags.is_tombstone(),
+                "Invalid memory-delta document flags"
+            );
+            anyhow::ensure!(
+                file.tokens
+                    .iter()
+                    .all(|token| u16::try_from(token.len()).is_ok()),
+                "Memory-delta token exceeds format limit"
+            );
+            anyhow::ensure!(
+                file.token_positions
+                    .iter()
+                    .all(|&(token, _)| (token as usize) < file.tokens.len()),
+                "Memory-delta position references a missing token"
+            );
+        }
+        for path in removed {
+            anyhow::ensure!(valid_relative(path), "Invalid memory-delta removal path");
+            replacements.insert(path.clone());
+        }
+        let added =
+            u32::try_from(files.len()).context("Memory-delta document capacity exceeded")?;
+        let maximum_doc_id = self
+            .documents
+            .iter()
+            .map(|doc| doc.doc_id)
+            .max()
+            .unwrap_or(0);
+        maximum_doc_id
+            .checked_add(added)
+            .context("Memory-delta document ID capacity exhausted")?;
+        let document_count = self
+            .documents
+            .len()
+            .checked_add(files.len())
+            .and_then(|count| u32::try_from(count).ok())
+            .context("Memory-delta document count capacity exhausted")?;
+        let segment_id = if files.is_empty() {
+            None
+        } else {
+            Some(
+                self.segments
+                    .iter()
+                    .map(|segment| segment.segment_id)
+                    .max()
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .context("Memory-delta segment ID capacity exhausted")?,
+            )
+        };
+        let mut paths = self.paths.clone();
+        let mut replacement_path_ids: HashMap<PathBuf, PathId> =
+            HashMap::with_capacity(replacements.len());
+        let mut aliased_replacements = Vec::new();
+        for path in &replacements {
+            if let Some((id, aliased)) = self.paths.find(path) {
+                replacement_path_ids.insert(path.clone(), id);
+                if aliased {
+                    aliased_replacements.push(path.as_path());
+                }
+            }
+        }
+        let superseded_path_ids: AHashSet<PathId> =
+            replacement_path_ids.values().copied().collect();
+        let mut documents = self.documents.clone();
+        for doc in &mut documents {
+            if superseded_path_ids.contains(&doc.path_id)
+                || (!aliased_replacements.is_empty()
+                    && self
+                        .paths
+                        .get(doc.path_id as usize)
+                        .is_some_and(|path| aliased_replacements.contains(&path.as_path())))
+            {
+                doc.flags.set_tombstone();
+            }
+        }
+        let mut new_files = Vec::with_capacity(files.len());
+        for (offset, file) in files.into_iter().enumerate() {
+            let doc_id = maximum_doc_id + offset as u32 + 1;
+            let path_id = if let Some(&id) = replacement_path_ids.get(&file.rel_path) {
+                id
+            } else {
+                let id = u32::try_from(paths.len())
+                    .context("Memory-delta path ID capacity exhausted")?;
+                replacement_path_ids.insert(file.rel_path.clone(), id);
+                paths.push(file.rel_path.clone());
+                id
+            };
+            documents.push(Document {
+                doc_id,
+                path_id,
+                size: file.size,
+                mtime: file.mtime,
+                language: file.language,
+                flags: file.flags,
+                segment_id: segment_id.expect("nonempty files have a checked segment ID"),
+            });
+            new_files.push((doc_id, file));
+        }
+        let mut segments = self.segments.clone();
+        let mut meta = self.meta.clone();
+        if let Some(segment_id) = segment_id {
+            segments.push(Arc::new(SegmentReader::from_memory(segment_id, new_files)?));
+            if meta.base_segment.is_none() {
+                meta.base_segment = Some(segment_id);
+            } else {
+                meta.delta_segments.push(segment_id);
+            }
+        }
+        meta.doc_count = document_count;
+        meta.segment_count = u16::try_from(segments.len())
+            .context("Memory-delta segment count capacity exhausted")?;
+        meta.tombstone_count = documents
+            .iter()
+            .filter(|doc| doc.flags.is_tombstone())
+            .count() as u32;
+        meta.valid_doc_count = documents.iter().filter(|doc| doc.is_valid()).count() as u32;
+        meta.rejected_files
+            .retain(|(path, _)| !replacements.contains(path));
+        let doc_id_to_index = DocumentLookup::new(&documents);
+        Ok(Self {
+            _generation_lease: self._generation_lease.clone(),
+            root_path: self.root_path.clone(),
+            index_path: self.index_path.clone(),
+            meta,
+            documents,
+            doc_id_to_index,
+            paths,
+            segments,
+            stop_grams: self.stop_grams.clone(),
+            file_cache: Arc::clone(&self.file_cache),
+            content_cache_enabled: self.content_cache_enabled,
+            source_pack_enabled: self.source_pack_enabled,
+            valid_docs_cache: OnceLock::new(),
+            path_order_cache: OnceLock::new(),
+        })
+    }
+
+    /// Warm path lookups before accepting watcher events. Ordinary searches
+    /// never call this and retain their allocation-free path-table access.
+    pub(crate) fn prepare_watched_paths(&self) {
+        self.paths.prepared_lookup();
+    }
+
+    /// Find the newest live incarnation without hashing every document path.
+    /// Tombstones remain in the path table so a later recreation reuses its ID.
+    pub(crate) fn document_for_path(&self, path: &Path) -> Option<&Document> {
+        let (path_id, aliased) = self.paths.find(path)?;
+        if aliased {
+            // Legacy tables may assign multiple IDs to one normalized path.
+            // Full reconciliation chooses the highest live document ID.
+            self.documents
+                .iter()
+                .filter(|doc| {
+                    doc.is_valid()
+                        && self
+                            .paths
+                            .get(doc.path_id as usize)
+                            .is_some_and(|candidate| candidate == path)
+                })
+                .max_by_key(|doc| doc.doc_id)
+        } else {
+            self.documents
+                .iter()
+                .rev()
+                .find(|doc| doc.path_id == path_id && doc.is_valid())
+        }
     }
 
     /// Get document by ID in constant time.
@@ -948,7 +1347,7 @@ impl IndexReader {
         if trigrams.is_empty() {
             return self.valid_doc_ids().clone();
         }
-        let search = |segment: &SegmentReader| segment.intersect_trigrams(trigrams);
+        let search = |segment: &Arc<SegmentReader>| segment.intersect_trigrams(trigrams);
         if self.segments.len() <= 4 {
             self.segments
                 .iter()
@@ -976,7 +1375,7 @@ impl IndexReader {
             GramQuery::Empty => return RoaringBitmap::new(),
             _ => {}
         }
-        let search = |segment: &SegmentReader| query.in_segment(segment, self.valid_doc_ids());
+        let search = |segment: &Arc<SegmentReader>| query.in_segment(segment, self.valid_doc_ids());
         if self.segments.len() <= 4 {
             self.segments
                 .iter()
@@ -2195,5 +2594,543 @@ mod cache_budget_tests {
         }
         assert_eq!(cache.entries.len(), cache.max_entries);
         assert_eq!(cache.bytes, cache.max_entries);
+    }
+}
+
+#[cfg(test)]
+mod memory_delta_tests {
+    use super::*;
+    use crate::index::build::ProcessedFile;
+    use crate::query::{QueryExecutor, parse_query};
+    use std::fs;
+
+    fn processed(root: &Path, relative: &str) -> ProcessedFile {
+        let path = root.join(relative);
+        let content = fs::read_to_string(&path).unwrap();
+        let (tokens, token_positions) = crate::utils::extract_tokens_and_positions(&content);
+        let mut line_offsets = vec![0];
+        line_offsets.extend(
+            content
+                .bytes()
+                .enumerate()
+                .filter(|(offset, byte)| *byte == b'\n' && offset + 1 < content.len())
+                .map(|(offset, _)| (offset + 1) as u32),
+        );
+        ProcessedFile {
+            rel_path: relative.into(),
+            mtime: fs::metadata(path)
+                .unwrap()
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64,
+            size: content.len() as u64,
+            language: Language::from_extension(
+                Path::new(relative)
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(""),
+            ),
+            flags: DocFlags::new(),
+            trigrams: crate::utils::extract_trigrams(content.as_bytes()),
+            tokens,
+            token_positions,
+            line_offsets,
+        }
+    }
+
+    fn write(root: &Path, path: &str, contents: &str) {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn compare_all_outputs(memory: &IndexReader, disk: &IndexReader) {
+        let memory_executor = QueryExecutor::new(memory);
+        let disk_executor = QueryExecutor::new(disk);
+        for text in [
+            "alpha",
+            "alpha beta",
+            "alpha -forbidden",
+            "(alpha | stable) -forbidden",
+            "\"alpha beta\"",
+            "re:/alpha.*beta/",
+            "re:/^(alpha|stable)/",
+            "alpha lang:rust",
+            "alpha ext:py",
+            "path:nested",
+            "alpha path:nested",
+            "alpha line:2-3",
+            "K",
+            "Σ",
+            "x | alpha",
+            "neverpresent",
+            "alpha missing",
+            "-forbidden",
+            "alpha | re:/[x]/",
+        ] {
+            let mut query = parse_query(text);
+            query.options.limit = 0;
+            for limit in [0, 1, 2, 9] {
+                assert_eq!(
+                    memory_executor.execute_files_only(&query, limit).unwrap(),
+                    disk_executor.execute_files_only(&query, limit).unwrap(),
+                    "files: {text}, limit {limit}"
+                );
+                assert_eq!(
+                    memory_executor.execute_match_counts(&query, limit).unwrap(),
+                    disk_executor.execute_match_counts(&query, limit).unwrap(),
+                    "counts: {text}, limit {limit}"
+                );
+            }
+            let content = |executor: &QueryExecutor<'_>| {
+                executor
+                    .execute_with_content(&query, 1, 1)
+                    .unwrap()
+                    .into_iter()
+                    .map(|m| {
+                        (
+                            m.path,
+                            m.line_number,
+                            m.line_content,
+                            m.match_start,
+                            m.match_end,
+                            m.context_before,
+                            m.context_after,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                content(&memory_executor),
+                content(&disk_executor),
+                "content: {text}"
+            );
+            // Document IDs and stable ordering among equal scores depend on
+            // build order. Compare the complete ranked records by path/line.
+            let scores = |executor: &QueryExecutor<'_>| {
+                let mut scores: Vec<_> = executor
+                    .execute(&query)
+                    .unwrap()
+                    .into_iter()
+                    .map(|m| (m.path, m.line_number, m.score))
+                    .collect();
+                scores.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+                scores
+            };
+            let actual = scores(&memory_executor);
+            let expected = scores(&disk_executor);
+            assert_eq!(actual.len(), expected.len(), "ranked count: {text}");
+            for (actual, expected) in actual.iter().zip(&expected) {
+                assert_eq!(
+                    (&actual.0, actual.1),
+                    (&expected.0, expected.1),
+                    "ranked match: {text}"
+                );
+                assert!(
+                    (actual.2 - expected.2).abs() < 0.00001,
+                    "ranked score: {text}"
+                );
+            }
+        }
+        for text in ["re:/[/", "absent re:/[/", "-re:/[/"] {
+            let query = parse_query(text);
+            assert!(memory_executor.execute_files_only(&query, 0).is_err());
+            assert!(memory_executor.execute_match_counts(&query, 0).is_err());
+            assert!(memory_executor.execute_with_content(&query, 0, 0).is_err());
+            assert!(memory_executor.execute(&query).is_err());
+        }
+    }
+
+    #[test]
+    fn memory_deltas_match_fresh_indexes_across_queries_and_repeated_replacements() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for (path, text) in [
+            ("edited.rs", "oldmarker stable\n"),
+            ("deleted.rs", "alpha beta\n"),
+            ("untouched.rs", "stable alpha beta\n"),
+            ("nested/other.py", "alpha beta\nforbidden\n"),
+            ("unicode.txt", "K alpha Σ\n"),
+            ("retained.rs", "alpha beta\nalpha beta\nalpha beta\n"),
+        ] {
+            write(&root, path, text);
+        }
+        crate::index::build::build_index_with_progress(&root, true, true).unwrap();
+        let base = IndexReader::open(&root).unwrap();
+        let generation = base.generation_path().to_path_buf();
+        write(
+            &root,
+            "edited.rs",
+            "alpha beta\nstable retained\nalpha beta\n",
+        );
+        write(&root, "new.rs", "alpha x beta\nforbidden\n");
+        fs::remove_file(root.join("deleted.rs")).unwrap();
+        let mut memory = base
+            .with_memory_delta(
+                vec![processed(&root, "edited.rs"), processed(&root, "new.rs")],
+                &["edited.rs".into(), "deleted.rs".into()],
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&base.segments[0], &memory.segments[0]));
+        assert_eq!(crate::utils::get_index_dir(&root).unwrap(), generation);
+        assert_eq!(base.valid_doc_ids().len(), 6);
+        assert_eq!(memory.valid_doc_ids().len(), 6);
+        for round in 0..4 {
+            if round > 0 {
+                write(
+                    &root,
+                    "edited.rs",
+                    if round % 2 == 0 {
+                        "alpha beta\n"
+                    } else {
+                        "stable alpha\n"
+                    },
+                );
+                write(&root, "deleted.rs", "alpha beta recreated\n");
+                fs::remove_file(root.join("new.rs")).ok();
+                memory = memory
+                    .with_memory_delta(
+                        vec![
+                            processed(&root, "edited.rs"),
+                            processed(&root, "deleted.rs"),
+                        ],
+                        &["new.rs".into()],
+                    )
+                    .unwrap();
+            }
+            crate::index::build::build_index_with_progress(&root, true, true).unwrap();
+            let disk = IndexReader::open(&root).unwrap();
+            compare_all_outputs(&memory, &disk);
+            let live_paths: HashSet<_> = memory
+                .valid_doc_ids()
+                .iter()
+                .map(|id| memory.get_path(memory.get_document(id).unwrap()).unwrap())
+                .collect();
+            assert_eq!(live_paths.len() as u64, memory.valid_doc_ids().len());
+        }
+        // A final deletion-only snapshot has no extra segment and still
+        // supersedes every historical incarnation of the path.
+        fs::remove_file(root.join("edited.rs")).unwrap();
+        let deleted = memory
+            .with_memory_delta(vec![], &["edited.rs".into()])
+            .unwrap();
+        assert_eq!(deleted.segments.len(), memory.segments.len());
+        crate::index::build::build_index_with_progress(&root, true, true).unwrap();
+        compare_all_outputs(&deleted, &IndexReader::open(&root).unwrap());
+        drop((deleted, memory, base));
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn memory_delta_pins_lazy_base_resources_after_durable_generations_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        write(&root, "old.rs", "alpha beta\n");
+        crate::index::build::build_index_with_progress(&root, true, true).unwrap();
+        let base = IndexReader::open_for_search_uncached(&root).unwrap();
+        let generation = base.generation_path().to_path_buf();
+        assert!(base.segments[0].tokens.get().is_none());
+        assert!(base.segments[0].line_maps.get().is_none());
+        write(&root, "new.rs", "alpha beta\n");
+        let memory = base
+            .with_memory_delta(vec![processed(&root, "new.rs")], &[])
+            .unwrap();
+        drop(base);
+        crate::index::build::build_index_with_progress(&root, true, true).unwrap();
+        crate::index::build::build_index_with_progress(&root, true, true).unwrap();
+        assert!(
+            generation.exists(),
+            "memory reader lost the original generation lease"
+        );
+        memory.ensure_tokens().unwrap();
+        let base_doc = memory
+            .documents
+            .iter()
+            .find(|doc| memory.get_path(doc).unwrap() == Path::new("old.rs"))
+            .unwrap();
+        assert_eq!(
+            memory.segments[0].get_line_map(base_doc.doc_id),
+            Some(&vec![0])
+        );
+        assert_eq!(
+            QueryExecutor::new(&memory)
+                .execute_files_only(&parse_query("\"alpha beta\""), 0)
+                .unwrap(),
+            vec![PathBuf::from("new.rs"), PathBuf::from("old.rs")]
+        );
+        drop(memory);
+        crate::index::build::build_index_with_progress(&root, true, true).unwrap();
+        assert!(
+            !generation.exists(),
+            "dropping memory reader did not release generation lease"
+        );
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn memory_paths_share_durable_storage_and_preserve_appended_ids_across_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        write(&root, "base.rs", "alpha beta\n");
+        crate::index::build::build_index_with_progress(&root, true, true).unwrap();
+        let base = IndexReader::open(&root).unwrap();
+        assert!(base.paths.base_lookup.get().is_none());
+        assert_eq!(
+            QueryExecutor::new(&base)
+                .execute_files_only(&parse_query("alpha"), 0)
+                .unwrap(),
+            vec![PathBuf::from("base.rs")]
+        );
+        assert!(
+            base.paths.base_lookup.get().is_none(),
+            "unwatched query allocated a path lookup"
+        );
+        base.prepare_watched_paths();
+        assert!(base.paths.base_lookup.get().is_some());
+        assert_eq!(
+            base.document_for_path(Path::new("base.rs"))
+                .unwrap()
+                .path_id,
+            0
+        );
+        assert!(base.document_for_path(Path::new("absent.rs")).is_none());
+        write(&root, "nested/one.rs", "alpha beta\n");
+        write(&root, "two.rs", "alpha beta\n");
+        let first = base
+            .with_memory_delta(
+                vec![
+                    processed(&root, "nested/one.rs"),
+                    processed(&root, "two.rs"),
+                ],
+                &[],
+            )
+            .unwrap();
+        let path_id = |reader: &IndexReader, path: &str| {
+            reader
+                .documents
+                .iter()
+                .find(|doc| doc.is_valid() && reader.get_path(doc).unwrap() == Path::new(path))
+                .unwrap()
+                .path_id
+        };
+        let first_id = path_id(&first, "nested/one.rs");
+        assert!(Arc::ptr_eq(&base.paths.base, &first.paths.base));
+        assert!(Arc::ptr_eq(
+            &base.paths.base_lookup,
+            &first.paths.base_lookup
+        ));
+        assert!(std::ptr::eq(
+            base.paths.prepared_lookup(),
+            first.paths.prepared_lookup()
+        ));
+        assert_eq!(
+            first
+                .document_for_path(Path::new("nested/./one.rs"))
+                .unwrap()
+                .path_id,
+            first_id
+        );
+        assert!(base.paths.appended.is_empty());
+        assert_eq!(first.paths.appended.len(), 2);
+        write(&root, "nested/one.rs", "stable alpha\n");
+        write(&root, "three.rs", "alpha beta\n");
+        let second = first
+            .with_memory_delta(
+                vec![
+                    processed(&root, "nested/one.rs"),
+                    processed(&root, "three.rs"),
+                ],
+                &[],
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&base.paths.base, &second.paths.base));
+        assert_eq!(second.paths.appended.len(), 3);
+        assert_eq!(
+            first.paths.appended.len(),
+            2,
+            "derived snapshot mutated its predecessor"
+        );
+        assert_eq!(path_id(&second, "nested/one.rs"), first_id);
+        let deleted = second
+            .with_memory_delta(vec![], &["nested/one.rs".into()])
+            .unwrap();
+        assert!(
+            deleted
+                .document_for_path(Path::new("nested/one.rs"))
+                .is_none()
+        );
+        let restored = deleted
+            .with_memory_delta(vec![processed(&root, "nested/one.rs")], &[])
+            .unwrap();
+        assert_eq!(
+            restored
+                .document_for_path(Path::new("nested/one.rs"))
+                .unwrap()
+                .path_id,
+            first_id
+        );
+        assert!(Arc::ptr_eq(
+            &base.paths.base_lookup,
+            &restored.paths.base_lookup
+        ));
+        assert_eq!(path_id(&restored, "nested/one.rs"), first_id);
+        assert_eq!(restored.paths.len(), 4);
+        for (index, path) in restored.paths.iter().enumerate() {
+            assert_eq!(restored.paths.get(index), Some(path));
+        }
+        assert!(restored.paths.get(restored.paths.len()).is_none());
+        assert!(restored.paths.get(usize::MAX).is_none());
+        crate::index::build::build_index_with_progress(&root, true, true).unwrap();
+        compare_all_outputs(&restored, &IndexReader::open(&root).unwrap());
+        drop((restored, deleted, second, first, base));
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn small_and_large_replacement_sets_preserve_path_component_equality() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        write(&root, "nested/base.rs", "alpha beta\n");
+        crate::index::build::build_index_with_progress(&root, true, true).unwrap();
+        let base = IndexReader::open(&root).unwrap();
+        for count in [1, 9] {
+            let mut removed: Vec<PathBuf> = (0..count)
+                .map(|index| format!("absent{index}.rs").into())
+                .collect();
+            removed[0] = "nested/./base.rs".into();
+            let memory = base.with_memory_delta(vec![], &removed).unwrap();
+            assert!(
+                memory.valid_doc_ids().is_empty(),
+                "replacement count {count}"
+            );
+            assert_eq!(base.valid_doc_ids().len(), 1);
+            assert!(Arc::ptr_eq(&base.paths.base, &memory.paths.base));
+        }
+        drop(base);
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn watched_lookup_handles_legacy_path_aliases_and_recreation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        write(&root, "nested/same.rs", "alpha beta\n");
+        crate::index::build::build_index_with_progress(&root, true, true).unwrap();
+        let mut base = IndexReader::open(&root).unwrap();
+        // The last path-table ID is canonical, but the newest live document
+        // can still refer to an earlier equivalent ID in a legacy table.
+        base.paths = PathTable::new(vec!["nested/same.rs".into(), "nested/./same.rs".into()]);
+        let mut first = base.documents[0].clone();
+        first.doc_id = 1;
+        first.path_id = 1;
+        let mut newest = first.clone();
+        newest.doc_id = 2;
+        newest.path_id = 0;
+        base.documents = vec![first, newest];
+        base.doc_id_to_index = DocumentLookup::new(&base.documents);
+        base.meta.doc_count = 2;
+        base.meta.valid_doc_count = 2;
+        base.prepare_watched_paths();
+        assert_eq!(
+            base.paths.find(Path::new("nested/same.rs")),
+            Some((1, true))
+        );
+        assert_eq!(
+            base.document_for_path(Path::new("nested/same.rs"))
+                .unwrap()
+                .doc_id,
+            2
+        );
+        base.documents[1].flags.set_tombstone();
+        assert_eq!(
+            base.document_for_path(Path::new("nested/./same.rs"))
+                .unwrap()
+                .doc_id,
+            1
+        );
+        base.documents[1].flags = DocFlags::new();
+        let memory = base
+            .with_memory_delta(vec![processed(&root, "nested/same.rs")], &[])
+            .unwrap();
+        assert_eq!(
+            memory
+                .document_for_path(Path::new("nested/same.rs"))
+                .unwrap()
+                .path_id,
+            1
+        );
+        assert_eq!(memory.valid_doc_ids().len(), 1);
+        assert_eq!(base.valid_doc_ids().len(), 2);
+        assert_eq!(
+            QueryExecutor::new(&memory)
+                .execute_files_only(&parse_query("alpha"), 0)
+                .unwrap(),
+            vec![PathBuf::from("nested/same.rs")]
+        );
+        let removed = memory
+            .with_memory_delta(vec![], &["nested/same.rs".into()])
+            .unwrap();
+        assert!(
+            removed
+                .document_for_path(Path::new("nested/same.rs"))
+                .is_none()
+        );
+        let recreated = removed
+            .with_memory_delta(vec![processed(&root, "nested/same.rs")], &[])
+            .unwrap();
+        assert_eq!(
+            recreated
+                .document_for_path(Path::new("nested/same.rs"))
+                .unwrap()
+                .path_id,
+            1
+        );
+        assert_eq!(recreated.valid_doc_ids().len(), 1);
+        assert_eq!(recreated.paths.len(), 2);
+        drop((recreated, removed, memory, base));
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn memory_delta_rejects_invalid_inputs_and_id_exhaustion_without_mutating_base() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        write(&root, "base.rs", "alpha beta\n");
+        crate::index::build::build_index_with_progress(&root, true, true).unwrap();
+        let mut base = IndexReader::open(&root).unwrap();
+        let generation = base.generation_path().to_path_buf();
+        let good = processed(&root, "base.rs");
+        for path in ["", "../escape.rs", "/absolute.rs", "nested/../escape.rs"] {
+            let mut invalid = good.clone();
+            invalid.rel_path = path.into();
+            assert!(base.with_memory_delta(vec![invalid], &[]).is_err());
+            assert!(base.with_memory_delta(vec![], &[path.into()]).is_err());
+        }
+        assert!(
+            base.with_memory_delta(vec![good.clone(), good.clone()], &[])
+                .is_err()
+        );
+        let mut invalid = good.clone();
+        invalid
+            .token_positions
+            .push((invalid.tokens.len() as u32, 0));
+        assert!(base.with_memory_delta(vec![invalid], &[]).is_err());
+        let mut invalid = good.clone();
+        invalid.tokens.push("x".repeat(u16::MAX as usize + 1));
+        assert!(base.with_memory_delta(vec![invalid], &[]).is_err());
+        let mut invalid = good.clone();
+        invalid.flags.set_tombstone();
+        assert!(base.with_memory_delta(vec![invalid], &[]).is_err());
+        base.documents[0].doc_id = u32::MAX;
+        assert!(base.with_memory_delta(vec![good.clone()], &[]).is_err());
+        base.documents[0].doc_id = 1;
+        Arc::get_mut(&mut base.segments[0]).unwrap().segment_id = u16::MAX;
+        assert!(base.with_memory_delta(vec![good], &[]).is_err());
+        assert_eq!(crate::utils::get_index_dir(&root).unwrap(), generation);
+        assert_eq!(IndexReader::open(&root).unwrap().valid_doc_ids().len(), 1);
+        drop(base);
+        crate::utils::remove_index(&root).unwrap();
     }
 }

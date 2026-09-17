@@ -6,7 +6,8 @@
 //! and call [`IndexServer::handle_request`].
 
 use crate::index::build::{
-    UpdateOutcome, build_index_with_progress, reconcile_index, reconcile_index_paths,
+    UpdateOutcome, build_index_with_progress, reconcile_index,
+    reconcile_index_paths_with_visibility,
 };
 use crate::index::reader::IndexReader;
 use crate::index::types::IndexMeta;
@@ -43,6 +44,9 @@ const MAX_RESULTS_CAP: usize = 10_000_000;
 struct CachedIndex {
     /// Current reader (swapped atomically via Mutex)
     reader: Mutex<Arc<IndexReader>>,
+    /// Last committed reader. A live memory snapshot must never be mistaken
+    /// for persisted metadata when computing retries or subsequent deltas.
+    durable_reader: Mutex<Arc<IndexReader>>,
     /// Last access time
     last_used: Mutex<Instant>,
     /// File watcher handle (if watching is active)
@@ -51,8 +55,10 @@ struct CachedIndex {
 
 impl CachedIndex {
     fn new(reader: IndexReader) -> Self {
+        let reader = Arc::new(reader);
         Self {
-            reader: Mutex::new(Arc::new(reader)),
+            reader: Mutex::new(reader.clone()),
+            durable_reader: Mutex::new(reader),
             last_used: Mutex::new(Instant::now()),
             watcher_handle: Mutex::new(None),
         }
@@ -69,9 +75,21 @@ impl CachedIndex {
         self.reader.lock().unwrap().clone()
     }
 
+    fn get_durable_reader(&self) -> Arc<IndexReader> {
+        self.durable_reader.lock().unwrap().clone()
+    }
+
+    fn set_live_reader(&self, reader: IndexReader) {
+        *self.reader.lock().unwrap() = Arc::new(reader);
+    }
+
     /// Swap in a new reader, clearing caches
     fn set_pending_reader(&self, reader: IndexReader) {
+        if self.is_watching() {
+            reader.prepare_watched_paths();
+        }
         let new_reader = Arc::new(reader);
+        *self.durable_reader.lock().unwrap() = new_reader.clone();
         // Swap the reader
         if let Ok(mut current) = self.reader.lock() {
             *current = new_reader;
@@ -133,6 +151,8 @@ struct PendingChanges {
     batch: ChangeBatch,
     /// Time of the first change in this batch
     first_change: Instant,
+    last_change: Instant,
+    needs_visibility: bool,
     retry_after: Option<Instant>,
 }
 
@@ -218,10 +238,6 @@ impl IndexServer {
                             root_path.display(),
                             reason
                         );
-                        // Clear pending changes for this index before rebuild
-                        if let Ok(mut pending) = self.pending_changes.lock() {
-                            pending.remove(&root_path);
-                        }
                         self.trigger_rebuild(&root_path);
                     }
                     WatcherMessage::Error { root_path, message } => {
@@ -250,6 +266,8 @@ impl IndexServer {
         if let Some(existing) = pending.get_mut(&root_path) {
             // Merge into existing batch
             existing.batch.merge(batch);
+            existing.last_change = Instant::now();
+            existing.needs_visibility = true;
         } else {
             // Create new pending entry
             pending.insert(
@@ -257,6 +275,8 @@ impl IndexServer {
                 PendingChanges {
                     batch,
                     first_change: Instant::now(),
+                    last_change: Instant::now(),
+                    needs_visibility: true,
                     retry_after: None,
                 },
             );
@@ -266,23 +286,39 @@ impl IndexServer {
     /// Flush changes for indexes where the flush interval has elapsed
     fn flush_expired_changes(&self, flush_interval: Duration) {
         // Collect indexes that need flushing
-        let to_flush: Vec<PathBuf> = {
+        let to_flush: Vec<(PathBuf, bool)> = {
             let pending = self.pending_changes.lock().unwrap();
             pending
                 .iter()
-                .filter(|(_, changes)| {
-                    changes.first_change.elapsed() >= flush_interval
-                        && changes
-                            .retry_after
-                            .is_none_or(|deadline| Instant::now() >= deadline)
+                .filter_map(|(path, changes)| {
+                    if changes
+                        .retry_after
+                        .is_some_and(|deadline| Instant::now() < deadline)
+                    {
+                        return None;
+                    }
+                    // Searches see small changes immediately. Persist after
+                    // typing settles, with a maximum age to bound recovery work.
+                    // Explicit nonzero flush intervals keep their original
+                    // first-event scheduling contract.
+                    let durable_due = if !self.watch_enabled || !flush_interval.is_zero() {
+                        changes.first_change.elapsed() >= flush_interval
+                    } else {
+                        changes.last_change.elapsed() >= Duration::from_millis(250)
+                            || changes.first_change.elapsed() >= Duration::from_secs(10)
+                    };
+                    if durable_due || changes.needs_visibility {
+                        Some((path.clone(), durable_due))
+                    } else {
+                        None
+                    }
                 })
-                .map(|(path, _)| path.clone())
                 .collect()
         };
 
         // Flush each one
-        for root_path in to_flush {
-            self.flush_pending_changes(&root_path);
+        for (root_path, persist) in to_flush {
+            self.flush_pending_changes_mode(&root_path, persist);
         }
     }
 
@@ -307,6 +343,10 @@ impl IndexServer {
     /// Acquire before removing work: contention must not stall other roots or
     /// lose a batch. Failed publication is retained for a bounded-rate retry.
     fn flush_pending_changes(&self, root_path: &PathBuf) {
+        self.flush_pending_changes_mode(root_path, true);
+    }
+
+    fn flush_pending_changes_mode(&self, root_path: &PathBuf, persist: bool) {
         let lock = match crate::utils::IndexLock::try_acquire(root_path) {
             Ok(Some(lock)) => lock,
             Ok(None) => return,
@@ -316,19 +356,34 @@ impl IndexServer {
                 return;
             }
         };
-        let batch = self
-            .pending_changes
-            .lock()
-            .unwrap()
-            .remove(root_path)
-            .map(|p| p.batch);
-        if let Some(batch) = batch
-            && !batch.is_empty()
-            && let Err(error) = self.handle_changes(root_path.clone(), &batch, &lock)
+        let pending = self.pending_changes.lock().unwrap().remove(root_path);
+        if let Some(mut pending) = pending
+            && !pending.batch.is_empty()
         {
-            eprintln!("fxid: update failed; retaining pending changes: {error:#}");
-            self.accumulate_changes(root_path.clone(), batch);
-            self.retry_pending_changes(root_path);
+            match self.handle_changes(root_path.clone(), &pending.batch, &lock, !persist) {
+                Ok(true) => {}
+                Ok(false) => {
+                    pending.needs_visibility = false;
+                    self.restore_pending_changes(root_path, pending);
+                }
+                Err(error) => {
+                    eprintln!("fxid: update failed; retaining pending changes: {error:#}");
+                    self.restore_pending_changes(root_path, pending);
+                    self.retry_pending_changes(root_path);
+                }
+            }
+        }
+    }
+
+    fn restore_pending_changes(&self, root_path: &PathBuf, pending: PendingChanges) {
+        let mut all = self.pending_changes.lock().unwrap();
+        if let Some(newer) = all.get_mut(root_path) {
+            newer.batch.merge(pending.batch);
+            newer.first_change = newer.first_change.min(pending.first_change);
+            // Newer notifications must get another visibility pass.
+            newer.needs_visibility = true;
+        } else {
+            all.insert(root_path.clone(), pending);
         }
     }
 
@@ -338,10 +393,11 @@ impl IndexServer {
         root_path: PathBuf,
         batch: &ChangeBatch,
         lock: &crate::utils::IndexLock,
-    ) -> Result<()> {
+        preview_only: bool,
+    ) -> Result<bool> {
         let total = batch.total_changes();
         if total == 0 {
-            return Ok(());
+            return Ok(true);
         }
 
         // Watcher messages are hints, not a count of changed documents. A
@@ -355,7 +411,7 @@ impl IndexServer {
             .chain(&batch.deleted)
             .cloned()
             .collect();
-        self.apply_incremental_update_paths(&root_path, lock, Some(&paths))
+        self.apply_incremental_update_paths(&root_path, lock, Some(&paths), preview_only)
     }
 
     /// Apply an incremental update using delta segments
@@ -365,7 +421,8 @@ impl IndexServer {
         root_path: &PathBuf,
         lock: &crate::utils::IndexLock,
     ) -> Result<()> {
-        self.apply_incremental_update_paths(root_path, lock, None)
+        self.apply_incremental_update_paths(root_path, lock, None, false)
+            .map(|_| ())
     }
 
     fn apply_incremental_update_paths(
@@ -373,7 +430,8 @@ impl IndexServer {
         root_path: &PathBuf,
         lock: &crate::utils::IndexLock,
         paths: Option<&[PathBuf]>,
-    ) -> Result<()> {
+        preview_only: bool,
+    ) -> Result<bool> {
         let trace = std::env::var_os("FXI_TRACE_UPDATES").is_some();
         let started = Instant::now();
         // Notifications are hints, not an authoritative file list. Reconcile
@@ -384,13 +442,26 @@ impl IndexServer {
             .read()
             .unwrap()
             .get(root_path)
-            .map(|cached| cached.get_reader());
+            .map(|cached| cached.get_durable_reader());
+        let mut publish_visible = |reader| {
+            if let Some(cached) = self.indexes.read().unwrap().get(root_path) {
+                cached.set_live_reader(reader);
+            }
+            if trace {
+                eprintln!(
+                    "fxid: memory update visible after {:.3}ms",
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+        };
         let outcome = match paths {
-            Some(paths) => reconcile_index_paths(
+            Some(paths) => reconcile_index_paths_with_visibility(
                 root_path,
                 current.as_deref(),
                 self.watcher_config.rebuild_threshold_percent,
                 paths,
+                &mut publish_visible,
+                preview_only,
             ),
             None => reconcile_index(
                 root_path,
@@ -399,6 +470,7 @@ impl IndexServer {
             ),
         };
         match outcome {
+            Ok(UpdateOutcome::Visible) => return Ok(false),
             Ok(UpdateOutcome::Unchanged(generation))
                 if current.as_ref().is_some_and(|reader| {
                     reader.generation_path() == generation
@@ -408,12 +480,19 @@ impl IndexServer {
                         )
                 }) =>
             {
-                return Ok(());
+                // A previous preview may now cancel out (e.g. create then
+                // remove). Restore the actual durable snapshot as well.
+                if let Some(cached) = self.indexes.read().unwrap().get(root_path)
+                    && let Some(current) = current
+                {
+                    *cached.reader.lock().unwrap() = current;
+                }
+                return Ok(true);
             }
             Ok(_) => {}
             Err(error) => {
                 eprintln!("fxid: reconcile failed: {error}; rebuilding");
-                return self.rebuild_with_lock(root_path, lock);
+                return self.rebuild_with_lock(root_path, lock).map(|_| true);
             }
         }
         let reconciled = Instant::now();
@@ -437,26 +516,24 @@ impl IndexServer {
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
-        Ok(())
+        Ok(true)
     }
 
-    /// Trigger a full index rebuild
+    /// A rebuild consumes only the batch captured before it starts. Failure
+    /// restores that batch, including when acquiring the writer lock fails;
+    /// notifications accumulated during the rebuild retain their own entry.
     fn trigger_rebuild(&self, root_path: &PathBuf) {
-        // Serialize against CLI indexers and other writers on this root
-        let _lock = match crate::utils::IndexLock::acquire(root_path) {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!(
-                    "fxid: failed to lock index for {}: {}",
-                    root_path.display(),
-                    e
-                );
-                return;
+        let captured = self.pending_changes.lock().unwrap().remove(root_path);
+        let result = (|| {
+            let lock = crate::utils::IndexLock::acquire(root_path)?;
+            self.rebuild_with_lock(root_path, &lock)
+        })();
+        if let Err(error) = result {
+            eprintln!("fxid: rebuild failed; retaining pending changes: {error:#}");
+            if let Some(pending) = captured {
+                self.restore_pending_changes(root_path, pending);
+                self.retry_pending_changes(root_path);
             }
-        };
-
-        if let Err(error) = self.rebuild_with_lock(root_path, &_lock) {
-            eprintln!("fxid: rebuild failed: {error:#}");
         }
     }
 
@@ -1054,7 +1131,7 @@ impl IndexServer {
                     .read()
                     .unwrap()
                     .get(root_path)
-                    .map(|cached| cached.get_reader());
+                    .map(|cached| cached.get_durable_reader());
                 match reconcile_index(
                     root_path,
                     current.as_deref(),
@@ -1078,6 +1155,9 @@ impl IndexServer {
                     }
                 }
 
+                if let Some(cached) = self.indexes.read().unwrap().get(root_path) {
+                    cached.get_durable_reader().prepare_watched_paths();
+                }
                 eprintln!("fxid: starting file watcher for {}", root_path.display());
                 self.spawn_watcher(root_path);
             }
@@ -1448,6 +1528,135 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_lock_failure_retains_the_captured_pending_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("old.rs"), "old content\n").unwrap();
+        build_index_with_progress(&root, true, true).unwrap();
+        let server = IndexServer::new(false);
+        server.ensure_index_loaded(&root).unwrap();
+        std::fs::write(root.join("new.rs"), "new content\n").unwrap();
+        queue_reconciliation(&server, &root);
+        let first_change = server.pending_changes.lock().unwrap()[&root].first_change;
+        let lock_path = crate::utils::app_data::get_index_container(&root)
+            .unwrap()
+            .with_extension("lock");
+        // A directory at the lock filename produces a genuine acquisition
+        // error rather than ordinary writer contention.
+        if lock_path.exists() {
+            std::fs::remove_file(&lock_path).unwrap();
+        }
+        std::fs::create_dir(&lock_path).unwrap();
+        server.trigger_rebuild(&root);
+        {
+            let pending = server.pending_changes.lock().unwrap();
+            let retained = &pending[&root];
+            assert_eq!(retained.first_change, first_change);
+            assert!(retained.retry_after.is_some());
+            assert!(retained.batch.modified.contains(&PathBuf::new()));
+        }
+        std::fs::remove_dir(lock_path).unwrap();
+        server
+            .pending_changes
+            .lock()
+            .unwrap()
+            .get_mut(&root)
+            .unwrap()
+            .retry_after = None;
+        server.flush_expired_changes(Duration::ZERO);
+        assert!(server.pending_changes.lock().unwrap().is_empty());
+        assert_eq!(
+            indexed_paths(&server, &root),
+            [PathBuf::from("new.rs"), PathBuf::from("old.rs")]
+        );
+        drop(server);
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn rebuild_completion_preserves_newer_notifications_and_restores_failed_work() {
+        for fail_publication in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            std::fs::write(root.join("old.rs"), "old content\n").unwrap();
+            build_index_with_progress(&root, true, true).unwrap();
+            let server = IndexServer::new(false);
+            server.ensure_index_loaded(&root).unwrap();
+            let queue = |path: &str| {
+                let mut batch = ChangeBatch::new();
+                batch.add(crate::server::watcher::FileChange {
+                    path: path.into(),
+                    kind: ChangeKind::Modified,
+                });
+                server.accumulate_changes(root.clone(), batch);
+            };
+            std::fs::write(root.join("first.rs"), "first new content\n").unwrap();
+            queue("first.rs");
+            let held = crate::utils::IndexLock::acquire(&root).unwrap();
+            let temporary_manifest = crate::utils::app_data::get_index_container(&root)
+                .unwrap()
+                .join("CURRENT.tmp");
+            if fail_publication {
+                std::fs::create_dir(&temporary_manifest).unwrap();
+            }
+            let worker_server = Arc::clone(&server);
+            let worker_root = root.clone();
+            let worker = std::thread::spawn(move || worker_server.trigger_rebuild(&worker_root));
+            // The held writer lock deterministically pauses the worker after
+            // it captures the old batch, allowing another notification to arrive.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while server.pending_changes.lock().unwrap().contains_key(&root) {
+                assert!(
+                    Instant::now() < deadline,
+                    "rebuild did not capture its pending batch"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::fs::write(root.join("second.rs"), "second new content\n").unwrap();
+            queue("second.rs");
+            drop(held);
+            worker.join().unwrap();
+            {
+                let pending = server.pending_changes.lock().unwrap();
+                let retained = &pending[&root];
+                assert!(
+                    retained
+                        .batch
+                        .modified
+                        .contains(&PathBuf::from("second.rs"))
+                );
+                assert_eq!(
+                    retained.batch.modified.contains(&PathBuf::from("first.rs")),
+                    fail_publication
+                );
+                assert_eq!(retained.retry_after.is_some(), fail_publication);
+            }
+            if fail_publication {
+                std::fs::remove_dir(temporary_manifest).unwrap();
+            }
+            server
+                .pending_changes
+                .lock()
+                .unwrap()
+                .get_mut(&root)
+                .unwrap()
+                .retry_after = None;
+            server.flush_expired_changes(Duration::ZERO);
+            assert!(server.pending_changes.lock().unwrap().is_empty());
+            assert_eq!(
+                indexed_paths(&server, &root),
+                [
+                    PathBuf::from("first.rs"),
+                    PathBuf::from("old.rs"),
+                    PathBuf::from("second.rs")
+                ]
+            );
+            drop(server);
+            crate::utils::remove_index(&root).unwrap();
+        }
+    }
+
+    #[test]
     fn failed_publication_is_retried_without_another_notification() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("root");
@@ -1489,6 +1698,169 @@ mod tests {
             indexed_paths(&server, &root),
             vec![PathBuf::from("new.rs"), PathBuf::from("old.rs")]
         );
+        drop(server);
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn staged_updates_keep_a_durable_base_and_publish_the_whole_pending_union() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for i in 0..32 {
+            std::fs::write(root.join(format!("{i}.rs")), "original marker\n").unwrap();
+        }
+        build_index_with_progress(&root, true, true).unwrap();
+        let server = IndexServer::new(false);
+        server.ensure_index_loaded(&root).unwrap();
+        let original_generation = get_index_dir(&root).unwrap();
+        let cached = server.indexes.read().unwrap().get(&root).unwrap().clone();
+        let durable = cached.get_durable_reader();
+        let queue = |names: &[&str]| {
+            let mut batch = ChangeBatch::new();
+            for name in names {
+                batch.add(crate::server::watcher::FileChange {
+                    path: PathBuf::from(name),
+                    kind: ChangeKind::Modified,
+                });
+            }
+            server.accumulate_changes(root.clone(), batch);
+            server.flush_pending_changes_mode(&root, false);
+        };
+        let matching = |needle: &str| {
+            QueryExecutor::new(&cached.get_reader())
+                .execute_files_only(&parse_query(needle), 0)
+                .unwrap()
+        };
+        std::fs::write(root.join("0.rs"), "previewFirstMarker\n").unwrap();
+        std::fs::write(root.join("new.rs"), "previewFirstMarker\n").unwrap();
+        queue(&["0.rs", "new.rs"]);
+        assert_eq!(
+            matching("previewFirstMarker"),
+            [PathBuf::from("0.rs"), PathBuf::from("new.rs")]
+        );
+        assert_eq!(get_index_dir(&root).unwrap(), original_generation);
+        assert!(Arc::ptr_eq(&durable, &cached.get_durable_reader()));
+        assert!(!server.pending_changes.lock().unwrap().is_empty());
+
+        std::fs::write(root.join("0.rs"), "previewLatestMarker\n").unwrap();
+        std::fs::remove_file(root.join("new.rs")).unwrap();
+        std::fs::write(root.join("another.rs"), "previewLatestMarker\n").unwrap();
+        queue(&["0.rs", "new.rs", "another.rs"]);
+        assert_eq!(
+            matching("previewLatestMarker"),
+            [PathBuf::from("0.rs"), PathBuf::from("another.rs")]
+        );
+        assert!(matching("previewFirstMarker").is_empty());
+        assert_eq!(get_index_dir(&root).unwrap(), original_generation);
+
+        server.flush_all_pending_changes();
+        assert!(server.pending_changes.lock().unwrap().is_empty());
+        assert_ne!(get_index_dir(&root).unwrap(), original_generation);
+        assert!(Arc::ptr_eq(
+            &cached.get_reader(),
+            &cached.get_durable_reader()
+        ));
+        assert_eq!(
+            matching("previewLatestMarker"),
+            [PathBuf::from("0.rs"), PathBuf::from("another.rs")]
+        );
+        // A create followed by removal can cancel the entire uncommitted
+        // update. Restore the durable reader instead of retaining ghost IDs.
+        std::fs::write(root.join("cancel.rs"), "cancelledPreviewMarker\n").unwrap();
+        queue(&["cancel.rs"]);
+        assert_eq!(
+            matching("cancelledPreviewMarker"),
+            [PathBuf::from("cancel.rs")]
+        );
+        std::fs::remove_file(root.join("cancel.rs")).unwrap();
+        queue(&["cancel.rs"]);
+        assert!(matching("cancelledPreviewMarker").is_empty());
+        assert!(server.pending_changes.lock().unwrap().is_empty());
+        assert!(Arc::ptr_eq(
+            &cached.get_reader(),
+            &cached.get_durable_reader()
+        ));
+        std::fs::write(root.join("hidden.rs"), "ignorePreviewMarker\n").unwrap();
+        queue(&["hidden.rs"]);
+        assert_eq!(
+            matching("ignorePreviewMarker"),
+            [PathBuf::from("hidden.rs")]
+        );
+        std::fs::write(root.join(".ignore"), "hidden.rs\n").unwrap();
+        queue(&[".ignore"]);
+        assert!(matching("ignorePreviewMarker").is_empty());
+        assert!(server.pending_changes.lock().unwrap().is_empty());
+        std::fs::remove_file(root.join(".ignore")).unwrap();
+        queue(&[".ignore"]);
+        assert_eq!(
+            matching("ignorePreviewMarker"),
+            [PathBuf::from("hidden.rs")]
+        );
+        server.flush_all_pending_changes();
+        drop(durable);
+        drop(cached);
+        drop(server);
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn failed_persistence_does_not_turn_a_preview_into_the_durable_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for i in 0..8 {
+            std::fs::write(root.join(format!("{i}.rs")), "old content\n").unwrap();
+        }
+        build_index_with_progress(&root, true, true).unwrap();
+        let server = IndexServer::new(false);
+        server.ensure_index_loaded(&root).unwrap();
+        let cached = server.indexes.read().unwrap().get(&root).unwrap().clone();
+        let durable = cached.get_durable_reader();
+        let generation = get_index_dir(&root).unwrap();
+        let meta = std::fs::read(generation.join("meta.json")).unwrap();
+        std::fs::write(root.join("0.rs"), "uncommittedFreshMarker\n").unwrap();
+        let lock = crate::utils::IndexLock::acquire(&root).unwrap();
+        let result = reconcile_index_paths_with_visibility(
+            &root,
+            Some(&durable),
+            30,
+            &[PathBuf::from("0.rs")],
+            &mut |reader| {
+                cached.set_live_reader(reader);
+                // Fail writer initialization after visibility, before publish.
+                std::fs::write(generation.join("meta.json"), b"broken").unwrap();
+            },
+            false,
+        );
+        assert!(result.is_err());
+        assert!(Arc::ptr_eq(&durable, &cached.get_durable_reader()));
+        assert_eq!(
+            QueryExecutor::new(&cached.get_reader())
+                .execute_files_only(&parse_query("uncommittedFreshMarker"), 0)
+                .unwrap(),
+            [PathBuf::from("0.rs")]
+        );
+        std::fs::write(generation.join("meta.json"), meta).unwrap();
+        drop(lock);
+        let mut batch = ChangeBatch::new();
+        batch.add(crate::server::watcher::FileChange {
+            path: PathBuf::from("0.rs"),
+            kind: ChangeKind::Modified,
+        });
+        server.accumulate_changes(root.clone(), batch);
+        server.flush_all_pending_changes();
+        assert_ne!(get_index_dir(&root).unwrap(), generation);
+        assert!(Arc::ptr_eq(
+            &cached.get_reader(),
+            &cached.get_durable_reader()
+        ));
+        assert_eq!(
+            QueryExecutor::new(&IndexReader::open(&root).unwrap())
+                .execute_files_only(&parse_query("uncommittedFreshMarker"), 0)
+                .unwrap(),
+            [PathBuf::from("0.rs")]
+        );
+        drop(durable);
+        drop(cached);
         drop(server);
         crate::utils::remove_index(&root).unwrap();
     }

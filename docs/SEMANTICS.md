@@ -113,18 +113,36 @@ How the index stays fresh:
 
 - `fxi index` performs an incremental update (parallel tree scan, mtime
   comparison, delta segment for changes).
-- A daemon started with `--watch` reconciles each root with one incremental
-  scan when its watcher starts, then reconciles debounced file events through
-  the same ignore-aware walker as CLI indexing. Ready batches publish immediately
-  by default, after the 100 ms quiet debounce (or two-second maximum event age).
-  `FXI_DELTA_FLUSH_SECS` can add a publication delay; its default is 0. A newly
-  created file becomes searchable after notification delivery, debounce and
-  reconciliation complete; this is not an immediate live overlay. Startup
-  registration, notification errors and periodic five-minute reconciliation
-  also repair membership. Reconciliation currently scans file metadata; a
-  sound event-only update path is a future optimization.
+- A daemon started with `--watch` reconciles each root when its watcher starts.
+  Precise file notifications then use a scoped version of the same ignore-aware
+  walker, preserving ancestor ignore rules without scanning unrelated subtrees.
+  Directory/ignore-rule changes, ambiguous notifications, overflow and external
+  generation changes require a full scan. Explicit file hints force re-indexing
+  even when file size and modification time are preserved. Startup registration
+  and periodic five-minute reconciliation also repair membership.
+- The default quiet debounce is 1 ms and maximum event age is 100 ms.
+  `FXI_DEBOUNCE_MS` and `FXI_MAX_BATCH_AGE_MS` override these; the config-file
+  equivalents are `watcher.debounce_ms` and `watcher.max_batch_age_ms`.
+  Notification delivery, indexing work and writer contention add latency.
+- Up to 256 changed files with at most 8 MiB of accepted source content use a
+  fully indexed in-memory snapshot for early visibility. It includes real
+  postings, positions and tombstones, and uses the ordinary query engine for all
+  output modes. This bounds source material, not total process RSS. Unchanged
+  segments and base paths are shared; document metadata and appended paths are
+  copied. Each preview is rebuilt from the durable reader and the whole pending
+  path set, so repeated saves do not accumulate memory-only segments.
+- By default, persistence is scheduled after 250 ms of quiet or ten seconds
+  of continuous updates. Larger batches and rebuilds use the durable path
+  immediately. `FXI_DELTA_FLUSH_SECS > 0` instead sets the first-event delay for
+  persistence, without delaying eligible memory previews. Graceful shutdown
+  attempts to flush pending work; interrupted/uncommitted updates are repaired
+  when a watched daemon starts again. Direct readers can lag behind a running
+  daemon's in-memory view. Existing generation durability barriers are retained.
+  Persistence/compaction still runs on the update processor and can delay events
+  arriving during that work.
 - While a root is watched, `fxi index` skips its own scan and reports the
-  daemon's pending-change count; `fxi index --force` rebuilds locally.
+  daemon's pending-change count, which can include already searchable changes
+  awaiting persistence; `fxi index --force` rebuilds locally.
 - All index writers (CLI builds, daemon flushes, compaction) hold a
   per-index advisory lock, so two writers can never interleave segment or
   metadata writes. Ordinary watcher batches defer when another writer holds

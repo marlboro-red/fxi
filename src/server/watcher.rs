@@ -15,12 +15,12 @@ use std::time::Duration;
 use crate::utils::app_data::get_app_data_dir;
 
 /// Default debounce window in milliseconds
-pub const DEFAULT_DEBOUNCE_MS: u64 = 100;
+pub const DEFAULT_DEBOUNCE_MS: u64 = 1;
+pub const DEFAULT_MAX_BATCH_AGE_MS: u64 = 100;
 
-/// Additional delay after the debouncer delivers a ready batch. By default
-/// publish immediately: without a live overlay, postponing publication hides
-/// newly created or newly matching files from every indexed query. Users can
-/// opt into a longer interval when reducing disk-write frequency matters more.
+/// Optional fixed delay before persisting watcher changes. Zero selects the
+/// adaptive default: small changes become query-visible in memory immediately,
+/// then persist after 250 ms quiet or ten seconds of continuous updates.
 pub const DEFAULT_DELTA_FLUSH_INTERVAL_SECS: u64 = 0;
 
 /// Default threshold for triggering segment merge (number of delta segments)
@@ -176,6 +176,8 @@ pub struct ConfigFile {
 pub struct WatcherConfigFile {
     /// Debounce window in milliseconds
     pub debounce_ms: Option<u64>,
+    /// Maximum event age before publishing despite continuing edits
+    pub max_batch_age_ms: Option<u64>,
     /// Interval in seconds for flushing accumulated changes to delta segments
     pub delta_flush_interval_secs: Option<u64>,
     /// Number of delta segments that triggers a merge
@@ -189,6 +191,8 @@ pub struct WatcherConfigFile {
 pub struct WatcherConfig {
     /// Debounce window in milliseconds (changes within this window are batched)
     pub debounce_ms: u64,
+    /// Maximum event age, independent of the quiet debounce window
+    pub max_batch_age_ms: u64,
     /// Interval in seconds for flushing accumulated changes to delta segments
     pub delta_flush_interval_secs: u64,
     /// Number of delta segments that triggers a merge
@@ -201,6 +205,7 @@ impl Default for WatcherConfig {
     fn default() -> Self {
         Self {
             debounce_ms: DEFAULT_DEBOUNCE_MS,
+            max_batch_age_ms: DEFAULT_MAX_BATCH_AGE_MS,
             delta_flush_interval_secs: DEFAULT_DELTA_FLUSH_INTERVAL_SECS,
             merge_segment_threshold: DEFAULT_MERGE_SEGMENT_THRESHOLD,
             rebuild_threshold_percent: DEFAULT_REBUILD_THRESHOLD_PERCENT,
@@ -242,6 +247,9 @@ impl WatcherConfig {
             if let Some(v) = file_config.watcher.debounce_ms {
                 config.debounce_ms = v;
             }
+            if let Some(v) = file_config.watcher.max_batch_age_ms {
+                config.max_batch_age_ms = v;
+            }
             if let Some(v) = file_config.watcher.delta_flush_interval_secs {
                 config.delta_flush_interval_secs = v;
             }
@@ -258,6 +266,11 @@ impl WatcherConfig {
             && let Ok(ms) = val.parse()
         {
             config.debounce_ms = ms;
+        }
+        if let Ok(val) = std::env::var("FXI_MAX_BATCH_AGE_MS")
+            && let Ok(ms) = val.parse()
+        {
+            config.max_batch_age_ms = ms;
         }
 
         if let Ok(val) = std::env::var("FXI_DELTA_FLUSH_SECS")
@@ -446,6 +459,7 @@ mod tests {
     fn test_watcher_config_durations() {
         let config = WatcherConfig {
             debounce_ms: 1000,
+            max_batch_age_ms: DEFAULT_MAX_BATCH_AGE_MS,
             delta_flush_interval_secs: 60,
             merge_segment_threshold: 10,
             rebuild_threshold_percent: 25,

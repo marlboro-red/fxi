@@ -98,6 +98,7 @@ fn read_index_source(
 }
 
 /// Result of processing a single file (computed in parallel)
+#[derive(Clone)]
 pub struct ProcessedFile<T = Vec<String>> {
     pub rel_path: PathBuf,
     pub mtime: u64,
@@ -635,6 +636,8 @@ pub(crate) enum UpdateOutcome {
     Unchanged(PathBuf),
     Incremental,
     Rebuilt,
+    /// Query-visible memory snapshot; the durable generation is unchanged.
+    Visible,
 }
 
 /// A watcher can reuse its immutable reader only while CURRENT still names
@@ -644,7 +647,14 @@ pub(crate) fn reconcile_index(
     cached: Option<&IndexReader>,
     rebuild_threshold_percent: usize,
 ) -> Result<UpdateOutcome> {
-    reconcile_index_with_paths(root_path, cached, rebuild_threshold_percent, None)
+    reconcile_index_with_paths(
+        root_path,
+        cached,
+        rebuild_threshold_percent,
+        None,
+        None,
+        false,
+    )
 }
 
 /// Reconcile precise file notifications without scanning unrelated subtrees.
@@ -652,13 +662,41 @@ pub(crate) fn reconcile_index(
 /// an externally replaced generation require the ordinary complete scan.
 /// Native notifications are evidence of a possible content change even when
 /// an editor preserves the file's mtime and size.
+#[cfg(test)]
 pub(crate) fn reconcile_index_paths(
     root_path: &Path,
     cached: Option<&IndexReader>,
     rebuild_threshold_percent: usize,
     paths: &[PathBuf],
 ) -> Result<UpdateOutcome> {
-    reconcile_index_with_paths(root_path, cached, rebuild_threshold_percent, Some(paths))
+    reconcile_index_with_paths(
+        root_path,
+        cached,
+        rebuild_threshold_percent,
+        Some(paths),
+        None,
+        false,
+    )
+}
+
+/// Publish a bounded, fully indexed memory snapshot before durable generation
+/// construction. The callback must not mistake this snapshot for a disk commit.
+pub(crate) fn reconcile_index_paths_with_visibility(
+    root_path: &Path,
+    cached: Option<&IndexReader>,
+    rebuild_threshold_percent: usize,
+    paths: &[PathBuf],
+    visible: &mut dyn FnMut(IndexReader),
+    preview_only: bool,
+) -> Result<UpdateOutcome> {
+    reconcile_index_with_paths(
+        root_path,
+        cached,
+        rebuild_threshold_percent,
+        Some(paths),
+        Some(visible),
+        preview_only,
+    )
 }
 
 fn reconcile_index_with_paths(
@@ -666,6 +704,8 @@ fn reconcile_index_with_paths(
     cached: Option<&IndexReader>,
     rebuild_threshold_percent: usize,
     paths: Option<&[PathBuf]>,
+    visible: Option<&mut dyn FnMut(IndexReader)>,
+    preview_only: bool,
 ) -> Result<UpdateOutcome> {
     let trace = std::env::var_os("FXI_TRACE_UPDATES").is_some_and(|value| value == "1");
     let started = std::time::Instant::now();
@@ -693,24 +733,21 @@ fn reconcile_index_with_paths(
     let hinted: Option<HashSet<PathBuf>> = paths.map(|paths| paths.iter().cloned().collect());
     let candidate_scope = hinted.as_ref().filter(|_| reusable.is_some());
     let indexed_count = reader.valid_doc_ids().len() as usize;
-    // Precise hints only need exact-file lookups. Borrow the other live paths
-    // for directory-replacement checks instead of cloning and hashing the
-    // whole corpus on every save. A fallback fills the complete map below.
-    let mut known_paths = Vec::with_capacity(if candidate_scope.is_some() {
-        indexed_count
-    } else {
-        0
-    });
+    // Watched readers prime their shared path lookup outside the event path.
+    // Only the hinted documents need metadata on ordinary file saves.
     let mut indexed_files: HashMap<PathBuf, (u32, u64, u64)> =
         HashMap::with_capacity(candidate_scope.map_or(indexed_count, HashSet::len));
-    for doc_id in reader.valid_doc_ids().iter() {
-        if let Some(doc) = reader.get_document(doc_id)
-            && let Some(path) = reader.get_path(doc)
-        {
-            if candidate_scope.is_some() {
-                known_paths.push(path.as_path());
+    if let Some(paths) = candidate_scope {
+        for path in paths {
+            if let Some(doc) = reader.document_for_path(path) {
+                indexed_files.insert(path.clone(), (doc.doc_id, doc.mtime, doc.size));
             }
-            if candidate_scope.is_none_or(|paths| paths.contains(path)) {
+        }
+    } else {
+        for doc_id in reader.valid_doc_ids().iter() {
+            if let Some(doc) = reader.get_document(doc_id)
+                && let Some(path) = reader.get_path(doc)
+            {
                 indexed_files.insert(path.clone(), (doc_id, doc.mtime, doc.size));
             }
         }
@@ -719,7 +756,7 @@ fn reconcile_index_with_paths(
     // Previously rejected files (binary sniff etc.) with their mtimes.
     let rejected: HashMap<PathBuf, u64> = meta.rejected_files.iter().cloned().collect();
     let scoped = if let Some(paths) = candidate_scope {
-        file_hints_can_be_scoped(&root, paths, &indexed_files, &known_paths, &rejected)?
+        file_hints_can_be_scoped(&root, paths, &indexed_files, reader, &rejected)?
     } else {
         false
     };
@@ -792,7 +829,9 @@ fn reconcile_index_with_paths(
     // Perform incremental update
     println!("Performing incremental update...");
     let publication_started = std::time::Instant::now();
-    perform_incremental_update(&root, meta, diff)?;
+    if perform_incremental_update_visible(&root, meta, diff, Some(reader), visible, preview_only)? {
+        return Ok(UpdateOutcome::Visible);
+    }
     if trace {
         eprintln!(
             "fxid: update timing {}: publication={:.3}ms",
@@ -810,13 +849,15 @@ fn file_hints_can_be_scoped(
     root: &Path,
     paths: &HashSet<PathBuf>,
     indexed_files: &HashMap<PathBuf, (u32, u64, u64)>,
-    known_paths: &[&Path],
+    reader: &IndexReader,
     rejected: &HashMap<PathBuf, u64>,
 ) -> Result<bool> {
     let has_descendants = |path: &Path| {
-        known_paths
+        reader
+            .valid_doc_ids()
             .iter()
-            .copied()
+            .filter_map(|id| reader.get_document(id))
+            .filter_map(|doc| reader.get_path(doc).map(PathBuf::as_path))
             .chain(rejected.keys().map(PathBuf::as_path))
             .any(|existing| existing != path && existing.starts_with(path))
     };
@@ -1136,7 +1177,19 @@ fn process_file_for_update(
 /// deleted and modified files are tombstoned, new and modified files are
 /// indexed into a new segment, and the index metadata is committed
 /// atomically. This is the same mechanism the daemon's file watcher uses.
+#[cfg(test)]
 fn perform_incremental_update(root: &Path, meta: &IndexMeta, diff: IndexDiff) -> Result<()> {
+    perform_incremental_update_visible(root, meta, diff, None, None, false).map(|_| ())
+}
+
+fn perform_incremental_update_visible(
+    root: &Path,
+    meta: &IndexMeta,
+    diff: IndexDiff,
+    base: Option<&IndexReader>,
+    visible: Option<&mut dyn FnMut(IndexReader)>,
+    preview_only: bool,
+) -> Result<bool> {
     use crate::index::writer::DeltaSegmentWriter;
 
     let config = IndexConfig::default();
@@ -1154,17 +1207,6 @@ fn perform_incremental_update(root: &Path, meta: &IndexMeta, diff: IndexDiff) ->
         .context(
             "Segment ID capacity exhausted; compact the index or rebuild with a larger chunk size",
         )?;
-
-    let mut writer = DeltaSegmentWriter::new(root, next_segment_id)?;
-
-    // Tombstone deleted and modified files (a modified file gets a fresh
-    // doc entry in the delta segment; its old entry must die)
-    for rel_path in &diff.deleted_files {
-        writer.mark_tombstone(rel_path);
-    }
-    for (_, rel_path, _) in &diff.modified_files {
-        writer.mark_tombstone(rel_path);
-    }
 
     // Index new and modified files (in parallel - extraction is the
     // expensive part; add_file itself is cheap)
@@ -1199,6 +1241,51 @@ fn perform_incremental_update(root: &Path, meta: &IndexMeta, diff: IndexDiff) ->
         })
         .collect();
 
+    // Keep the extra memory bounded. Large updates retain the durable path;
+    // small saves reuse exactly the bytes/tokens already extracted for it.
+    if let (Some(base), Some(visible)) = (base, visible)
+        && to_index.len() + diff.deleted_files.len() <= 256
+        && outcomes
+            .iter()
+            .filter_map(|outcome| outcome.as_ref().ok())
+            .map(|file| file.size)
+            .sum::<u64>()
+            <= 8 * 1024 * 1024
+    {
+        let files = outcomes
+            .iter()
+            .filter_map(|outcome| outcome.as_ref().ok())
+            .cloned()
+            .collect();
+        let removed: Vec<_> = diff
+            .deleted_files
+            .iter()
+            .chain(diff.modified_files.iter().map(|(_, path, _)| path))
+            .cloned()
+            .collect();
+        match base.with_memory_delta(files, &removed) {
+            Ok(reader) => {
+                visible(reader);
+                if preview_only {
+                    return Ok(true);
+                }
+            }
+            // Visibility acceleration is optional; a capacity limit must not
+            // prevent the durable update or its normal recovery.
+            Err(error) => {
+                eprintln!("fxid: memory update unavailable; persisting normally: {error:#}")
+            }
+        }
+    }
+
+    let mut writer = DeltaSegmentWriter::new(root, next_segment_id)?;
+    for rel_path in &diff.deleted_files {
+        writer.mark_tombstone(rel_path);
+    }
+    for (_, rel_path, _) in &diff.modified_files {
+        writer.mark_tombstone(rel_path);
+    }
+
     let mut added_count = 0;
     let mut rejected_files = diff.rejected_unchanged.clone();
     for outcome in outcomes {
@@ -1220,7 +1307,7 @@ fn perform_incremental_update(root: &Path, meta: &IndexMeta, diff: IndexDiff) ->
             writer.finalize(&mut meta)?;
         }
         println!("No indexable changes to apply.");
-        return Ok(());
+        return Ok(false);
     }
 
     // Commits segment -> docs.bin -> paths.bin -> meta.json atomically
@@ -1252,7 +1339,7 @@ fn perform_incremental_update(root: &Path, meta: &IndexMeta, diff: IndexDiff) ->
         crate::index::compact::merge_segments(root)?;
     }
 
-    Ok(())
+    Ok(false)
 }
 
 /// Build index, detecting codebase root from current directory
@@ -1460,7 +1547,7 @@ mod scoped_reconciliation_tests {
             reconcile_index_paths(
                 &root,
                 Some(&before),
-                100,
+                30,
                 &["base0.rs".into(), ".missing-save-temp".into()]
             )
             .unwrap(),
@@ -1473,6 +1560,38 @@ mod scoped_reconciliation_tests {
             "a scoped scan visited an unrelated subtree"
         );
         assert_eq!(paths(&before), paths(&after));
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn oversized_preview_batches_use_the_durable_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for index in 0..1024 {
+            fs::write(root.join(format!("old{index}.rs")), "original content\n").unwrap();
+        }
+        build_index(&root, true).unwrap();
+        let before = IndexReader::open(&root).unwrap();
+        let hints: Vec<PathBuf> = (0..257)
+            .map(|index| format!("new{index}.rs").into())
+            .collect();
+        for path in &hints {
+            fs::write(root.join(path), "boundedUpdateMarker\n").unwrap();
+        }
+        let outcome = reconcile_index_paths_with_visibility(
+            &root,
+            Some(&before),
+            30,
+            &hints,
+            &mut |_| panic!("oversized batch must not allocate a memory snapshot"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(outcome, UpdateOutcome::Incremental);
+        let after = IndexReader::open(&root).unwrap();
+        assert_ne!(before.generation_path(), after.generation_path());
+        assert_eq!(after.valid_doc_ids().len(), 1281);
+        assert_eq!(matches(&after, "boundedUpdateMarker").len(), 257);
         crate::utils::remove_index(&root).unwrap();
     }
 

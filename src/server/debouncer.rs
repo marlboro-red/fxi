@@ -112,7 +112,8 @@ impl EventDebouncer {
             .config
             .debounce_duration()
             .saturating_sub(self.last_event?.elapsed());
-        let age = Duration::from_secs(2).saturating_sub(self.first_event?.elapsed());
+        let age = Duration::from_millis(self.config.max_batch_age_ms)
+            .saturating_sub(self.first_event?.elapsed());
         Some(quiet.min(age))
     }
 
@@ -163,6 +164,23 @@ mod tests {
             debounce_ms: 50, // Short for testing
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn continuous_edits_obey_the_configured_maximum_age() {
+        let mut debouncer = EventDebouncer::new(WatcherConfig {
+            debounce_ms: 1000,
+            max_batch_age_ms: 100,
+            ..Default::default()
+        });
+        debouncer.add_event(PathBuf::from("first.rs"), ChangeKind::Modified);
+        debouncer.first_event = Some(Instant::now() - Duration::from_millis(101));
+        debouncer.add_event(PathBuf::from("second.rs"), ChangeKind::Modified);
+        assert_eq!(debouncer.time_until_ready(), Some(Duration::ZERO));
+        assert_eq!(debouncer.flush().unwrap().total_changes(), 2);
+        assert_eq!(debouncer.time_until_ready(), None);
+        debouncer.add_event(PathBuf::from("next.rs"), ChangeKind::Modified);
+        assert!(!debouncer.is_ready());
     }
 
     #[test]
