@@ -1,9 +1,8 @@
 //! Segment compaction and merging.
 //!
 //! This module implements segment merging to prevent index fragmentation from
-//! delta segment accumulation. Segment merging is 60-100x faster than full
-//! rebuild because it only reads/merges existing index data, avoiding expensive
-//! source file I/O.
+//! delta segment accumulation. Merging reuses stored postings; optional source
+//! packs may still require source reads. Performance depends on corpus and layout.
 
 use crate::index::reader::MappedBytes;
 use crate::index::reader::{read_documents, read_paths};
@@ -204,6 +203,10 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
         &remapping.valid_paths,
         crate::index::source_pack::requested() || crate::index::source_pack::present(&index_path),
     )?;
+    // All input bytes have been consumed. Release our validation lease before
+    // publication collects retired generations; genuine external readers keep
+    // their own leases and remain protected.
+    drop(validated);
     generation.publish()?;
     eprintln!("  Updated meta.json");
 
