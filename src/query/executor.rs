@@ -21,8 +21,16 @@ type ContextLines = Vec<(u32, String)>;
 /// A single match within a file: (line_number, line_content, match_start, match_end)
 type FileMatch = (u32, String, usize, usize);
 
-/// Collected file matches with metadata: (doc_id, full_path, rel_path, mtime, matches)
-type FileMatchResult = (DocId, PathBuf, PathBuf, u64, Vec<FileMatch>);
+/// Verified lines plus an optional immutable source retained for context rendering.
+/// Ranked and no-context searches do not retain source buffers.
+type FileMatchResult = (
+    DocId,
+    PathBuf,
+    PathBuf,
+    u64,
+    Vec<FileMatch>,
+    Option<FileContent>,
+);
 
 /// Precompiled filename filter matcher to avoid per-document recompilation.
 enum FilenameMatcher {
@@ -255,7 +263,7 @@ impl<'a> QueryExecutor<'a> {
         let limit = query.options.limit;
         // Rank the complete verified set. Stopping on document/worker order
         // has no score bound and can discard the actual best result.
-        let all_matches = self.find_verified_matches(&candidates, &plan, None)?;
+        let all_matches = self.find_verified_matches(&candidates, &plan, None, false)?;
 
         // Build results with scoring
         let verification = plan.verification.as_ref();
@@ -270,7 +278,7 @@ impl<'a> QueryExecutor<'a> {
             estimated_total
         }));
 
-        for (doc_id, _full_path, path, mtime, file_matches) in &all_matches {
+        for (doc_id, _full_path, path, mtime, file_matches, _) in &all_matches {
             if file_matches.is_empty() {
                 // File-only query (no verification) — emit one match per file
                 results.push(SearchMatch {
@@ -343,11 +351,29 @@ impl<'a> QueryExecutor<'a> {
         let plan = QueryPlan::try_from_query(query)?;
         let candidates = self.execute_plan(&plan)?;
 
-        let verified = self.find_verified_matches(&candidates, &plan, None)?;
+        let verified = self.find_verified_matches(
+            &candidates,
+            &plan,
+            None,
+            context_before > 0 || context_after > 0,
+        )?;
+        Ok(Self::render_content_matches(
+            verified,
+            context_before,
+            context_after,
+        ))
+    }
 
+    /// Pure rendering: source changes after verification cannot mix versions in
+    /// match text, context, or the file-level Boolean predicate that selected it.
+    fn render_content_matches(
+        verified: Vec<FileMatchResult>,
+        context_before: u32,
+        context_after: u32,
+    ) -> Vec<ContentMatchResult> {
         let mut all_results = Vec::new();
 
-        for (_doc_id, full_path, rel_path, _mtime, file_matches) in verified {
+        for (_doc_id, _full_path, rel_path, _mtime, file_matches, content) in verified {
             if file_matches.is_empty() {
                 // File-only query (no verification) — emit one match per file
                 all_results.push(ContentMatchResult {
@@ -361,18 +387,6 @@ impl<'a> QueryExecutor<'a> {
                 });
                 continue;
             }
-
-            // Re-read the file ONLY when context lines were requested; the
-            // match lines themselves were captured during verification, so
-            // without -A/-B/-C this read would be pure waste (~0.9s over a
-            // broad-phrase result set on Chromium)
-            let content = if context_before > 0 || context_after > 0 {
-                self.reader
-                    .read_file_cached(&full_path)
-                    .or_else(|| read_file_content(&full_path))
-            } else {
-                None
-            };
 
             // Split into lines once per file, not once per match
             let lines: Option<Vec<&str>> = content.as_ref().map(|c| c.lines().collect());
@@ -406,7 +420,7 @@ impl<'a> QueryExecutor<'a> {
             other => other,
         });
 
-        Ok(all_results)
+        all_results
     }
 
     /// Count verified matches without retaining match text or per-line paths.
@@ -1338,6 +1352,7 @@ impl<'a> QueryExecutor<'a> {
         candidates: &RoaringBitmap,
         plan: &QueryPlan,
         target_matches: Option<usize>,
+        retain_source: bool,
     ) -> Result<Vec<FileMatchResult>> {
         let verification = match &plan.verification {
             Some(v) => v,
@@ -1350,7 +1365,14 @@ impl<'a> QueryExecutor<'a> {
                             self.reader.get_full_path(doc).map(|full_path| {
                                 let rel_path =
                                     self.reader.get_path(doc).cloned().unwrap_or_default();
-                                (doc_id, full_path, rel_path, doc.mtime_seconds(), Vec::new())
+                                (
+                                    doc_id,
+                                    full_path,
+                                    rel_path,
+                                    doc.mtime_seconds(),
+                                    Vec::new(),
+                                    None,
+                                )
                             })
                         })
                     })
@@ -1415,7 +1437,8 @@ impl<'a> QueryExecutor<'a> {
 
                 if !file_matches.is_empty() || (line_start.is_none() && line_end.is_none()) {
                     total_matches += file_matches.len().max(1);
-                    results.push((doc_id, full_path, rel_path, mtime, file_matches));
+                    let source = (retain_source && !file_matches.is_empty()).then_some(content);
+                    results.push((doc_id, full_path, rel_path, mtime, file_matches, source));
                 }
             }
             results
@@ -1455,7 +1478,8 @@ impl<'a> QueryExecutor<'a> {
                         None
                     } else {
                         match_count.fetch_add(file_matches.len().max(1), Ordering::Relaxed);
-                        Some((doc_id, full_path, rel_path, mtime, file_matches))
+                        let source = (retain_source && !file_matches.is_empty()).then_some(content);
+                        Some((doc_id, full_path, rel_path, mtime, file_matches, source))
                     }
                 })
                 .collect()
@@ -1873,6 +1897,74 @@ mod tests {
     use tempfile::TempDir;
 
     /// Create a test index with multiple files for comprehensive testing
+    #[test]
+    fn context_uses_the_verified_source_after_rewrites_deletions_and_truncation() {
+        for file_count in [1, 70] {
+            let dir = TempDir::new().unwrap();
+            let paths: Vec<_> = (0..file_count)
+                .map(|i| dir.path().join(format!("{i:03}.txt")))
+                .collect();
+            for path in &paths {
+                fs::write(path, "before\nneedle\nafter\n").unwrap();
+            }
+            crate::index::build::build_index(dir.path(), false).unwrap();
+            for cached in [false, true] {
+                for path in &paths {
+                    fs::write(path, "before\nneedle\nafter\n").unwrap();
+                }
+                let reader = if cached {
+                    IndexReader::open(dir.path())
+                } else {
+                    IndexReader::open_uncached(dir.path())
+                }
+                .unwrap();
+                let executor = QueryExecutor::new(&reader);
+                let query = parse_query("needle -forbidden");
+                let plan = QueryPlan::try_from_query(&query).unwrap();
+                let candidates = executor.execute_plan(&plan).unwrap();
+                let without_context = executor
+                    .find_verified_matches(&candidates, &plan, None, false)
+                    .unwrap();
+                assert!(
+                    without_context.iter().all(|record| record.5.is_none()),
+                    "no-context queries must not retain full source"
+                );
+                drop(without_context);
+                let verified = executor
+                    .find_verified_matches(&candidates, &plan, None, true)
+                    .unwrap();
+                assert_eq!(verified.len(), file_count);
+                assert!(verified.iter().all(|record| record.5.is_some()));
+                // Mutate deterministically between verification and rendering.
+                // The matching line itself stays identical in the rewrite case:
+                // only retaining the entire verification snapshot preserves NOT.
+                for (i, path) in paths.iter().enumerate() {
+                    match i % 3 {
+                        0 => fs::write(path, "new before\nneedle\nforbidden\n").unwrap(),
+                        1 => fs::remove_file(path).unwrap(),
+                        _ => fs::write(path, "").unwrap(),
+                    }
+                }
+                let rendered = QueryExecutor::render_content_matches(verified, 1, 1);
+                assert_eq!(rendered.len(), file_count);
+                for record in rendered {
+                    assert_eq!(record.line_number, 2);
+                    assert_eq!(record.line_content, "needle");
+                    assert_eq!((record.match_start, record.match_end), (0, 6));
+                    assert_eq!(record.context_before, vec![(1, "before".into())]);
+                    assert_eq!(record.context_after, vec![(3, "after".into())]);
+                }
+                assert!(
+                    executor
+                        .execute_with_content(&query, 1, 1)
+                        .unwrap()
+                        .is_empty(),
+                    "the next query must verify new source rather than reuse stale responses"
+                );
+            }
+        }
+    }
+
     #[test]
     fn boolean_lines_counts_negation_and_scope_have_independent_expected_results() {
         let dir = TempDir::new().unwrap();
