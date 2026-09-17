@@ -24,7 +24,11 @@ impl Fixture {
         )
         .unwrap();
         fs::write(root.join("src-other/b.txt"), "ALPHA\n").unwrap();
-        fs::write(root.join("odd\nname.txt"), "alpha\n").unwrap();
+        #[cfg(unix)]
+        let odd_name = "odd\nname.txt";
+        #[cfg(not(unix))]
+        let odd_name = "odd name.txt";
+        fs::write(root.join(odd_name), "alpha\n").unwrap();
         for n in 0..20 {
             fs::write(root.join(format!("filler{n}.txt")), "unrelated\n").unwrap();
         }
@@ -70,13 +74,10 @@ fn modes_scope_case_and_machine_output_have_explicit_contracts() {
     let f = Fixture::new();
     let rows = f.json(&["alpha", "src"]);
     assert_eq!(rows["matches"].as_array().unwrap().len(), 2);
-    assert!(
-        rows["matches"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|row| row["path"].as_str().unwrap().ends_with("src/a.txt"))
-    );
+    assert!(rows["matches"].as_array().unwrap().iter().all(|row| {
+        std::path::Path::new(row["path"].as_str().unwrap())
+            .ends_with(std::path::Path::new("src").join("a.txt"))
+    }));
     let rows = f.json(&["alpha", "src/a.txt", "-w"]);
     assert_eq!(rows["matches"].as_array().unwrap().len(), 2);
     let rows = f.json(&["-e", "alpha", "-e", "missing", "-p", "src"]);
@@ -99,7 +100,10 @@ fn modes_scope_case_and_machine_output_have_explicit_contracts() {
         .filter(|part| !part.is_empty())
         .collect();
     assert_eq!(paths.len(), 3);
+    #[cfg(unix)]
     assert!(paths.iter().any(|path| path.ends_with(b"odd\nname.txt")));
+    #[cfg(not(unix))]
+    assert!(paths.iter().any(|path| path.ends_with(b"odd name.txt")));
     assert!(f.ok(&["definitelyabsent"]).stdout.is_empty());
 }
 
