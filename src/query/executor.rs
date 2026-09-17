@@ -542,6 +542,11 @@ impl<'a> QueryExecutor<'a> {
         // shared-cache lookups and searcher construction for each candidate.
         let prepared_regex = match verification {
             VerificationStep::Regex(pattern) => get_regex_cache().get_or_compile(pattern),
+            VerificationStep::Literal(text) | VerificationStep::BoostedLiteral { text, .. }
+                if !text.is_empty() =>
+            {
+                get_regex_cache().get_or_compile(&format!("(?i:{})", regex::escape(text)))
+            }
             _ => None,
         };
         let literal_finder = prepared_regex
