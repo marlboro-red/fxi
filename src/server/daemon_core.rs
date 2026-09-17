@@ -1703,6 +1703,80 @@ mod tests {
     }
 
     #[test]
+    fn visible_updates_persist_on_quiet_max_age_and_explicit_deadlines() {
+        for mode in 0..3 {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            for i in 0..16 {
+                std::fs::write(root.join(format!("{i}.rs")), "original content\n").unwrap();
+            }
+            build_index_with_progress(&root, true, true).unwrap();
+            let mut server = IndexServer::new(false);
+            server.ensure_index_loaded(&root).unwrap();
+            Arc::get_mut(&mut server).unwrap().watch_enabled = true;
+            let original = get_index_dir(&root).unwrap();
+            std::fs::write(root.join("0.rs"), "deadlineMarker\n").unwrap();
+            let mut batch = ChangeBatch::new();
+            batch.add(crate::server::watcher::FileChange {
+                path: "0.rs".into(),
+                kind: ChangeKind::Modified,
+            });
+            server.accumulate_changes(root.clone(), batch);
+            server.flush_pending_changes_mode(&root, false);
+            assert_eq!(get_index_dir(&root).unwrap(), original);
+            let cached = server.indexes.read().unwrap().get(&root).unwrap().clone();
+            assert_eq!(
+                QueryExecutor::new(&cached.get_reader())
+                    .execute_files_only(&parse_query("deadlineMarker"), 0)
+                    .unwrap(),
+                [PathBuf::from("0.rs")]
+            );
+            let interval = if mode == 2 {
+                Duration::from_secs(60)
+            } else {
+                Duration::ZERO
+            };
+            {
+                let mut pending = server.pending_changes.lock().unwrap();
+                let pending = pending.get_mut(&root).unwrap();
+                assert!(!pending.needs_visibility);
+                pending.first_change = Instant::now();
+                pending.last_change = Instant::now();
+            }
+            server.flush_expired_changes(interval);
+            assert_eq!(get_index_dir(&root).unwrap(), original);
+            {
+                let mut pending = server.pending_changes.lock().unwrap();
+                let pending = pending.get_mut(&root).unwrap();
+                let now = Instant::now();
+                pending.first_change = now - Duration::from_secs(if mode == 2 { 61 } else { 11 });
+                pending.last_change = if mode == 0 {
+                    now - Duration::from_secs(1)
+                } else {
+                    now
+                };
+                if mode == 0 {
+                    pending.first_change = now - Duration::from_secs(2);
+                }
+            }
+            server.flush_expired_changes(interval);
+            assert!(server.pending_changes.lock().unwrap().is_empty());
+            assert_ne!(get_index_dir(&root).unwrap(), original);
+            let disk = IndexReader::open(&root).unwrap();
+            assert_eq!(
+                QueryExecutor::new(&disk)
+                    .execute_files_only(&parse_query("deadlineMarker"), 0)
+                    .unwrap(),
+                [PathBuf::from("0.rs")]
+            );
+            drop(cached);
+            drop(disk);
+            drop(server);
+            crate::utils::remove_index(&root).unwrap();
+        }
+    }
+
+    #[test]
     fn staged_updates_keep_a_durable_base_and_publish_the_whole_pending_union() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();

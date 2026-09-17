@@ -1182,11 +1182,17 @@ impl IndexReader {
                             .is_some_and(|candidate| candidate == path)
                 })
                 .max_by_key(|doc| doc.doc_id)
-        } else {
+        } else if matches!(&self.doc_id_to_index, DocumentLookup::Contiguous(_)) {
             self.documents
                 .iter()
                 .rev()
                 .find(|doc| doc.path_id == path_id && doc.is_valid())
+        } else {
+            // Sparse legacy tables need not store rows in document-ID order.
+            self.documents
+                .iter()
+                .filter(|doc| doc.path_id == path_id && doc.is_valid())
+                .max_by_key(|doc| doc.doc_id)
         }
     }
 
@@ -3009,6 +3015,62 @@ mod memory_delta_tests {
             assert!(Arc::ptr_eq(&base.paths.base, &memory.paths.base));
         }
         drop(base);
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn watched_lookup_matches_full_reconciliation_for_reordered_documents() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        write(&root, "same.rs", "alpha beta\n");
+        crate::index::build::build_index_with_progress(&root, true, true).unwrap();
+        let mut reader = IndexReader::open(&root).unwrap();
+        let template = reader.documents[0].clone();
+        let path = Path::new("same.rs");
+        reader.prepare_watched_paths();
+
+        for ids in [[1, 2, 3], [1, 5, 9], [9, 1, 5]] {
+            reader.documents = ids
+                .iter()
+                .map(|&doc_id| Document {
+                    doc_id,
+                    size: u64::from(doc_id) + 10,
+                    mtime: u64::from(doc_id) + 100,
+                    ..template.clone()
+                })
+                .collect();
+            reader.doc_id_to_index = DocumentLookup::new(&reader.documents);
+            let mut newest_first = ids;
+            newest_first.sort_unstable_by(|left, right| right.cmp(left));
+
+            for expected in newest_first.into_iter().map(Some).chain([None]) {
+                reader.valid_docs_cache = OnceLock::new();
+                // Full reconciliation inserts documents in ascending ID order,
+                // so its final metadata for a path comes from the highest ID.
+                let full = reader
+                    .valid_doc_ids()
+                    .iter()
+                    .filter_map(|id| reader.get_document(id))
+                    .rfind(|doc| reader.get_path(doc).is_some_and(|p| p == path));
+                let scoped = reader.document_for_path(path);
+                assert_eq!(scoped.map(|doc| doc.doc_id), expected, "rows {ids:?}");
+                assert_eq!(
+                    scoped.map(|doc| (doc.doc_id, doc.mtime, doc.size)),
+                    full.map(|doc| (doc.doc_id, doc.mtime, doc.size)),
+                    "rows {ids:?}"
+                );
+                if let Some(id) = expected {
+                    reader
+                        .documents
+                        .iter_mut()
+                        .find(|doc| doc.doc_id == id)
+                        .unwrap()
+                        .flags
+                        .set_tombstone();
+                }
+            }
+        }
+        drop(reader);
         crate::utils::remove_index(&root).unwrap();
     }
 
