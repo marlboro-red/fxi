@@ -11,7 +11,9 @@ use crate::index::build::{
 };
 use crate::index::reader::IndexReader;
 use crate::index::types::IndexMeta;
-use crate::query::{QueryExecutor, parse_query};
+#[cfg(test)]
+use crate::query::parse_query;
+use crate::query::{QueryExecutor, try_parse_query};
 use crate::server::debouncer::EventDebouncer;
 use crate::server::protocol::{
     ContentMatch, ContentSearchOptions, ContentSearchResponse, PROTOCOL_VERSION, Request, Response,
@@ -25,10 +27,10 @@ use crate::utils::get_index_dir;
 use anyhow::Result;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -162,10 +164,13 @@ pub struct IndexServer {
     /// handlers can clone out an index and release the map lock instead of
     /// holding it for the duration of a query.
     indexes: RwLock<HashMap<PathBuf, Arc<CachedIndex>>>,
+    lifecycle: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
     /// Server statistics
     stats: ServerStats,
     /// Shutdown flag
     pub(crate) shutdown: AtomicBool,
+    pub(crate) shutdown_reply_sent: AtomicBool,
+    shutdown_result: (Mutex<Option<std::result::Result<(), String>>>, Condvar),
     /// Channel for watcher messages
     watcher_tx: Sender<WatcherMessage>,
     /// Receiver for watcher messages (wrapped for thread safety)
@@ -193,8 +198,11 @@ impl IndexServer {
         );
         Arc::new(Self {
             indexes: RwLock::new(HashMap::new()),
+            lifecycle: Mutex::new(HashMap::new()),
             stats: ServerStats::new(),
             shutdown: AtomicBool::new(false),
+            shutdown_reply_sent: AtomicBool::new(false),
+            shutdown_result: (Mutex::new(None), Condvar::new()),
             watcher_tx,
             watcher_rx: Mutex::new(watcher_rx),
             watcher_config: config,
@@ -222,8 +230,52 @@ impl IndexServer {
 
         loop {
             if self.shutdown.load(Ordering::Relaxed) {
-                // Flush any pending changes before shutting down
-                self.flush_all_pending_changes();
+                // Join producers before consuming their final debounced batches.
+                self.stop_all_watchers();
+                let final_messages: Vec<_> = self.watcher_rx.lock().unwrap().try_iter().collect();
+                for message in final_messages {
+                    match message {
+                        WatcherMessage::ChangesReady { root_path, batch } => {
+                            self.accumulate_changes(root_path, batch)
+                        }
+                        WatcherMessage::RequestRebuild { root_path, .. }
+                        | WatcherMessage::Error { root_path, .. } => {
+                            let mut batch = ChangeBatch::new();
+                            batch.add(crate::server::watcher::FileChange {
+                                path: PathBuf::new(),
+                                kind: ChangeKind::Modified,
+                            });
+                            self.accumulate_changes(root_path, batch);
+                        }
+                    }
+                }
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while !self.pending_changes.lock().unwrap().is_empty() && Instant::now() < deadline
+                {
+                    let roots: Vec<_> = self
+                        .pending_changes
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|(_, pending)| {
+                            pending.retry_after.is_none_or(|at| Instant::now() >= at)
+                        })
+                        .map(|(root, _)| root.clone())
+                        .collect();
+                    for root in roots {
+                        self.flush_pending_changes(&root);
+                    }
+                    if !self.pending_changes.lock().unwrap().is_empty() {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                let result = if self.pending_changes.lock().unwrap().is_empty() {
+                    Ok(())
+                } else {
+                    Err("Shutdown could not persist all pending updates; restart with --watch to reconcile, or resolve writer contention/read errors".to_string())
+                };
+                *self.shutdown_result.0.lock().unwrap() = Some(result);
+                self.shutdown_result.1.notify_all();
                 break;
             }
 
@@ -238,7 +290,7 @@ impl IndexServer {
                             root_path.display(),
                             reason
                         );
-                        self.trigger_rebuild(&root_path);
+                        self.queue_reconciliation(root_path);
                     }
                     WatcherMessage::Error { root_path, message } => {
                         eprintln!(
@@ -246,6 +298,7 @@ impl IndexServer {
                             root_path.display(),
                             message
                         );
+                        self.queue_reconciliation(root_path);
                     }
                 }
             }
@@ -255,9 +308,19 @@ impl IndexServer {
         }
     }
 
+    fn queue_reconciliation(&self, root: PathBuf) {
+        let mut batch = ChangeBatch::new();
+        batch.add(crate::server::watcher::FileChange {
+            path: PathBuf::new(),
+            kind: ChangeKind::Modified,
+        });
+        self.accumulate_changes(root, batch);
+    }
+
     /// Accumulate changes for an index
     fn accumulate_changes(&self, root_path: PathBuf, batch: ChangeBatch) {
-        if batch.is_empty() {
+        let indexes = self.indexes.read().unwrap();
+        if batch.is_empty() || !indexes.contains_key(&root_path) {
             return;
         }
 
@@ -323,6 +386,7 @@ impl IndexServer {
     }
 
     /// Flush all pending changes (used during shutdown)
+    #[cfg(test)]
     pub(crate) fn flush_all_pending_changes(&self) {
         let paths: Vec<PathBuf> = {
             let pending = self.pending_changes.lock().unwrap();
@@ -490,6 +554,13 @@ impl IndexServer {
                 return Ok(true);
             }
             Ok(_) => {}
+            Err(error)
+                if error
+                    .downcast_ref::<crate::index::build::SourceReadError>()
+                    .is_some() =>
+            {
+                return Err(error);
+            }
             Err(error) => {
                 eprintln!("fxid: reconcile failed: {error}; rebuilding");
                 return self.rebuild_with_lock(root_path, lock).map(|_| true);
@@ -522,6 +593,7 @@ impl IndexServer {
     /// A rebuild consumes only the batch captured before it starts. Failure
     /// restores that batch, including when acquiring the writer lock fails;
     /// notifications accumulated during the rebuild retain their own entry.
+    #[cfg(test)]
     fn trigger_rebuild(&self, root_path: &PathBuf) {
         let captured = self.pending_changes.lock().unwrap().remove(root_path);
         let result = (|| {
@@ -585,6 +657,9 @@ impl IndexServer {
         let Ok(mut watcher_handle) = cached.watcher_handle.lock() else {
             return;
         };
+        if self.shutdown.load(Ordering::Acquire) {
+            return;
+        }
         if watcher_handle
             .as_ref()
             .is_some_and(WatcherHandle::is_running)
@@ -620,6 +695,16 @@ impl IndexServer {
     }
 
     pub(crate) fn handle_request(&self, request: Request) -> Response {
+        if self.shutdown.load(Ordering::Acquire)
+            && !matches!(
+                &request,
+                Request::Shutdown | Request::Ping | Request::Status
+            )
+        {
+            return Response::Error {
+                message: "Daemon is shutting down".into(),
+            };
+        }
         match request {
             Request::Search {
                 query,
@@ -637,10 +722,28 @@ impl IndexServer {
             Request::Status => self.handle_status(),
 
             Request::Reload { root_path } => self.handle_reload(root_path),
+            Request::Remove { root_path } => self.handle_remove(root_path),
 
             Request::Shutdown => {
-                self.shutdown.store(true, Ordering::Relaxed);
-                Response::ShuttingDown
+                self.shutdown.store(true, Ordering::Release);
+                let (result, _) = self
+                    .shutdown_result
+                    .1
+                    .wait_timeout_while(
+                        self.shutdown_result.0.lock().unwrap(),
+                        Duration::from_secs(25),
+                        |result| result.is_none(),
+                    )
+                    .unwrap();
+                match result.as_ref() {
+                    Some(Ok(())) => Response::ShuttingDown,
+                    Some(Err(message)) => Response::Error {
+                        message: message.clone(),
+                    },
+                    None => Response::Error {
+                        message: "Shutdown persistence did not complete before the deadline".into(),
+                    },
+                }
             }
 
             Request::Ping => Response::Pong,
@@ -660,7 +763,8 @@ impl IndexServer {
     fn handle_search(&self, query: String, root_path: Option<PathBuf>, limit: usize) -> Response {
         let start = Instant::now();
 
-        // Resolve root path (canonicalize + walk up, or use single loaded index)
+        let requested_path = root_path.as_ref().and_then(|path| path.canonicalize().ok());
+        // Resolve index location independently of the requested search scope.
         let root_path = match self.resolve_root(root_path) {
             Ok(p) => p,
             Err(resp) => return resp,
@@ -698,7 +802,29 @@ impl IndexServer {
         self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
 
         // Parse and execute query
-        let parsed = parse_query(&query);
+        let mut parsed = match try_parse_query(&query) {
+            Ok(query) => query,
+            Err(error) => {
+                return Response::Error {
+                    message: error.to_string(),
+                };
+            }
+        };
+        parsed.filters.search_scope = requested_path.and_then(|path| {
+            path.strip_prefix(&root_path)
+                .ok()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(PathBuf::from)
+        });
+        parsed.options.limit = if parsed.options.explicit_limit && parsed.options.limit != 0 {
+            if limit == 0 {
+                parsed.options.limit
+            } else {
+                parsed.options.limit.min(limit)
+            }
+        } else {
+            limit
+        };
         if parsed.is_empty() {
             return Response::Search(SearchResponse {
                 matches: vec![],
@@ -750,7 +876,8 @@ impl IndexServer {
     ) -> Response {
         let start = Instant::now();
 
-        // Resolve root path (canonicalize + walk up, or use single loaded index)
+        let requested_path = root_path.as_ref().and_then(|path| path.canonicalize().ok());
+        // Resolve index location independently of the requested search scope.
         let root_path = match self.resolve_root(root_path) {
             Ok(p) => p,
             Err(resp) => return resp,
@@ -787,7 +914,27 @@ impl IndexServer {
         // Parse and execute query. Case-insensitivity is applied at the plan
         // level: the planner derives sound Unicode-aware gram alternatives
         // and verifiers apply the requested case semantics.
-        let mut parsed = parse_query(&pattern);
+        let mut parsed = match try_parse_query(&pattern) {
+            Ok(query) => query,
+            Err(error) => {
+                return Response::Error {
+                    message: error.to_string(),
+                };
+            }
+        };
+        parsed.filters.search_scope = requested_path.and_then(|path| {
+            path.strip_prefix(&root_path)
+                .ok()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(PathBuf::from)
+        });
+        if options.word_regexp
+            && let Err(error) = parsed.apply_word_boundaries()
+        {
+            return Response::Error {
+                message: error.to_string(),
+            };
+        }
         parsed.options.case_insensitive = options.case_insensitive;
         if parsed.is_empty() {
             return Response::ContentSearch(ContentSearchResponse {
@@ -935,8 +1082,8 @@ impl IndexServer {
 
         let total_docs: u32 = indexes
             .values()
-            .map(|idx| idx.get_reader().meta.doc_count)
-            .sum();
+            .map(|idx| idx.get_reader().valid_doc_ids().len().min(u32::MAX as u64) as u32)
+            .fold(0, u32::saturating_add);
 
         let loaded_roots: Vec<PathBuf> = indexes.keys().cloned().collect();
 
@@ -959,6 +1106,12 @@ impl IndexServer {
             loaded_roots,
             protocol_version: PROTOCOL_VERSION,
             server_version: env!("CARGO_PKG_VERSION").to_string(),
+            watch_enabled: self.watch_enabled,
+            watched_roots: indexes
+                .iter()
+                .filter(|(_, index)| index.is_watching())
+                .map(|(root, _)| root.clone())
+                .collect(),
         })
     }
 
@@ -997,36 +1150,108 @@ impl IndexServer {
         }
     }
 
-    fn handle_reload(&self, root_path: Option<PathBuf>) -> Response {
-        let root_path = match self.resolve_root(root_path) {
-            Ok(p) => p,
-            Err(resp) => return resp,
+    fn lifecycle_for(&self, root: &Path) -> Arc<Mutex<()>> {
+        self.lifecycle
+            .lock()
+            .unwrap()
+            .entry(root.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    fn handle_remove(&self, requested: PathBuf) -> Response {
+        let root = match self.resolve_root(Some(requested)) {
+            Ok(root) => root,
+            Err(error) => return error,
         };
-
-        // Remove from cache to force reload
-        {
-            let mut indexes = self.indexes.write().unwrap();
-            indexes.remove(&root_path);
-        }
-
-        // Load fresh
-        match self.ensure_index_loaded(&root_path) {
-            Ok(()) => {
-                let indexes = self.indexes.read().unwrap();
-                let doc_count = indexes
-                    .get(&root_path)
-                    .map(|c| c.get_reader().meta.doc_count)
-                    .unwrap_or(0);
-                Response::Reloaded {
-                    success: true,
-                    message: format!("Reloaded {} files", doc_count),
-                    resolved_root: Some(root_path),
-                }
+        let lifecycle = self.lifecycle_for(&root);
+        let _lifecycle = lifecycle.lock().unwrap();
+        let result = (|| -> Result<()> {
+            let _writer = crate::utils::IndexLock::acquire(&root)?;
+            let removed = self.indexes.write().unwrap().remove(&root);
+            if let Some(cached) = removed {
+                cached.stop_watcher();
             }
-            Err(e) => Response::Reloaded {
+            self.pending_changes.lock().unwrap().remove(&root);
+            crate::utils::remove_index(&root)
+        })();
+        match result {
+            Ok(()) => Response::Reloaded {
+                success: true,
+                message: "Removed index and unloaded daemon reader".into(),
+                resolved_root: Some(root),
+            },
+            Err(error) => Response::Error {
+                message: error.to_string(),
+            },
+        }
+    }
+
+    fn handle_reload(&self, root_path: Option<PathBuf>) -> Response {
+        let root = match self.resolve_root(root_path) {
+            Ok(root) => root,
+            Err(error) => return error,
+        };
+        let lifecycle = self.lifecycle_for(&root);
+        let guard = lifecycle.lock().unwrap();
+        let cached = self.indexes.read().unwrap().get(&root).cloned();
+        let result = if let Some(cached) = cached {
+            (|| -> Result<()> {
+                let writer = crate::utils::IndexLock::acquire(&root)?;
+                let reader = IndexReader::open(&root)?;
+                let previous_live = cached.get_reader();
+                let pending = {
+                    let mut pending = self.pending_changes.lock().unwrap();
+                    if let Some(changes) = pending.get_mut(&root) {
+                        changes.needs_visibility = true;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if pending {
+                    // A reload refreshes the durable base, but must not hide
+                    // an already searchable preview while dirty work remains.
+                    if cached.is_watching() {
+                        reader.prepare_watched_paths();
+                    }
+                    *cached.durable_reader.lock().unwrap() = Arc::new(reader);
+                } else {
+                    cached.set_pending_reader(reader);
+                }
+                drop(writer);
+                if pending {
+                    self.flush_pending_changes_mode(&root, false);
+                    let still_dirty = self
+                        .pending_changes
+                        .lock()
+                        .unwrap()
+                        .get(&root)
+                        .is_some_and(|changes| changes.needs_visibility);
+                    // Another writer can own the removed pending batch. In
+                    // that case absence from the map does not prove that the
+                    // old live snapshot has been replaced yet.
+                    anyhow::ensure!(
+                        !still_dirty && !Arc::ptr_eq(&previous_live, &cached.get_reader()),
+                        "Durable generation reloaded, but pending changes are not visible yet; resolve writer contention or source read errors and retry reload"
+                    );
+                }
+                Ok(())
+            })()
+        } else {
+            drop(guard);
+            self.ensure_index_loaded(&root)
+        };
+        match result {
+            Ok(()) => Response::Reloaded {
+                success: true,
+                message: "Reloaded current generation".into(),
+                resolved_root: Some(root),
+            },
+            Err(error) => Response::Reloaded {
                 success: false,
-                message: format!("Failed to reload: {}", e),
-                resolved_root: Some(root_path),
+                message: format!("Failed to reload: {error}"),
+                resolved_root: Some(root),
             },
         }
     }
@@ -1086,7 +1311,13 @@ impl IndexServer {
             return Ok(());
         }
 
-        // Check if we need to load the index
+        let lifecycle = self.lifecycle_for(root_path);
+        let _lifecycle = lifecycle.lock().unwrap();
+        anyhow::ensure!(
+            !self.shutdown.load(Ordering::Acquire),
+            "Daemon is shutting down"
+        );
+        // Check again after serializing load/start/remove for this root.
         let index_loaded = {
             let indexes = self.indexes.read().unwrap();
             indexes.contains_key(root_path)
@@ -1143,7 +1374,8 @@ impl IndexServer {
                             .is_some_and(|reader| reader.generation_path() == generation) => {}
                     Ok(_) => {
                         // Swap in a fresh reader in case the scan changed it
-                        if let Ok(reader) = IndexReader::open(root_path) {
+                        {
+                            let reader = IndexReader::open(root_path)?;
                             let indexes = self.indexes.read().unwrap();
                             if let Some(cached) = indexes.get(root_path) {
                                 cached.set_pending_reader(reader);
@@ -1151,7 +1383,10 @@ impl IndexServer {
                         }
                     }
                     Err(e) => {
-                        eprintln!("fxid: reconcile failed for {}: {}", root_path.display(), e)
+                        return Err(e.context(format!(
+                            "Could not reconcile {} before starting its watcher",
+                            root_path.display()
+                        )));
                     }
                 }
 
@@ -1249,7 +1484,17 @@ fn run_watcher_thread(
     // Event processing loop
     loop {
         if shutdown.load(Ordering::Relaxed) {
-            break;
+            drop(watcher);
+            for event in event_rx.try_iter() {
+                accumulate_native_event(&root_path, &mut debouncer, event);
+            }
+            // Native delivery may still have been buffered in the OS at stop.
+            // A final reconciliation closes that gap before acknowledging exit.
+            debouncer.add_event(PathBuf::new(), ChangeKind::Modified);
+            if let Some(batch) = debouncer.flush() {
+                let _ = tx.send(WatcherMessage::ChangesReady { root_path, batch });
+            }
+            return Ok(());
         }
 
         let timeout = debouncer
@@ -2353,3 +2598,7 @@ mod tests {
         assert!(!should_compact(&meta, 15));
     }
 }
+
+#[cfg(test)]
+#[path = "lifecycle_tests.rs"]
+mod lifecycle_tests;

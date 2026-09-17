@@ -32,6 +32,9 @@ pub struct ContentSearchOptions {
     /// Return per-file counts without transferring individual match records.
     #[serde(default)]
     pub counts_only: bool,
+    /// Apply whole-word boundaries without changing matching mode or case.
+    #[serde(default)]
+    pub word_regexp: bool,
 }
 
 /// Request from client to server
@@ -70,6 +73,9 @@ pub enum Request {
         #[serde(default)]
         root_path: Option<PathBuf>,
     },
+
+    /// Remove an index and unload any live reader/watcher.
+    Remove { root_path: PathBuf },
 
     /// Graceful shutdown request
     Shutdown,
@@ -214,6 +220,10 @@ pub struct StatusResponse {
     /// Server software version (empty if server predates versioning)
     #[serde(default)]
     pub server_version: String,
+    #[serde(default)]
+    pub watch_enabled: bool,
+    #[serde(default)]
+    pub watched_roots: Vec<PathBuf>,
 }
 
 /// Serialization envelope that appends an optional `request_id` field to a
@@ -245,6 +255,39 @@ fn string_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Strin
     })
 }
 
+const MAX_MESSAGE_BYTES: usize = 100 * 1024 * 1024;
+
+/// Serialize before writing any frame bytes, with the same byte budget as readers.
+/// A rejected response cannot leave a partial frame on a reusable connection.
+fn serialize_bounded(msg: &impl Serialize, limit: usize) -> std::io::Result<Vec<u8>> {
+    struct Buffer {
+        bytes: Vec<u8>,
+        limit: usize,
+    }
+    impl Write for Buffer {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            if data.len() > self.limit.saturating_sub(self.bytes.len()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Message too large; narrow the query or lower its result limit",
+                ));
+            }
+            self.bytes.extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut buffer = Buffer {
+        bytes: Vec::new(),
+        limit,
+    };
+    serde_json::to_writer(&mut buffer, msg)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(buffer.bytes)
+}
+
 /// Write a message to a stream with length prefix and an optional request_id.
 ///
 /// The message is serialized in a single pass; `request_id`, if provided, is
@@ -254,8 +297,7 @@ pub fn write_message_with_id<W: Write>(
     msg: &impl Serialize,
     request_id: Option<&str>,
 ) -> std::io::Result<()> {
-    let json = serde_json::to_vec(&TaggedMessage { msg, request_id })
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let json = serialize_bounded(&TaggedMessage { msg, request_id }, MAX_MESSAGE_BYTES)?;
 
     let len = json.len() as u32;
     writer.write_all(&len.to_le_bytes())?;
@@ -278,7 +320,7 @@ pub fn read_message_with_id<R: Read, T: for<'de> Deserialize<'de>>(
     let len = u32::from_le_bytes(len_buf) as usize;
 
     // Sanity check: don't allocate more than 100MB
-    if len > 100 * 1024 * 1024 {
+    if len > MAX_MESSAGE_BYTES {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "Message too large",
@@ -301,8 +343,7 @@ pub fn read_message_with_id<R: Read, T: for<'de> Deserialize<'de>>(
 /// Write a message to a stream with length prefix
 #[cfg(test)]
 pub fn write_message<W: Write>(writer: &mut W, msg: &impl Serialize) -> std::io::Result<()> {
-    let json = serde_json::to_vec(msg)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let json = serialize_bounded(msg, MAX_MESSAGE_BYTES)?;
 
     let len = json.len() as u32;
     writer.write_all(&len.to_le_bytes())?;
@@ -320,7 +361,7 @@ pub fn read_message<R: Read, T: for<'de> Deserialize<'de>>(reader: &mut R) -> st
     let len = u32::from_le_bytes(len_buf) as usize;
 
     // Sanity check: don't allocate more than 100MB
-    if len > 100 * 1024 * 1024 {
+    if len > MAX_MESSAGE_BYTES {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "Message too large",
@@ -338,6 +379,20 @@ pub fn read_message<R: Read, T: for<'de> Deserialize<'de>>(reader: &mut R) -> st
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn serialization_budget_counts_escaped_wire_bytes() {
+        let text = "\n".repeat(16);
+        let exact = serde_json::to_vec(&text).unwrap();
+        assert_eq!(serialize_bounded(&text, exact.len()).unwrap(), exact);
+        assert_eq!(
+            serialize_bounded(&text, exact.len() - 1)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(serialize_bounded(&text, text.len()).is_err());
+    }
 
     #[test]
     fn compact_file_response_is_optional_and_roundtrips() {

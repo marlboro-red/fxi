@@ -77,6 +77,15 @@ pub fn get_pipe_name() -> String {
 
 /// Get the PID file path for the daemon
 pub fn get_pid_path() -> PathBuf {
+    if let Some(socket) = std::env::var_os("FXI_SOCKET") {
+        #[cfg(unix)]
+        return PathBuf::from(socket).with_extension("pid");
+        #[cfg(windows)]
+        return std::env::temp_dir().join(format!(
+            "fxi-{:016x}.pid",
+            xxhash_rust::xxh3::xxh3_64(socket.as_encoded_bytes())
+        ));
+    }
     #[cfg(unix)]
     {
         if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
@@ -119,6 +128,7 @@ pub fn is_daemon_running() -> bool {
     // Read PID and check if process exists
     if let Ok(pid_str) = std::fs::read_to_string(&pid_path)
         && let Ok(pid) = pid_str.trim().parse::<i32>()
+        && pid > 0
     {
         // Check if process exists using kill(pid, 0)
         // Returns 0 if process exists and we can signal it.
@@ -146,6 +156,7 @@ pub fn is_daemon_running() -> bool {
     // Read PID and check if process exists
     if let Ok(pid_str) = std::fs::read_to_string(&pid_path)
         && let Ok(pid) = pid_str.trim().parse::<u32>()
+        && pid > 0
     {
         // Try to open the process to check if it exists
         #[link(name = "kernel32")]

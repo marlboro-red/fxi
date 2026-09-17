@@ -17,7 +17,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -35,6 +35,8 @@ const PIPE_ACCESS_DUPLEX: u32 = 0x00000003;
 const PIPE_TYPE_BYTE: u32 = 0x00000000;
 const PIPE_READMODE_BYTE: u32 = 0x00000000;
 const PIPE_WAIT: u32 = 0x00000000;
+const PIPE_NOWAIT: u32 = 0x00000001;
+const ERROR_PIPE_LISTENING: u32 = 536;
 const PIPE_UNLIMITED_INSTANCES: u32 = 255;
 const INVALID_HANDLE_VALUE: *mut std::ffi::c_void = -1isize as *mut std::ffi::c_void;
 const ERROR_PIPE_CONNECTED: u32 = 535;
@@ -57,11 +59,25 @@ unsafe extern "system" {
         lpOverlapped: *mut std::ffi::c_void,
     ) -> i32;
 
+    fn SetNamedPipeHandleState(
+        hNamedPipe: *mut std::ffi::c_void,
+        lpMode: *const u32,
+        lpMaxCollectionCount: *const u32,
+        lpCollectDataTimeout: *const u32,
+    ) -> i32;
+
     fn DisconnectNamedPipe(hNamedPipe: *mut std::ffi::c_void) -> i32;
 
     fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
 
     fn GetLastError() -> u32;
+    fn GetCurrentThreadId() -> u32;
+    fn OpenThread(
+        desired_access: u32,
+        inherit_handle: i32,
+        thread_id: u32,
+    ) -> *mut std::ffi::c_void;
+    fn CancelSynchronousIo(thread: *mut std::ffi::c_void) -> i32;
 
     fn OpenProcess(
         dwDesiredAccess: u32,
@@ -70,6 +86,15 @@ unsafe extern "system" {
     ) -> *mut std::ffi::c_void;
 
     fn TerminateProcess(hProcess: *mut std::ffi::c_void, uExitCode: u32) -> i32;
+
+    fn PeekNamedPipe(
+        hNamedPipe: *mut std::ffi::c_void,
+        lpBuffer: *mut std::ffi::c_void,
+        nBufferSize: u32,
+        lpBytesRead: *mut u32,
+        lpTotalBytesAvail: *mut u32,
+        lpBytesLeftThisMessage: *mut u32,
+    ) -> i32;
 
     fn ReadFile(
         hFile: *mut std::ffi::c_void,
@@ -115,25 +140,47 @@ struct PipeHandle {
     handle: SendableHandle,
 }
 
-impl PipeHandle {
-    #[allow(dead_code)]
-    fn try_clone(&self) -> std::io::Result<Self> {
-        // For simplicity, we don't actually clone the handle
-        // The server uses separate reader/writer on the same handle
-        Ok(Self {
-            handle: self.handle,
-        })
-    }
-}
-
 impl Read for PipeHandle {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        // Only this handler reads the pipe. Peek before ReadFile so idle or
+        // partial frames cannot retain a connection slot indefinitely.
+        let deadline =
+            std::time::Instant::now() + Duration::from_millis(CONNECTION_TIMEOUT_MS as u64);
+        let available = loop {
+            let mut available = 0;
+            if unsafe {
+                PeekNamedPipe(
+                    self.handle.as_raw(),
+                    ptr::null_mut(),
+                    0,
+                    ptr::null_mut(),
+                    &mut available,
+                    ptr::null_mut(),
+                )
+            } == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            if available > 0 {
+                break available;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Pipe read timed out",
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
         let mut bytes_read: u32 = 0;
         let ok = unsafe {
             ReadFile(
                 self.handle.as_raw(),
                 buf.as_mut_ptr(),
-                buf.len() as u32,
+                buf.len().min(available as usize) as u32,
                 &mut bytes_read,
                 ptr::null_mut(),
             )
@@ -262,7 +309,7 @@ impl IndexServer {
                 CreateNamedPipeW(
                     wide_name.as_ptr(),
                     PIPE_ACCESS_DUPLEX,
-                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT,
                     PIPE_UNLIMITED_INSTANCES,
                     PIPE_BUFFER_SIZE,
                     PIPE_BUFFER_SIZE,
@@ -278,17 +325,17 @@ impl IndexServer {
                 continue;
             }
 
-            // Wait for client connection
-            let connected = unsafe { ConnectNamedPipe(pipe_handle, ptr::null_mut()) };
-
-            if connected == 0 {
-                let err = unsafe { GetLastError() };
-                if err != ERROR_PIPE_CONNECTED {
-                    unsafe {
-                        CloseHandle(pipe_handle);
-                    }
-                    continue;
+            // Poll connection readiness so shutdown never needs an extra client.
+            let connected = wait_for_connection(pipe_handle, &self.shutdown);
+            let mode = PIPE_READMODE_BYTE | PIPE_WAIT;
+            if !connected
+                || unsafe { SetNamedPipeHandleState(pipe_handle, &mode, ptr::null(), ptr::null()) }
+                    == 0
+            {
+                unsafe {
+                    CloseHandle(pipe_handle);
                 }
+                continue;
             }
 
             if self.shutdown.load(Ordering::Relaxed) {
@@ -330,6 +377,12 @@ impl IndexServer {
         // Wait for watcher processor to finish
         let _ = watcher_processor.join();
 
+        let reply_deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !self.shutdown_reply_sent.load(Ordering::Acquire)
+            && std::time::Instant::now() < reply_deadline
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
         // Cleanup
         let _ = fs::remove_file(&pid_path);
 
@@ -352,23 +405,42 @@ impl IndexServer {
                 Ok(r) => r,
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => break,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => break,
                 Err(e) => {
                     let resp = Response::Error {
                         message: format!("Invalid request: {}", e),
                     };
-                    let _ = write_message_with_id(&mut writer, &resp, None);
-                    continue;
+                    let _ = with_write_timeout(
+                        Duration::from_millis(CONNECTION_TIMEOUT_MS as u64),
+                        || write_message_with_id(&mut writer, &resp, None),
+                    );
+                    break;
                 }
             };
 
             let is_shutdown = matches!(request, Request::Shutdown);
             let response = self.handle_request(request);
 
-            if write_message_with_id(&mut writer, &response, request_id.as_deref()).is_err() {
-                break;
-            }
-
+            let written =
+                with_write_timeout(Duration::from_millis(CONNECTION_TIMEOUT_MS as u64), || {
+                    match write_message_with_id(&mut writer, &response, request_id.as_deref()) {
+                        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                            let _ = write_message_with_id(
+                                &mut writer,
+                                &Response::Error {
+                                    message: format!("Cannot encode response: {error}"),
+                                },
+                                request_id.as_deref(),
+                            );
+                            Err(error)
+                        }
+                        result => result,
+                    }
+                });
             if is_shutdown {
+                self.shutdown_reply_sent.store(true, Ordering::Release);
+            }
+            if written.is_err() || is_shutdown {
                 break;
             }
         }
@@ -418,6 +490,15 @@ pub fn run_foreground(watch: bool) -> Result<()> {
     server.run()
 }
 
+fn positive_pid(value: &str) -> Result<u32> {
+    let pid: u32 = value.trim().parse()?;
+    anyhow::ensure!(
+        pid > 0,
+        "Invalid daemon PID; refusing to signal a process group"
+    );
+    Ok(pid)
+}
+
 /// Stop the running daemon
 pub fn stop_daemon() -> Result<bool> {
     let pid_path = get_pid_path();
@@ -427,7 +508,7 @@ pub fn stop_daemon() -> Result<bool> {
     }
 
     let pid_str = fs::read_to_string(&pid_path)?;
-    let pid: u32 = pid_str.trim().parse()?;
+    let pid = positive_pid(&pid_str)?;
 
     // Open the process and terminate it
     unsafe {
@@ -457,4 +538,200 @@ pub fn stop_daemon() -> Result<bool> {
     let _ = fs::remove_file(&pid_path);
 
     Ok(true)
+}
+
+/// Bound a complete synchronous response, including FlushFileBuffers waiting
+/// for the client to drain its pipe. Repeated cancellation closes the race
+/// where the deadline expires immediately before WriteFile starts.
+fn with_write_timeout(
+    timeout: Duration,
+    operation: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    const THREAD_TERMINATE: u32 = 0x0001;
+    let handle = unsafe { OpenThread(THREAD_TERMINATE, 0, GetCurrentThreadId()) };
+    if handle.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    struct ThreadHandle(SendableHandle);
+    impl Drop for ThreadHandle {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0.as_raw());
+            }
+        }
+    }
+    struct Complete(std::sync::mpsc::Sender<()>);
+    impl Drop for Complete {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+    let thread_handle = ThreadHandle(SendableHandle::from_raw(handle));
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::scope(|scope| {
+        scope.spawn(move || {
+            let thread_handle = thread_handle;
+            if rx.recv_timeout(timeout) != Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                return;
+            }
+            loop {
+                unsafe {
+                    CancelSynchronousIo(thread_handle.0.as_raw());
+                }
+                match rx.recv_timeout(Duration::from_millis(10)) {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    _ => break,
+                }
+            }
+        });
+        let _complete = Complete(tx);
+        operation()
+    })
+}
+
+/// Poll only connection establishment; established pipe I/O remains synchronous.
+fn wait_for_connection(pipe_handle: *mut std::ffi::c_void, shutdown: &AtomicBool) -> bool {
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            return false;
+        }
+        if unsafe { ConnectNamedPipe(pipe_handle, ptr::null_mut()) } != 0 {
+            // NOWAIT success means the instance became available;
+            // only ERROR_PIPE_CONNECTED confirms an actual client.
+            continue;
+        }
+        let error = unsafe { GetLastError() };
+        if error == ERROR_PIPE_CONNECTED {
+            return true;
+        }
+        if error != ERROR_PIPE_LISTENING {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_pids_never_reach_process_signalling() {
+        for invalid in ["0", "-1", "not-a-pid", "99999999999999999999"] {
+            assert!(positive_pid(invalid).is_err());
+        }
+        assert_eq!(positive_pid(" 42\n").unwrap(), 42);
+    }
+
+    #[test]
+    fn stalled_client_does_not_hold_a_response_writer_forever() {
+        let name = format!(
+            r"\\.\pipe\fxi-write-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let wide = to_wide_string(&name);
+        let handle = unsafe {
+            CreateNamedPipeW(
+                wide.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT,
+                1,
+                PIPE_BUFFER_SIZE,
+                PIPE_BUFFER_SIZE,
+                CONNECTION_TIMEOUT_MS,
+                ptr::null_mut(),
+            )
+        };
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let client = thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            let _file = loop {
+                match std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&name)
+                {
+                    Ok(file) => break file,
+                    Err(error) if std::time::Instant::now() >= deadline => {
+                        panic!("cannot connect test pipe: {error}")
+                    }
+                    Err(_) => thread::sleep(Duration::from_millis(5)),
+                }
+            };
+            let _ = released.recv_timeout(Duration::from_secs(3));
+        });
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&shutdown);
+        let (cancel, cancellation) = std::sync::mpsc::channel::<()>();
+        let accept_timeout = thread::spawn(move || {
+            if cancellation.recv_timeout(Duration::from_secs(3)).is_err() {
+                stop.store(true, Ordering::Release);
+            }
+        });
+        let connected = wait_for_connection(handle, &shutdown);
+        let _ = cancel.send(());
+        accept_timeout.join().unwrap();
+        let mode = PIPE_READMODE_BYTE | PIPE_WAIT;
+        assert!(connected);
+        assert_ne!(
+            unsafe { SetNamedPipeHandleState(handle, &mode, ptr::null(), ptr::null()) },
+            0
+        );
+        let pipe = PipeHandle {
+            handle: SendableHandle::from_raw(handle),
+        };
+        let mut writer = PipeWriter(pipe.handle);
+        let result = with_write_timeout(Duration::from_millis(30), || {
+            writer.write_all(&vec![b'x'; PIPE_BUFFER_SIZE as usize * 4])?;
+            writer.flush()
+        });
+        let _ = release.send(());
+        client.join().unwrap();
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(995)); // ERROR_OPERATION_ABORTED
+    }
+
+    #[test]
+    fn unconnected_accept_observes_shutdown_without_a_wakeup_client() {
+        let name = to_wide_string(&format!(
+            r"\\.\pipe\fxi-accept-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let handle = unsafe {
+            CreateNamedPipeW(
+                name.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT,
+                1,
+                PIPE_BUFFER_SIZE,
+                PIPE_BUFFER_SIZE,
+                CONNECTION_TIMEOUT_MS,
+                ptr::null_mut(),
+            )
+        };
+        assert_ne!(handle, INVALID_HANDLE_VALUE);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&shutdown);
+        let worker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            stop.store(true, Ordering::Release);
+        });
+        let connected = wait_for_connection(handle, &shutdown);
+        unsafe {
+            CloseHandle(handle);
+        }
+        worker.join().unwrap();
+        assert!(
+            !connected,
+            "making a NOWAIT pipe available is not a connected client"
+        );
+    }
 }

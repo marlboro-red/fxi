@@ -216,6 +216,7 @@ impl IndexClient {
 
     /// Ask whether the daemon is watching (and keeping fresh) a root.
     /// Returns (watching, pending_changes).
+    #[allow(dead_code)] // Public client API; not used by the CLI freshness barrier.
     pub fn watch_status(&mut self, root_path: Option<&Path>) -> ClientResult<(bool, usize)> {
         let request = Request::WatchStatus {
             root_path: root_path.map(|p| p.to_path_buf()),
@@ -230,6 +231,19 @@ impl IndexClient {
                 ..
             } => Ok((watching, pending_changes)),
             Response::Error { message } => Err(ClientError::ServerError(message)),
+            _ => Err(ClientError::InvalidResponse),
+        }
+    }
+
+    /// Remove persistent and live state together.
+    pub fn remove(&mut self, root_path: &Path) -> ClientResult<()> {
+        match self.send_recv(&Request::Remove {
+            root_path: root_path.to_path_buf(),
+        })? {
+            Response::Reloaded { success: true, .. } => Ok(()),
+            Response::Reloaded { message, .. } | Response::Error { message } => {
+                Err(ClientError::ServerError(message))
+            }
             _ => Err(ClientError::InvalidResponse),
         }
     }
