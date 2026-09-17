@@ -26,6 +26,9 @@ For a local build without installation, run `cargo build --release` and use
 daemon loads roots as they are searched; starting it does not immediately load
 and watch every index on disk. Without the daemon, searches read the saved index.
 
+Updating an existing installation? See [behavior changes and migration](docs/MIGRATION.md)
+and the [audit fix record](docs/audit-2026-09-18/FIXES.md).
+
 ## Choose what your query means
 
 | Command | Meaning |

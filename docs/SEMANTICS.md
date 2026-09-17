@@ -5,22 +5,62 @@ fresh its results are. Where behavior differs from ripgrep, the difference is
 listed explicitly. Claims marked with a test name are enforced by
 `tests/parity_grid.rs` or the named unit test.
 
-## Query model
+## Choose a pattern mode
 
-A query string is parsed into an AST before any flag handling:
+The shell removes its own quotes before invoking fxi. These commands therefore
+have different meanings:
 
-| Input | Meaning |
-|-------|---------|
-| `foo bar` | AND: both terms must appear somewhere in the **same file** |
-| `"foo bar"` | Phrase: the exact substring `foo bar` |
-| `foo \| bar` | OR |
-| `-foo` | NOT: exclude files matching `foo` |
-| `re:/pat/` | Regex (Rust `regex` crate syntax) |
-| `-e a -e b` | OR of patterns (compiled to a regex alternation) |
+| Command | Meaning |
+|---|---|
+| `fxi error` | Case-insensitive substring |
+| `fxi 'fn main'` | File-level AND: both substrings, anywhere in the same file |
+| `fxi '"fn main"'` | Exact, case-sensitive phrase on one line |
+| `fxi -F 'fn main'` | The same literal text, without query-language parsing |
+| `fxi --regex 'fn\s+main'` | Case-sensitive Rust regular expression |
+| `fxi 'foo | bar'` | File-level OR |
+| `fxi 'foo -bar'` | Files containing foo and no bar |
+| `fxi -e foo -e bar` | OR of two patterns in the selected mode |
 
-**Difference from grep/ripgrep:** unquoted multi-word queries are a
-*file-level* AND, not a line match. `fxi "static void"` finds files containing
-both words anywhere; `fxi '"static void"'` finds the phrase.
+`-F` and `--regex` are mutually exclusive. Both are case-sensitive unless `-i`
+is supplied. Default query mode keeps each `-e` branch's own semantics; combining
+bare terms with `-e` does not make them case-sensitive. Use `fxi -F -- '-foo'`
+for literal leading punctuation, and `fxi -- index` to search a subcommand name.
+
+Within query mode, adjacency means AND and `|` means OR; parentheses group
+expressions. Interior punctuation is literal: `foo-bar`, `a:b`, `f(x)`, and
+`x^y` are not split into implicit operators. A leading `-` negates a term.
+Quoted phrases accept escaped quotes and backslashes; regex delimiters accept
+escaped slashes and slashes inside character classes.
+
+Parsing is fallible and bounded to 64 KiB, 1,024 terms/nodes and 32 nested groups.
+Malformed expressions, invalid regular expressions, incomplete fields, nonfinite
+boosts and invalid numeric/date ranges produce errors. Library users should use
+`try_parse_query`; compatibility `parse_query` retains an invalid node that
+execution rejects, rather than converting a bad query into an empty search.
+
+## Filters and file predicates
+
+Filters apply globally to the entire query. Write `ext:rs (foo | bar)`; filters
+inside parentheses, under NOT or mixed ambiguously with ungrouped OR are errors.
+Repeated fields are errors, except complementary lower/upper size or time bounds.
+
+| Filter | Meaning |
+|---|---|
+| `path:src/*.rs` | Glob over paths relative to the index root |
+| `file:main.rs` | Filename filter |
+| `ext:rs`, `lang:rust` | Extension or recognized language |
+| `size:>1000 size:<10000` | Strict file-size bounds in bytes |
+| `line:10-20` | Inclusive, positive source-line range |
+| `mtime:2026-09-18` | UTC calendar day, ending before the next midnight |
+| `mtime:>1704067200` | Strict bound in Unix seconds; dates also accepted |
+| `near:foo,bar,10` | Terms in one shared proximity window; order-independent |
+
+A Boolean predicate selects files first. Content output contains unique positive
+matching lines in those files: `foo foo` does not duplicate rows/counts. NOT
+contributes no fabricated source line. A pure-negative or filter-only result is
+a file-level record with placeholder line number 1 and empty content; use `-l` for these
+queries when only paths are wanted. Highlighting currently retains one matching
+span per result line, rather than every matching occurrence.
 
 ## Matching semantics
 
@@ -67,14 +107,30 @@ ranked filename fallback.
 
 ### Flags
 
-- `-w` rewrites to `\b…\b` regex semantics (parity: *"-w token"*,
-  *"-w -i combination"*).
+- `-w` applies Unicode regex word boundaries to each positive or negative matcher,
+  preserving its case mode and Boolean structure. Boost/proximity queries with
+  `-w` currently return an explicit unsupported-combination error.
 - `-i` affects phrases and regexes; it is a no-op for bare tokens, which are
   already case-insensitive (parity: *"-i mixed-case query"*).
 - `-v` (invert) is **unsupported**: an index can return matching lines, not
   non-matching ones.
-- `-m N` caps results after matching; `-l` and `-c` change output, not
-  matching.
+- `-m N` / `--max-count N` is a global result limit, not ripgrep's per-file
+  limit. Zero means unlimited at the CLI; server resource caps still apply.
+  Files-only limits select paths; counts limit matching rows across files.
+  `top:N` is for ranked search and is rejected in the content CLI: use `-m`.
+- `fxi PATTERN PATH` and `-p PATH` restrict results to that file/subtree while
+  finding its owning index. Subtree matching respects path-component boundaries.
+- Piped text always includes paths. `--heading` and `--no-heading` override the
+  terminal default; overlapping context is merged in source-line order.
+- `--json` emits one response object. `-l -0` emits NUL-delimited paths, including
+  names containing newlines. They cannot be combined. JSON match offsets are
+  UTF-8 byte offsets, not JavaScript string indices.
+- `--color auto` colors only terminal output when `NO_COLOR` is absent and `TERM`
+  is neither missing nor `dumb`. Explicit `always`/`never` override detection.
+- No matches exits 0; invalid input and failed operations exit nonzero. This is
+  deliberately different from grep/ripgrep's no-match exit 1. Broken stdout
+  pipes exit quietly and successfully. Stdin content search is unsupported;
+  invoking without a pattern requires an interactive terminal.
 
 ## Which files are searched
 
@@ -96,14 +152,20 @@ Consequences worth knowing:
   ripgrep transcodes BOM-marked UTF-16; fxi does not.
 - Only valid UTF-8 content is indexed and searched. Other encodings need
   conversion first; byte-oriented matching and automatic transcoding are not supported.
-- Files the indexer rejects are remembered (with mtime) in `meta.json`, so
-  incremental scans skip them until they change.
+- Intentionally excluded content is remembered with its metadata so incremental
+  scans can skip it until it changes. Read/traversal/metadata failures are errors,
+  not exclusions: they leave the published generation intact and watcher work
+  pending for retry.
+- Root and indexed relative paths must be valid UTF-8. Unsupported native path
+  bytes are rejected explicitly rather than converted lossily.
 
 ## Freshness
 
 Search results reflect **the index as of its last update**, with one
-correction: every candidate file is verified against a read or metadata-validated snapshot at query time, so a
-file whose content changed since indexing never produces stale *lines*.
+correction: every candidate file is verified against a read or metadata-validated snapshot at query time, so changed candidates are rechecked instead of blindly returning stored lines.
+Context is rendered from the same immutable per-file snapshot used to verify its
+matches. Concurrent edits can still occur during or after the source read; there
+is no transactional snapshot of the whole tree.
 
 The asymmetry to understand: stale matches are pruned, but **files created or
 made-matching since the last index update are invisible** — narrowing cannot
@@ -134,22 +196,29 @@ How the index stays fresh:
 - By default, persistence is scheduled after 250 ms of quiet or ten seconds
   of continuous updates. Larger batches and rebuilds use the durable path
   immediately. `FXI_DELTA_FLUSH_SECS > 0` instead sets the first-event delay for
-  persistence, without delaying eligible memory previews. Graceful shutdown
-  attempts to flush pending work; interrupted/uncommitted updates are repaired
+  persistence, without delaying eligible memory previews. Graceful shutdown stops and joins producers, reconciles their final batches and
+  acknowledges success only after pending updates are persisted. Contended or
+  failed work is retried within a bounded shutdown window; incomplete persistence
+  returns an error. `daemon stop --force` may discard pending work.
+  Interrupted/uncommitted updates are repaired
   when a watched daemon starts again. Direct readers can lag behind a running
   daemon's in-memory view. Existing generation durability barriers are retained.
   Persistence/compaction still runs on the update processor and can delay events
   arriving during that work.
-- While a root is watched, `fxi index` skips its own scan and reports the
-  daemon's pending-change count, which can include already searchable changes
-  awaiting persistence; `fxi index --force` rebuilds locally.
+- `fxi index` always performs reconciliation, including watched roots. After a
+  successful CLI build or compaction, it reloads the daemon's generation before
+  reporting success. `fxi remove` unloads/stops a loaded root and removes its
+  index under the writer lock; queued watcher hints cannot recreate it.
+- `daemon start --watch` fails explicitly if an existing daemon has watching
+  disabled. Stop/restart to change mode. `daemon status` reports watch mode and
+  actual watched roots; it does not claim to measure query-cache hits or RSS.
 - All index writers (CLI builds, daemon flushes, compaction) hold a
   per-index advisory lock, so two writers can never interleave segment or
   metadata writes. Ordinary watcher batches defer when another writer holds
   that lock, allowing other roots to progress. Failed batches remain pending
   and retry with a one-second backoff.
-- Searching without a daemon prints a stderr note when the index is more
-  than an hour old (`FXI_STALE_WARN_SECS`, 0 disables).
+- Searching without a daemon prints a note to terminal stderr when the index is
+  more than an hour old (`FXI_STALE_WARN_SECS`, 0 disables).
 
 ## Result caching
 
@@ -184,7 +253,10 @@ recall. Every candidate is verified against source content.
 Files-only searches can use whole-buffer matching when the regex provably cannot
 cross or inspect line boundaries. Anchored, empty, and other context-sensitive
 patterns retain per-line matching. Content output always preserves original UTF-8
-byte offsets.
+byte offsets. Context queries retain verified source snapshots through rendering,
+so a concurrent edit cannot mix old matches with newly read context. This can
+increase peak memory for broad context queries; no-context/ranked requests do
+not retain those extra source snapshots.
 
 Content caches are sharded and shared across readers in the process. Defaults
 limit retained text to 1 GiB and entries to 131,072; `FXI_CACHE_MIB` accepts
@@ -207,7 +279,9 @@ becomes resident. Filling the cache can increase first-query latency and RSS.
 ## Index loading and validation
 
 Public `IndexReader::open` and `open_uncached` validate gram and token dictionary
-structure and posting ranges when opening an index. One-shot CLI searches load
+structure, posting ranges and complete gram payloads when opening an index.
+Malformed varints, unknown/out-of-order document IDs and frequency mismatches
+fail closed. Token postings and position streams are validated when loaded. One-shot CLI searches load
 token dictionaries, token postings and positions only if their query plan needs
 them. Loading then performs the same validation and propagates errors through
 the query, including nested plans. A gram-only query can therefore succeed when
@@ -262,7 +336,7 @@ fall back to ordinary opening and its existing validation and errors. Stale-inde
 warnings and the existing index-update visibility contract are preserved.
 
 Certificate creation structurally validates inherited as well as new document,
-path, gram dictionary and posting-range data, and verifies every Bloom covers
+path, gram dictionary and complete gram posting data, and verifies every Bloom covers
 its gram dictionary. Unused token/line-map/source-pack data retain their existing
 independent validation. Checksums detect accidental corruption, not adversarial
 modification. The same immutable-index and Unix metadata-validation assumptions

@@ -1,5 +1,9 @@
 # FXI correctness, CLI UX, and improvement audit
 
+**Follow-up:** fixes and regression coverage are tracked in [FIXES.md](FIXES.md).
+This audit and its raw observations describe the pre-fix baseline.
+
+
 Audited commit **`aaf0b14`**, 18 September 2026 (Australia/Sydney).
 
 **Conclusion: correctness and command consistency need priority over more speed

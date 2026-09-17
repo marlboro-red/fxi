@@ -268,12 +268,14 @@ awaiting persistence; zero does not prove that the root is fully up to date.
 {"type":"Reloaded","success":true,"message":"Reloaded current generation","resolved_root":"/work/project"}
 ```
 
-`Reload` opens the current durable generation and replaces the resident reader,
-or loads the root if needed. It does not scan/rebuild source files itself and is
-not a “flush visible changes” request. Check both the response type and
-`success`; reload failure can return `Reloaded` with `success:false`, while root
-resolution can return `Error`. New searches use the replaced reader; already
-running searches may retain their original immutable snapshot.
+`Reload` opens the current durable generation, or loads the root if needed.
+When a loaded root has pending changes, its current searchable preview stays
+available while the pending work is recomputed against the new durable base.
+Failure to establish that refreshed visible state returns `success:false` and
+retains the previous preview. Reload is not a persistence/flush guarantee;
+loading an unwatched root in watch mode also performs startup reconciliation.
+Check both the response type and `success`; root-resolution errors can return
+`Error`. Already-running searches may retain their original immutable snapshot.
 
 ```json
 {"type":"Remove","root_path":"/work/project"}
