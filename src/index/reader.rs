@@ -14,12 +14,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 /// Empty posting files are valid, but cannot be memory mapped on every OS.
-enum MappedBytes {
+pub(crate) enum MappedBytes {
     Mapped(Mmap),
     Owned(Vec<u8>),
 }
 impl MappedBytes {
-    fn open(path: &Path) -> Result<Self> {
+    pub(crate) fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
         Ok(if file.metadata()?.len() == 0 {
             Self::Owned(Vec::new())
@@ -965,7 +965,19 @@ impl IndexReader {
 
         let segments = segments?;
         let documents = documents_result?;
+        anyhow::ensure!(
+            meta.doc_count as usize == documents.len(),
+            "Document count does not match metadata"
+        );
         let paths = PathTable::new(paths_result?);
+        let segment_ids: AHashSet<_> = segment_ids.iter().copied().collect();
+        anyhow::ensure!(segment_ids.len() == segments.len(), "Duplicate segment IDs");
+        anyhow::ensure!(
+            documents.iter().all(|doc| {
+                (doc.path_id as usize) < paths.len() && segment_ids.contains(&doc.segment_id)
+            }),
+            "Document references a missing path or segment"
+        );
 
         let doc_id_to_index = DocumentLookup::new(&documents);
 
@@ -1006,6 +1018,7 @@ impl IndexReader {
     ) -> Result<Self> {
         fn valid_relative(path: &Path) -> bool {
             !path.as_os_str().is_empty()
+                && path.to_str().is_some()
                 && path
                     .components()
                     .all(|part| matches!(part, std::path::Component::Normal(_)))
@@ -1816,7 +1829,8 @@ fn read_documents_version(index_path: &Path, version: u32) -> Result<Vec<Documen
         count <= (data.len() - 4) / 30,
         "Index count exceeds file bounds"
     );
-    Ok(data[4..]
+    anyhow::ensure!(data.len() - 4 == count * 30, "Trailing document bytes");
+    let documents: Vec<Document> = data[4..]
         .as_chunks::<30>()
         .0
         .iter()
@@ -1840,7 +1854,24 @@ fn read_documents_version(index_path: &Path, version: u32) -> Result<Vec<Documen
                 segment_id: u16::from_le_bytes([record[28], record[29]]),
             }
         })
-        .collect())
+        .collect();
+    anyhow::ensure!(
+        documents
+            .iter()
+            .all(|doc| doc.doc_id != 0 && doc.flags.0 & !0x3f == 0),
+        "Invalid document ID or flags"
+    );
+    if !documents
+        .windows(2)
+        .all(|pair| pair[0].doc_id < pair[1].doc_id)
+    {
+        let mut seen = AHashSet::with_capacity(documents.len());
+        anyhow::ensure!(
+            documents.iter().all(|doc| seen.insert(doc.doc_id)),
+            "Duplicate document IDs"
+        );
+    }
+    Ok(documents)
 }
 
 /// Read paths with one owned allocation per path, after validating bounds in
@@ -1862,9 +1893,18 @@ pub fn read_paths(index_path: &Path) -> Result<Vec<PathBuf>> {
         let bytes = remaining[4..]
             .get(..len)
             .context("Path length exceeds file bounds")?;
-        paths.push(PathBuf::from(String::from_utf8_lossy(bytes).into_owned()));
+        let path = PathBuf::from(std::str::from_utf8(bytes).context("Invalid path UTF-8")?);
+        anyhow::ensure!(
+            !path.as_os_str().is_empty()
+                && path
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_))),
+            "Unsafe index path"
+        );
+        paths.push(path);
         cursor += 4 + len;
     }
+    anyhow::ensure!(cursor == data.len(), "Trailing path bytes");
     Ok(paths)
 }
 
@@ -1937,7 +1977,7 @@ fn read_token_dict(
 }
 
 /// Read line maps
-fn read_line_maps(segment_path: &Path) -> Result<HashMap<DocId, Vec<u32>>> {
+pub(crate) fn read_line_maps(segment_path: &Path) -> Result<HashMap<DocId, Vec<u32>>> {
     let linemap_path = segment_path.join("linemap.bin");
 
     if !linemap_path.exists() {
@@ -1962,7 +2002,7 @@ fn read_line_maps(segment_path: &Path) -> Result<HashMap<DocId, Vec<u32>>> {
 
         // line count (not used, but included for consistency)
         file.read_exact(&mut buf4)?;
-        let _line_count = u32::from_le_bytes(buf4);
+        let line_count = u32::from_le_bytes(buf4);
 
         // encoded length
         file.read_exact(&mut buf4)?;
@@ -1981,8 +2021,16 @@ fn read_line_maps(segment_path: &Path) -> Result<HashMap<DocId, Vec<u32>>> {
         file.read_exact(&mut encoded)?;
 
         // Decode
+        let count = crate::utils::encoding::validate_delta_stream(&encoded)?;
+        anyhow::ensure!(
+            count == line_count as usize,
+            "Line map count does not match payload"
+        );
         let offsets = delta_decode(&encoded);
-        line_maps.insert(doc_id, offsets);
+        anyhow::ensure!(
+            line_maps.insert(doc_id, offsets).is_none(),
+            "Duplicate line map document"
+        );
     }
 
     Ok(line_maps)
@@ -2155,7 +2203,7 @@ mod tests {
         docs.extend_from_slice(&u64::MAX.to_le_bytes());
         docs.extend_from_slice(&123u64.to_le_bytes());
         docs.extend_from_slice(&u16::MAX.to_le_bytes());
-        docs.extend_from_slice(&0xa5a5u16.to_le_bytes());
+        docs.extend_from_slice(&0x25u16.to_le_bytes());
         docs.extend_from_slice(&u16::MAX.to_le_bytes());
         for len in 0..docs.len() {
             fs::write(dir.path().join("docs.bin"), &docs[..len]).unwrap();
@@ -2172,13 +2220,13 @@ mod tests {
             (123, 456, u64::MAX, 123)
         );
         assert_eq!(doc.language, Language::Unknown);
-        assert_eq!(doc.flags.0, 0xa5a5);
+        assert_eq!(doc.flags.0, 0x25);
         assert_eq!(doc.segment_id, u16::MAX);
         assert_eq!(
             read_documents_version(dir.path(), 1).unwrap()[0].mtime,
             123_000_000_000
         );
-        let names: [&[u8]; 3] = [b"", "space/K.rs".as_bytes(), b"invalid\xff"];
+        let names: [&[u8]; 3] = [b"simple.rs", "space/K.rs".as_bytes(), b"nested/./valid.rs"];
         let mut paths = (names.len() as u32).to_le_bytes().to_vec();
         for name in names {
             paths.extend_from_slice(&(name.len() as u32).to_le_bytes());
@@ -2193,6 +2241,33 @@ mod tests {
             read_paths(dir.path()).unwrap(),
             names.map(|name| PathBuf::from(String::from_utf8_lossy(name).as_ref()))
         );
+    }
+
+    #[test]
+    fn damaged_metadata_is_rejected_without_lossy_interpretation() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [b"".as_slice(), b"invalid\xff", b"../outside", b"/absolute"] {
+            let mut bytes = 1u32.to_le_bytes().to_vec();
+            bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(name);
+            fs::write(dir.path().join("paths.bin"), bytes).unwrap();
+            assert!(read_paths(dir.path()).is_err(), "{name:?}");
+        }
+        let (_temp, root) = create_test_index();
+        let generation = crate::utils::get_index_dir(&root).unwrap();
+        let original = fs::read(generation.join("docs.bin")).unwrap();
+        for (offset, replacement) in [
+            (4, 0u32.to_le_bytes().to_vec()),
+            (8, u32::MAX.to_le_bytes().to_vec()),
+            (30, 0x8000u16.to_le_bytes().to_vec()),
+            (32, u16::MAX.to_le_bytes().to_vec()),
+        ] {
+            let mut bytes = original.clone();
+            bytes[offset..offset + replacement.len()].copy_from_slice(&replacement);
+            fs::write(generation.join("docs.bin"), bytes).unwrap();
+            assert!(IndexReader::open(&root).is_err(), "offset {offset}");
+        }
+        crate::utils::remove_index(&root).unwrap();
     }
 
     #[test]

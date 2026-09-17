@@ -5,13 +5,13 @@
 //! rebuild because it only reads/merges existing index data, avoiding expensive
 //! source file I/O.
 
+use crate::index::reader::MappedBytes;
 use crate::index::reader::{read_documents, read_paths};
 use crate::index::segment_io;
 use crate::index::types::*;
 use crate::index::writer::{write_documents_atomic, write_meta_atomic, write_paths_atomic};
-use crate::utils::{decode_position_postings, delta_decode, find_codebase_root, get_index_dir};
+use crate::utils::{decode_position_postings, delta_decode, find_codebase_root};
 use anyhow::{Context, Result};
-use memmap2::Mmap;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
@@ -23,7 +23,7 @@ struct DocIdRemapping {
     /// Maps old doc_id -> new contiguous doc_id, densely indexed by old id
     /// (doc ids start at 1; 0 = tombstoned/unknown). Probed once per posting
     /// element during merge, so this must be an O(1) array lookup, not a hash.
-    old_to_new: Vec<DocId>,
+    old_to_new: DocRemap,
     /// Valid documents with remapped IDs
     valid_docs: Vec<Document>,
     /// Valid paths (deduplicated)
@@ -33,14 +33,35 @@ struct DocIdRemapping {
     path_id_remap: HashMap<PathId, PathId>,
 }
 
+enum DocRemap {
+    Dense(Vec<DocId>),
+    Sparse(HashMap<DocId, DocId>),
+}
+impl DocRemap {
+    fn insert(&mut self, old: DocId, new: DocId) {
+        match self {
+            Self::Dense(ids) => ids[old as usize] = new,
+            Self::Sparse(ids) => {
+                ids.insert(old, new);
+            }
+        }
+    }
+}
 impl DocIdRemapping {
-    /// Remap an old doc_id; None if tombstoned or unknown.
+    fn contains(&self, old_id: DocId) -> bool {
+        match &self.old_to_new {
+            DocRemap::Dense(ids) => ids.get(old_id as usize).is_some_and(|id| *id != u32::MAX),
+            DocRemap::Sparse(ids) => ids.contains_key(&old_id),
+        }
+    }
+
     #[inline]
     fn remap(&self, old_id: DocId) -> Option<DocId> {
-        match self.old_to_new.get(old_id as usize) {
-            Some(&new_id) if new_id != 0 => Some(new_id),
-            _ => None,
-        }
+        let id = match &self.old_to_new {
+            DocRemap::Dense(ids) => ids.get(old_id as usize).copied(),
+            DocRemap::Sparse(ids) => ids.get(&old_id).copied(),
+        };
+        id.filter(|id| *id != 0 && *id != u32::MAX)
     }
 }
 
@@ -55,7 +76,10 @@ impl DocIdRemapping {
 /// 6. Deletes old segments after meta commit
 pub fn merge_segments(root_path: &Path) -> Result<()> {
     let root = find_codebase_root(root_path)?;
-    let index_path = get_index_dir(&root)?;
+    // Pin and validate every required segment before mutation. In particular,
+    // missing postings must never be interpreted as an empty segment.
+    let validated = crate::index::reader::IndexReader::open(&root)?;
+    let index_path = validated.generation_path().to_path_buf();
 
     if !index_path.exists() {
         anyhow::bail!("No index found. Run 'fxi index' first.");
@@ -199,13 +223,18 @@ fn build_doc_id_remapping(index_path: &Path) -> Result<DocIdRemapping> {
     let paths = read_paths(index_path)?;
 
     let max_doc_id = documents.iter().map(|d| d.doc_id).max().unwrap_or(0);
-    let mut old_to_new: Vec<DocId> = vec![0; max_doc_id as usize + 1];
+    let mut old_to_new = if u64::from(max_doc_id) <= (documents.len() as u64).saturating_mul(4) {
+        DocRemap::Dense(vec![u32::MAX; max_doc_id as usize + 1])
+    } else {
+        DocRemap::Sparse(HashMap::with_capacity(documents.len()))
+    };
     let mut valid_docs = Vec::new();
     let mut path_id_remap: HashMap<PathId, PathId> = HashMap::new();
     let mut valid_paths = Vec::new();
     let mut next_doc_id: DocId = 1;
 
     for doc in documents {
+        old_to_new.insert(doc.doc_id, 0);
         if doc.is_valid() {
             // Get or create new path_id
             let new_path_id = if let Some(&existing) = path_id_remap.get(&doc.path_id) {
@@ -221,7 +250,7 @@ fn build_doc_id_remapping(index_path: &Path) -> Result<DocIdRemapping> {
                 }
             };
 
-            old_to_new[doc.doc_id as usize] = next_doc_id;
+            old_to_new.insert(doc.doc_id, next_doc_id);
 
             let mut new_doc = doc.clone();
             new_doc.doc_id = next_doc_id;
@@ -229,7 +258,9 @@ fn build_doc_id_remapping(index_path: &Path) -> Result<DocIdRemapping> {
             new_doc.segment_id = 1; // All docs go to merged segment
             valid_docs.push(new_doc);
 
-            next_doc_id += 1;
+            next_doc_id = next_doc_id
+                .checked_add(1)
+                .context("Document ID capacity exhausted")?;
         }
     }
 
@@ -270,9 +301,7 @@ fn merge_all_segments(
 
     for &seg_id in segment_ids {
         let segment_path = segments_path.join(format!("seg_{:04}", seg_id));
-        if !segment_path.exists() {
-            continue;
-        }
+        anyhow::ensure!(segment_path.is_dir(), "Missing required segment");
 
         // Merge trigram postings
         merge_trigram_segment(&segment_path, &mut merged_trigrams, remapping)?;
@@ -321,9 +350,10 @@ fn merge_trigram_segment(
     let dict_path = segment_path.join("grams.dict");
     let postings_path = segment_path.join("grams.postings");
 
-    if !dict_path.exists() || !postings_path.exists() {
-        return Ok(());
-    }
+    anyhow::ensure!(
+        dict_path.is_file() && postings_path.is_file(),
+        "Missing required segment postings"
+    );
 
     // Read dictionary
     let mut dict_file = BufReader::new(File::open(&dict_path)?);
@@ -334,8 +364,7 @@ fn merge_trigram_segment(
     let entry_count = u32::from_le_bytes(buf4) as usize;
 
     // mmap postings file
-    let postings_file = File::open(&postings_path)?;
-    let postings_mmap = unsafe { Mmap::map(&postings_file)? };
+    let postings_mmap = MappedBytes::open(&postings_path)?;
 
     for _ in 0..entry_count {
         // Read trigram
@@ -350,13 +379,29 @@ fn merge_trigram_segment(
         dict_file.read_exact(&mut buf4)?;
         let length = u32::from_le_bytes(buf4) as usize;
 
-        // Read doc_freq (skip)
+        // Stored frequency must agree with a complete, valid posting list.
         dict_file.read_exact(&mut buf4)?;
+        let doc_freq = u32::from_le_bytes(buf4) as usize;
 
         // Decode posting list
-        if offset + length <= postings_mmap.len() {
+        let end = offset
+            .checked_add(length)
+            .context("Posting range overflow")?;
+        anyhow::ensure!(
+            end <= postings_mmap.len(),
+            "Posting range exceeds file bounds"
+        );
+        crate::utils::encoding::validate_delta_stream(&postings_mmap[offset..end])?;
+        {
             // Remap doc_ids, filtering out tombstoned docs
-            let remapped: Vec<DocId> = delta_decode(&postings_mmap[offset..offset + length])
+            let decoded = delta_decode(&postings_mmap[offset..end]);
+            anyhow::ensure!(
+                decoded.len() == doc_freq
+                    && decoded.iter().all(|&id| id != 0 && remapping.contains(id))
+                    && decoded.windows(2).all(|pair| pair[0] < pair[1]),
+                "Invalid posting document IDs or frequency"
+            );
+            let remapped: Vec<DocId> = decoded
                 .into_iter()
                 .filter_map(|old_id| remapping.remap(old_id))
                 .collect();
@@ -388,9 +433,10 @@ fn merge_token_segment(
     let dict_path = segment_path.join("tokens.dict");
     let postings_path = segment_path.join("tokens.postings");
 
-    if !dict_path.exists() || !postings_path.exists() {
-        return Ok(());
-    }
+    anyhow::ensure!(
+        dict_path.is_file() && postings_path.is_file(),
+        "Missing required segment postings"
+    );
 
     // Check if this segment has positions (affects dict entry size)
     let has_positions = segment_path.join("tokens.positions").exists();
@@ -405,8 +451,7 @@ fn merge_token_segment(
     let entry_count = u32::from_le_bytes(buf4) as usize;
 
     // mmap postings file
-    let postings_file = File::open(&postings_path)?;
-    let postings_mmap = unsafe { Mmap::map(&postings_file)? };
+    let postings_mmap = MappedBytes::open(&postings_path)?;
 
     for _ in 0..entry_count {
         // Read token length
@@ -416,8 +461,7 @@ fn merge_token_segment(
         // Read token (moves the byte buffer when valid UTF-8 — no copy)
         let mut token_bytes = vec![0u8; token_len];
         dict_file.read_exact(&mut token_bytes)?;
-        let token = String::from_utf8(token_bytes)
-            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+        let token = String::from_utf8(token_bytes).context("Invalid token UTF-8")?;
 
         // Read offset
         dict_file.read_exact(&mut buf8)?;
@@ -427,8 +471,9 @@ fn merge_token_segment(
         dict_file.read_exact(&mut buf4)?;
         let length = u32::from_le_bytes(buf4) as usize;
 
-        // Read doc_freq (skip)
+        // Stored frequency must agree with a complete, valid posting list.
         dict_file.read_exact(&mut buf4)?;
+        let doc_freq = u32::from_le_bytes(buf4) as usize;
 
         // Skip position offset/length if present
         if has_positions {
@@ -437,9 +482,24 @@ fn merge_token_segment(
         }
 
         // Decode posting list
-        if offset + length <= postings_mmap.len() {
+        let end = offset
+            .checked_add(length)
+            .context("Posting range overflow")?;
+        anyhow::ensure!(
+            end <= postings_mmap.len(),
+            "Posting range exceeds file bounds"
+        );
+        crate::utils::encoding::validate_delta_stream(&postings_mmap[offset..end])?;
+        {
             // Remap doc_ids, filtering out tombstoned docs
-            let remapped: Vec<DocId> = delta_decode(&postings_mmap[offset..offset + length])
+            let decoded = delta_decode(&postings_mmap[offset..end]);
+            anyhow::ensure!(
+                decoded.len() == doc_freq
+                    && decoded.iter().all(|&id| id != 0 && remapping.contains(id))
+                    && decoded.windows(2).all(|pair| pair[0] < pair[1]),
+                "Invalid posting document IDs or frequency"
+            );
+            let remapped: Vec<DocId> = decoded
                 .into_iter()
                 .filter_map(|old_id| remapping.remap(old_id))
                 .collect();
@@ -468,38 +528,9 @@ fn merge_line_maps_segment(
     merged: &mut HashMap<DocId, Vec<u32>>,
     remapping: &DocIdRemapping,
 ) -> Result<()> {
-    let linemap_path = segment_path.join("linemap.bin");
-
-    if !linemap_path.exists() {
-        return Ok(());
-    }
-
-    let mut file = BufReader::new(File::open(&linemap_path)?);
-    let mut buf4 = [0u8; 4];
-
-    // Read count
-    file.read_exact(&mut buf4)?;
-    let count = u32::from_le_bytes(buf4) as usize;
-
-    for _ in 0..count {
-        // Read doc_id
-        file.read_exact(&mut buf4)?;
-        let old_doc_id = u32::from_le_bytes(buf4);
-
-        // Read line count (skip)
-        file.read_exact(&mut buf4)?;
-
-        // Read encoded length
-        file.read_exact(&mut buf4)?;
-        let encoded_len = u32::from_le_bytes(buf4) as usize;
-
-        // Read encoded data
-        let mut encoded = vec![0u8; encoded_len];
-        file.read_exact(&mut encoded)?;
-
-        // Only keep if doc is still valid
+    for (old_doc_id, offsets) in crate::index::reader::read_line_maps(segment_path)? {
+        anyhow::ensure!(remapping.contains(old_doc_id), "Unknown line map document");
         if let Some(new_doc_id) = remapping.remap(old_doc_id) {
-            let offsets = delta_decode(&encoded);
             merged.insert(new_doc_id, offsets);
         }
     }
@@ -532,8 +563,7 @@ fn merge_token_positions_segment(
     let entry_count = u32::from_le_bytes(buf4) as usize;
 
     // mmap positions file
-    let positions_file = File::open(&positions_path)?;
-    let positions_mmap = unsafe { Mmap::map(&positions_file)? };
+    let positions_mmap = MappedBytes::open(&positions_path)?;
 
     for _ in 0..entry_count {
         // Read token length
@@ -543,7 +573,7 @@ fn merge_token_positions_segment(
         // Read token
         let mut token_bytes = vec![0u8; token_len];
         dict_file.read_exact(&mut token_bytes)?;
-        let token = String::from_utf8_lossy(&token_bytes).to_string();
+        let token = String::from_utf8(token_bytes).context("Invalid token UTF-8")?;
 
         // Read postings offset, length, doc_freq (skip for position merging)
         dict_file.read_exact(&mut buf8)?; // offset
@@ -561,16 +591,21 @@ fn merge_token_positions_segment(
         }
 
         // Decode position postings
-        let end = pos_offset + pos_length;
-        if end > positions_mmap.len() {
-            continue;
-        }
+        let end = pos_offset
+            .checked_add(pos_length)
+            .context("Position range overflow")?;
+        anyhow::ensure!(
+            end <= positions_mmap.len(),
+            "Position range exceeds file bounds"
+        );
+        crate::utils::encoding::validate_position_stream(&positions_mmap[pos_offset..end])?;
 
         let doc_positions = decode_position_postings(&positions_mmap[pos_offset..end]);
 
         // Remap doc_ids and merge
         let token_entry = merged.entry(token).or_default();
         for (old_doc_id, positions) in doc_positions {
+            anyhow::ensure!(remapping.contains(old_doc_id), "Unknown position document");
             if let Some(new_doc_id) = remapping.remap(old_doc_id) {
                 token_entry.entry(new_doc_id).or_default().extend(positions);
             }
@@ -588,6 +623,118 @@ pub fn compact_segments(root_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for i in 0..6 {
+            fs::write(root.join(format!("{i}.rs")), "auditneedle token phrase\n").unwrap();
+        }
+        crate::index::build::build_index_with_chunk_size(&root, true, Some(2)).unwrap();
+        let generation = crate::utils::get_index_dir(&root).unwrap();
+        (dir, root, generation)
+    }
+
+    #[test]
+    fn malformed_compaction_inputs_never_publish_partial_results() {
+        for damage in [
+            "missing_grams",
+            "missing_tokens",
+            "missing_positions",
+            "gram_range",
+            "gram_varint",
+            "token_utf8",
+            "position_count",
+            "line_count",
+            "sparse_document",
+        ] {
+            let (_dir, root, generation) = fixture();
+            let segment = generation.join("segments/seg_0001");
+            match damage {
+                "missing_grams" => fs::remove_file(segment.join("grams.dict")).unwrap(),
+                "missing_tokens" => fs::remove_file(segment.join("tokens.postings")).unwrap(),
+                "missing_positions" => fs::remove_file(segment.join("tokens.positions")).unwrap(),
+                "gram_range" => {
+                    let path = segment.join("grams.dict");
+                    let mut bytes = fs::read(&path).unwrap();
+                    bytes[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+                    fs::write(path, bytes).unwrap();
+                }
+                "gram_varint" => {
+                    let path = segment.join("grams.postings");
+                    let mut bytes = fs::read(&path).unwrap();
+                    bytes.fill(0x80);
+                    fs::write(path, bytes).unwrap();
+                }
+                "token_utf8" => {
+                    let path = segment.join("tokens.dict");
+                    let mut bytes = fs::read(&path).unwrap();
+                    bytes[6] = 0xff;
+                    fs::write(path, bytes).unwrap();
+                }
+                "position_count" => {
+                    let path = segment.join("tokens.positions");
+                    let mut bytes = fs::read(&path).unwrap();
+                    // A complete but impossible count, bounded by its token's byte range.
+                    bytes[1] = 127;
+                    fs::write(path, bytes).unwrap();
+                }
+                "line_count" => {
+                    let path = segment.join("linemap.bin");
+                    let mut bytes = fs::read(&path).unwrap();
+                    bytes[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+                    fs::write(path, bytes).unwrap();
+                }
+                "sparse_document" => {
+                    let path = generation.join("docs.bin");
+                    let mut bytes = fs::read(&path).unwrap();
+                    // Duplicate IDs must be rejected before constructing any remapping.
+                    let duplicate: [u8; 4] = bytes[4..8].try_into().unwrap();
+                    bytes[34..38].copy_from_slice(&duplicate);
+                    fs::write(path, bytes).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(merge_segments(&root).is_err(), "accepted {damage}");
+            assert_eq!(
+                crate::utils::get_index_dir(&root).unwrap(),
+                generation,
+                "published {damage}"
+            );
+            crate::utils::remove_index(&root).unwrap();
+        }
+    }
+
+    #[test]
+    fn sparse_maximum_document_id_uses_bounded_remapping() {
+        let (_dir, root, generation) = fixture();
+        let mut docs = read_documents(&generation).unwrap();
+        docs[0].doc_id = u32::MAX;
+        write_documents_atomic(&generation, &docs).unwrap();
+        let remap = build_doc_id_remapping(&generation).unwrap();
+        assert!(matches!(remap.old_to_new, DocRemap::Sparse(_)));
+        assert_eq!(remap.remap(u32::MAX), Some(1));
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn compact_accepts_empty_posting_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for i in 0..4 {
+            fs::write(root.join(format!("{i}.txt")), "a").unwrap();
+        }
+        crate::index::build::build_index_with_chunk_size(&root, true, Some(1)).unwrap();
+        merge_segments(&root).unwrap();
+        assert_eq!(
+            crate::index::reader::IndexReader::open(&root)
+                .unwrap()
+                .valid_doc_ids()
+                .len(),
+            4
+        );
+        crate::utils::remove_index(&root).unwrap();
+    }
 
     #[test]
     fn test_merge_sorted_lists() {

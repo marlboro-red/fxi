@@ -5,7 +5,7 @@ use crate::utils::{
     BloomFilter, delta_encode, extract_tokens, extract_trigrams, get_index_dir, is_binary,
     is_minified,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
@@ -430,7 +430,10 @@ impl ChunkedIndexWriter {
 
         for processed in processed_files {
             let doc_id = self.next_doc_id;
-            self.next_doc_id += 1;
+            self.next_doc_id = self
+                .next_doc_id
+                .checked_add(1)
+                .context("Document ID capacity exhausted; compact or rebuild the index")?;
 
             let path_id = self.add_path(&processed.rel_path);
 
@@ -912,7 +915,9 @@ impl ChunkedIndexWriter {
         file.write_all(&(self.all_paths.len() as u32).to_le_bytes())?;
 
         for path in &self.all_paths {
-            let path_str = path.to_string_lossy();
+            let path_str = path.to_str().context(
+                "Index paths must be valid UTF-8; this path cannot be represented without loss",
+            )?;
             let bytes = path_str.as_bytes();
             file.write_all(&(bytes.len() as u32).to_le_bytes())?;
             file.write_all(bytes)?;
@@ -1045,8 +1050,10 @@ impl DeltaSegmentWriter {
             .map(|d| d.doc_id)
             .max()
             .unwrap_or(0)
-            + 1;
-        let next_path_id = existing_paths.len() as PathId;
+            .checked_add(1)
+            .context("Document ID capacity exhausted; compact or rebuild the index")?;
+        let next_path_id = PathId::try_from(existing_paths.len())
+            .context("Path ID capacity exhausted; compact or rebuild the index")?;
         if trace {
             eprintln!(
                 "fxid: writer timings load={:.3}ms inherit={:.3}ms paths={:.3}ms",
@@ -1092,25 +1099,31 @@ impl DeltaSegmentWriter {
     }
 
     /// Get or create a path ID for the given relative path
-    fn get_or_create_path_id(&mut self, rel_path: &Path) -> PathId {
+    fn get_or_create_path_id(&mut self, rel_path: &Path) -> Result<PathId> {
         if let Some(&path_id) = self.path_to_id.get(rel_path) {
-            return path_id;
+            return Ok(path_id);
         }
 
         // New path - assign next ID
         let path_id = self.next_path_id;
-        self.next_path_id += 1;
+        self.next_path_id = self
+            .next_path_id
+            .checked_add(1)
+            .context("Path ID capacity exhausted; compact or rebuild the index")?;
         self.new_paths.push(rel_path.to_path_buf());
         self.path_to_id.insert(rel_path.to_path_buf(), path_id);
-        path_id
+        Ok(path_id)
     }
 
     /// Add a processed file to the delta segment
-    pub fn add_file(&mut self, processed: ProcessedFile) {
+    pub fn add_file(&mut self, processed: ProcessedFile) -> Result<()> {
         let doc_id = self.next_doc_id;
-        self.next_doc_id += 1;
+        self.next_doc_id = self
+            .next_doc_id
+            .checked_add(1)
+            .context("Document ID capacity exhausted; compact or rebuild the index")?;
 
-        let path_id = self.get_or_create_path_id(&processed.rel_path);
+        let path_id = self.get_or_create_path_id(&processed.rel_path)?;
 
         // Create document entry
         let doc = Document {
@@ -1152,6 +1165,7 @@ impl DeltaSegmentWriter {
 
         // Store line map
         self.line_maps.insert(doc_id, processed.line_offsets);
+        Ok(())
     }
 
     /// Check if there are any changes to write
@@ -1316,7 +1330,9 @@ pub fn write_paths_atomic(index_path: &Path, paths: &[PathBuf]) -> Result<()> {
         file.write_all(&(paths.len() as u32).to_le_bytes())?;
 
         for path in paths {
-            let path_str = path.to_string_lossy();
+            let path_str = path.to_str().context(
+                "Index paths must be valid UTF-8; this path cannot be represented without loss",
+            )?;
             let bytes = path_str.as_bytes();
             file.write_all(&(bytes.len() as u32).to_le_bytes())?;
             file.write_all(bytes)?;
@@ -1350,6 +1366,50 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn delta_id_exhaustion_preserves_the_published_generation() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::write(root.join("base.rs"), "original content").unwrap();
+        crate::index::build::build_index(&root, true).unwrap();
+        let generation = get_index_dir(&root).unwrap();
+        let mut writer = DeltaSegmentWriter::new(&root, 2).unwrap();
+        writer.next_doc_id = u32::MAX;
+        assert!(
+            writer
+                .add_file(create_test_processed_file("new.rs", "new content"))
+                .is_err()
+        );
+        assert!(!writer.has_changes());
+        writer.next_doc_id = 2;
+        writer.next_path_id = u32::MAX;
+        assert!(
+            writer
+                .add_file(create_test_processed_file("new.rs", "new content"))
+                .is_err()
+        );
+        assert!(!writer.has_changes());
+        drop(writer);
+        let mut documents = crate::index::reader::read_documents(&generation).unwrap();
+        documents[0].doc_id = u32::MAX;
+        write_documents_atomic(&generation, &documents).unwrap();
+        assert!(DeltaSegmentWriter::new(&root, 2).is_err());
+        assert_eq!(get_index_dir(&root).unwrap(), generation);
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_serialization_rejects_non_utf8_without_overwriting_existing_paths() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = TempDir::new().unwrap();
+        let good = vec![PathBuf::from("good.rs")];
+        write_paths_atomic(dir.path(), &good).unwrap();
+        let path = PathBuf::from(std::ffi::OsString::from_vec(b"bad\xff.rs".to_vec()));
+        assert!(write_paths_atomic(dir.path(), &[path]).is_err());
+        assert_eq!(crate::index::reader::read_paths(dir.path()).unwrap(), good);
+    }
 
     #[test]
     fn explicit_stop_gram_policy_respects_frequency_and_cap() {

@@ -207,6 +207,7 @@ pub fn build_index_with_options(
     chunk_size_override: Option<usize>,
 ) -> Result<()> {
     let root = root_path.canonicalize().context("Invalid path")?;
+    anyhow::ensure!(root.to_str().is_some(), "Index roots must be valid UTF-8");
 
     let config = IndexConfig::default();
     let max_file_size = config.max_file_size;
@@ -232,10 +233,12 @@ pub fn build_index_with_options(
 
     // Use parallel walker for faster file discovery
     let file_entries: Vec<(PathBuf, PathBuf)> = {
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
         let entries = Arc::new(Mutex::new(Vec::new()));
 
         struct CollectVisitor {
             root: PathBuf,
+            errors: Arc<Mutex<Vec<String>>>,
             shared: Arc<Mutex<Vec<(PathBuf, PathBuf)>>>,
             // Per-thread buffer flushed on drop — the shared mutex is taken
             // once per walker thread instead of once per file
@@ -259,10 +262,17 @@ pub fn build_index_with_options(
                 &mut self,
                 result: Result<ignore::DirEntry, ignore::Error>,
             ) -> ignore::WalkState {
-                if let Ok(entry) = result
-                    // file_type() comes from the directory entry — no extra
-                    // stat(2) per file like path().is_file()
-                    && entry.file_type().is_some_and(|t| t.is_file())
+                let entry = match result {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        self.errors.lock().unwrap().push(error.to_string());
+                        return ignore::WalkState::Continue;
+                    }
+                };
+                if
+                // file_type() comes from the directory entry — no extra
+                // stat(2) per file like path().is_file()
+                entry.file_type().is_some_and(|t| t.is_file())
                     && let Ok(rel_path) = entry.path().strip_prefix(&self.root)
                 {
                     let rel_path = rel_path.to_path_buf();
@@ -280,6 +290,7 @@ pub fn build_index_with_options(
 
         struct CollectBuilder {
             root: PathBuf,
+            errors: Arc<Mutex<Vec<String>>>,
             shared: Arc<Mutex<Vec<(PathBuf, PathBuf)>>>,
         }
 
@@ -287,6 +298,7 @@ pub fn build_index_with_options(
             fn build(&mut self) -> Box<dyn ignore::ParallelVisitor + 's> {
                 Box::new(CollectVisitor {
                     root: self.root.clone(),
+                    errors: Arc::clone(&self.errors),
                     shared: Arc::clone(&self.shared),
                     local: Vec::with_capacity(1024),
                 })
@@ -295,6 +307,7 @@ pub fn build_index_with_options(
 
         let mut builder = CollectBuilder {
             root: root.clone(),
+            errors: Arc::clone(&errors),
             shared: Arc::clone(&entries),
         };
 
@@ -321,9 +334,21 @@ pub fn build_index_with_options(
             .visit(&mut builder);
 
         drop(builder);
+        let errors = errors.lock().unwrap();
+        if !errors.is_empty() {
+            return Err(SourceReadError {
+                path: root.to_path_buf(),
+                source: std::io::Error::other(errors.join("; ")),
+            }
+            .into());
+        }
         Arc::try_unwrap(entries).unwrap().into_inner().unwrap()
     };
 
+    anyhow::ensure!(
+        file_entries.iter().all(|(_, path)| path.to_str().is_some()),
+        "Index paths must be valid UTF-8; refusing lossy path storage"
+    );
     let total_files = file_entries.len();
 
     if let Some(spinner) = collect_spinner {
@@ -544,6 +569,17 @@ pub fn build_index_with_options(
         // Memory freed here - processed_files dropped
     }
 
+    if error_count.load(Ordering::Relaxed) > 0 {
+        return Err(SourceReadError {
+            path: root.clone(),
+            source: std::io::Error::other(format!(
+                "{} source files could not be read; previous index retained",
+                error_count.load(Ordering::Relaxed)
+            )),
+        }
+        .into());
+    }
+
     let rejected = std::mem::take(
         &mut *rejected_files
             .lock()
@@ -710,6 +746,7 @@ fn reconcile_index_with_paths(
     let trace = std::env::var_os("FXI_TRACE_UPDATES").is_some_and(|value| value == "1");
     let started = std::time::Instant::now();
     let root = root_path.canonicalize().context("Invalid path")?;
+    anyhow::ensure!(root.to_str().is_some(), "Index roots must be valid UTF-8");
     let index_path = get_index_dir(&root)?;
 
     // If no index exists, do full build
@@ -941,12 +978,14 @@ fn compute_index_diff(
     // Complete scans parallelize metadata reads across the tree. A precise
     // scope uses the serial walker to avoid starting workers for a few files.
     let scanned: Vec<ScannedFile> = {
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
         let entries: Arc<Mutex<Vec<ScannedFile>>> = Arc::new(Mutex::new(Vec::with_capacity(
             scope.map_or(indexed_files.len(), HashSet::len),
         )));
 
         struct ScanVisitor {
             root: PathBuf,
+            errors: Arc<Mutex<Vec<String>>>,
             max_file_size: u64,
             shared: Arc<Mutex<Vec<ScannedFile>>>,
             // Batch into a thread-local vec; take the shared lock once per
@@ -955,6 +994,16 @@ fn compute_index_diff(
         }
 
         impl ScanVisitor {
+            fn metadata(&self, entry: &ignore::DirEntry) -> Option<std::fs::Metadata> {
+                match entry.metadata() {
+                    Ok(meta) => Some(meta),
+                    Err(error) => {
+                        self.errors.lock().unwrap().push(error.to_string());
+                        None
+                    }
+                }
+            }
+
             fn flush(&mut self) {
                 if !self.local.is_empty() {
                     let mut entries = self
@@ -971,10 +1020,17 @@ fn compute_index_diff(
                 &mut self,
                 result: Result<ignore::DirEntry, ignore::Error>,
             ) -> ignore::WalkState {
-                if let Ok(entry) = result
-                    // file_type() comes from the directory entry — no extra
-                    // stat(2) per file like path().is_file()
-                    && entry.file_type().is_some_and(|t| t.is_file())
+                let entry = match result {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        self.errors.lock().unwrap().push(error.to_string());
+                        return ignore::WalkState::Continue;
+                    }
+                };
+                if
+                // file_type() comes from the directory entry — no extra
+                // stat(2) per file like path().is_file()
+                entry.file_type().is_some_and(|t| t.is_file())
                     && let Ok(rel_path) = entry.path().strip_prefix(&self.root)
                     // Known-binary extensions are never indexed; skipping them
                     // here keeps them from showing up as eternally-"new" files
@@ -983,7 +1039,7 @@ fn compute_index_diff(
                         .extension()
                         .and_then(|e| e.to_str())
                         .is_some_and(is_known_binary_ext)
-                    && let Ok(metadata) = entry.metadata()
+                    && let Some(metadata) = self.metadata(&entry)
                     && metadata.len() <= self.max_file_size
                     && metadata.len() > 0
                 {
@@ -1012,6 +1068,7 @@ fn compute_index_diff(
 
         struct ScanBuilder {
             root: PathBuf,
+            errors: Arc<Mutex<Vec<String>>>,
             max_file_size: u64,
             shared: Arc<Mutex<Vec<ScannedFile>>>,
         }
@@ -1020,6 +1077,7 @@ fn compute_index_diff(
             fn build(&mut self) -> Box<dyn ignore::ParallelVisitor + 's> {
                 Box::new(ScanVisitor {
                     root: self.root.clone(),
+                    errors: Arc::clone(&self.errors),
                     max_file_size: self.max_file_size,
                     shared: Arc::clone(&self.shared),
                     local: Vec::with_capacity(1024),
@@ -1029,6 +1087,7 @@ fn compute_index_diff(
 
         let mut builder = ScanBuilder {
             root: root.to_path_buf(),
+            errors: Arc::clone(&errors),
             max_file_size,
             shared: Arc::clone(&entries),
         };
@@ -1074,6 +1133,7 @@ fn compute_index_diff(
         if let Some(scope) = scope {
             let mut visitor = ScanVisitor {
                 root: root.to_path_buf(),
+                errors: Arc::clone(&errors),
                 max_file_size,
                 shared: Arc::clone(&entries),
                 local: Vec::with_capacity(scope.len()),
@@ -1086,6 +1146,14 @@ fn compute_index_diff(
         }
 
         drop(builder);
+        let errors = errors.lock().unwrap();
+        if !errors.is_empty() {
+            return Err(SourceReadError {
+                path: root.to_path_buf(),
+                source: std::io::Error::other(errors.join("; ")),
+            }
+            .into());
+        }
         Arc::try_unwrap(entries).unwrap().into_inner().unwrap()
     };
 
@@ -1142,35 +1210,59 @@ fn compute_index_diff(
 
 /// Read and process a single file for an incremental update.
 /// Returns None for binary, empty, oversized or unreadable files.
+/// A transient source failure must never become a cached eligibility rejection.
+#[derive(Debug)]
+pub(crate) struct SourceReadError {
+    path: PathBuf,
+    source: std::io::Error,
+}
+impl std::fmt::Display for SourceReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Cannot read source {}: {}",
+            self.path.display(),
+            self.source
+        )
+    }
+}
+impl std::error::Error for SourceReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 fn process_file_for_update(
     full_path: &Path,
     rel_path: &Path,
     max_file_size: u64,
-) -> Option<ProcessedFile> {
+) -> Result<Option<ProcessedFile>> {
+    anyhow::ensure!(
+        rel_path.to_str().is_some(),
+        "Index paths must be valid UTF-8"
+    );
+    let read_error = |source| SourceReadError {
+        path: full_path.to_path_buf(),
+        source,
+    };
     let ext = rel_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if is_known_binary_ext(ext) {
-        return None;
+        return Ok(None);
     }
-
-    let file = File::open(full_path).ok()?;
-    let metadata = file.metadata().ok()?;
+    let file = File::open(full_path).map_err(read_error)?;
+    let metadata = file.metadata().map_err(read_error)?;
     if metadata.len() == 0 || metadata.len() > max_file_size {
-        return None;
+        return Ok(None);
     }
-
-    // Nanoseconds, matching the full-build path and change detection.
     let mtime = metadata
         .modified()
-        .map(|t| {
-            t.duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-                .min(u64::MAX as u128) as u64
-        })
-        .unwrap_or(0);
-
-    let content = read_index_source(file, metadata.len(), max_file_size).ok()??;
-    process_file_content(rel_path.to_path_buf(), &content, mtime)
+        .map_err(read_error)?
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u64::MAX as u128) as u64;
+    let content = read_index_source(file, metadata.len(), max_file_size).map_err(read_error)?;
+    Ok(content.and_then(|content| process_file_content(rel_path.to_path_buf(), &content, mtime)))
 }
 
 /// Perform incremental update by writing the diff as a delta segment:
@@ -1220,26 +1312,28 @@ fn perform_incremental_update_visible(
     let outcomes: Vec<Result<ProcessedFile, (PathBuf, u64)>> = to_index
         .par_iter()
         .map(|(full, rel)| {
-            match process_file_for_update(full, rel, config.max_file_size) {
-                Some(p) => Ok(p),
-                None => {
-                    // Rejected (binary sniff etc.): remember it with its
-                    // current mtime so future scans skip it while unchanged
-                    let mtime = fs::metadata(full)
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .map(|t| {
-                            t.duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_nanos()
-                                .min(u64::MAX as u128) as u64
-                        })
-                        .unwrap_or(0);
-                    Err(((*rel).clone(), mtime))
-                }
-            }
+            Ok(
+                match process_file_for_update(full, rel, config.max_file_size)? {
+                    Some(p) => Ok(p),
+                    None => {
+                        // Rejected (binary sniff etc.): remember it with its
+                        // current mtime so future scans skip it while unchanged
+                        let mtime = fs::metadata(full)
+                            .ok()
+                            .and_then(|m| m.modified().ok())
+                            .map(|t| {
+                                t.duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_nanos()
+                                    .min(u64::MAX as u128) as u64
+                            })
+                            .unwrap_or(0);
+                        Err(((*rel).clone(), mtime))
+                    }
+                },
+            )
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     // Keep the extra memory bounded. Large updates retain the durable path;
     // small saves reuse exactly the bytes/tokens already extracted for it.
@@ -1292,7 +1386,7 @@ fn perform_incremental_update_visible(
         match outcome {
             Ok(file) => {
                 added_count += 1;
-                writer.add_file(file);
+                writer.add_file(file)?;
             }
             Err(rejection) => rejected_files.push(rejection),
         }
@@ -1523,6 +1617,82 @@ mod scoped_reconciliation_tests {
         crate::query::QueryExecutor::new(reader)
             .execute_files_only(&crate::query::parse_query(text), 0)
             .unwrap()
+    }
+
+    #[test]
+    fn transient_source_failure_preserves_generation_and_can_retry() {
+        let temp = fixture();
+        let root = temp.path().canonicalize().unwrap();
+        build_index(&root, true).unwrap();
+        let generation = get_index_dir(&root).unwrap();
+        let reader = IndexReader::open(&root).unwrap();
+        // Inject a disappeared source after discovery: deterministic on every OS.
+        let path = root.join("new.rs");
+        let diff = IndexDiff {
+            new_files: vec![(path.clone(), "new.rs".into())],
+            modified_files: vec![],
+            deleted_files: vec![],
+            rejected_unchanged: vec![],
+            indexed_count: 10,
+        };
+        let error = perform_incremental_update(&root, &reader.meta, diff).unwrap_err();
+        assert!(error.downcast_ref::<SourceReadError>().is_some());
+        assert_eq!(get_index_dir(&root).unwrap(), generation);
+        assert!(
+            IndexReader::open(&root)
+                .unwrap()
+                .meta
+                .rejected_files
+                .is_empty()
+        );
+        fs::write(&path, "retryMarker\n").unwrap();
+        update_index(&root).unwrap();
+        assert_eq!(
+            matches(&IndexReader::open(&root).unwrap(), "retryMarker"),
+            vec![PathBuf::from("new.rs")]
+        );
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temporary_permissions_are_not_cached_as_content_rejection() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = fixture();
+        let root = temp.path().canonicalize().unwrap();
+        build_index(&root, true).unwrap();
+        let generation = get_index_dir(&root).unwrap();
+        let path = root.join("new.rs");
+        fs::write(&path, "permissionRetryMarker\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0)).unwrap();
+        if File::open(&path).is_ok() {
+            // privileged test runners bypass mode bits
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            crate::utils::remove_index(&root).unwrap();
+            return;
+        }
+        let result = update_index(&root);
+        assert!(
+            build_index(&root, true)
+                .unwrap_err()
+                .downcast_ref::<SourceReadError>()
+                .is_some()
+        );
+        assert_eq!(get_index_dir(&root).unwrap(), generation);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .downcast_ref::<SourceReadError>()
+                .is_some()
+        );
+        assert_eq!(get_index_dir(&root).unwrap(), generation);
+        update_index(&root).unwrap();
+        assert_eq!(
+            matches(&IndexReader::open(&root).unwrap(), "permissionRetryMarker"),
+            vec![PathBuf::from("new.rs")]
+        );
+        crate::utils::remove_index(&root).unwrap();
     }
 
     #[test]

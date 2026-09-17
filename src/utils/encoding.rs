@@ -31,7 +31,7 @@ fn decode_varint_slow(buf: &[u8], first: u8) -> Option<(u32, usize)> {
     let mut shift = 7;
 
     for (i, &byte) in buf.iter().enumerate().skip(1) {
-        if shift >= 32 {
+        if shift >= 32 || (shift == 28 && byte & 0xf0 != 0) {
             return None; // Overflow
         }
 
@@ -268,7 +268,7 @@ pub fn decode_position_postings(buf: &[u8]) -> Vec<(u32, Vec<u32>)> {
         pos += consumed;
 
         // Decode positions
-        let mut positions = Vec::with_capacity(count as usize);
+        let mut positions = Vec::with_capacity((count as usize).min(buf.len() - pos));
         let mut prev_pos = 0u32;
         for _ in 0..count {
             let (pos_delta, consumed) = match decode_varint(&buf[pos..]) {
@@ -326,7 +326,7 @@ pub fn decode_position_postings_filtered(
         }
 
         if filter.contains(prev_doc_id) {
-            let mut positions = Vec::with_capacity(count as usize);
+            let mut positions = Vec::with_capacity((count as usize).min(buf.len() - pos));
             let mut prev_pos = 0u32;
             for _ in 0..count {
                 let (pos_delta, consumed) = match decode_varint(&buf[pos..]) {
@@ -351,6 +351,53 @@ pub fn decode_position_postings_filtered(
     }
 
     result
+}
+
+/// Validate a complete unsigned delta stream before using it for index mutation.
+pub(crate) fn validate_delta_stream(buf: &[u8]) -> anyhow::Result<usize> {
+    let mut cursor = 0;
+    let mut previous = 0u32;
+    let mut count = 0;
+    while cursor < buf.len() {
+        let (delta, consumed) = decode_varint(&buf[cursor..])
+            .ok_or_else(|| anyhow::anyhow!("Malformed delta posting"))?;
+        previous = previous
+            .checked_add(delta)
+            .ok_or_else(|| anyhow::anyhow!("Delta posting overflow"))?;
+        cursor += consumed;
+        count += 1;
+    }
+    Ok(count)
+}
+
+pub(crate) fn validate_position_stream(buf: &[u8]) -> anyhow::Result<()> {
+    let mut cursor = 0;
+    let mut previous_doc = 0u32;
+    let read = |cursor: &mut usize| -> anyhow::Result<u32> {
+        let (value, consumed) = decode_varint(&buf[*cursor..])
+            .ok_or_else(|| anyhow::anyhow!("Malformed position posting"))?;
+        *cursor += consumed;
+        Ok(value)
+    };
+    while cursor < buf.len() {
+        let delta = read(&mut cursor)?;
+        anyhow::ensure!(delta > 0, "Unsorted position documents");
+        previous_doc = previous_doc
+            .checked_add(delta)
+            .ok_or_else(|| anyhow::anyhow!("Position document overflow"))?;
+        let count = read(&mut cursor)? as usize;
+        anyhow::ensure!(
+            count <= buf.len() - cursor,
+            "Position count exceeds payload bounds"
+        );
+        let mut previous = 0u32;
+        for _ in 0..count {
+            previous = previous
+                .checked_add(read(&mut cursor)?)
+                .ok_or_else(|| anyhow::anyhow!("Position offset overflow"))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -520,5 +567,24 @@ mod tests {
         assert_eq!(decoded[0], (1, vec![0]));
         assert_eq!(decoded[1], (2, vec![5]));
         assert_eq!(decoded[2], (3, vec![10, 20]));
+    }
+}
+
+#[cfg(test)]
+mod corruption_tests {
+    use super::*;
+    #[test]
+    fn overflowing_varints_and_impossible_position_counts_are_bounded() {
+        assert_eq!(decode_varint(&[0xff, 0xff, 0xff, 0xff, 0x1f]), None);
+        assert!(validate_delta_stream(&[0x80]).is_err());
+        let bytes = [1, 0xff, 0xff, 0xff, 0xff, 0x0f];
+        assert!(validate_position_stream(&bytes).is_err());
+        // Public best-effort decoders must not allocate from the forged count.
+        assert_eq!(decode_position_postings(&bytes), vec![(1, vec![])]);
+        let filter = [1].into_iter().collect();
+        assert_eq!(
+            decode_position_postings_filtered(&bytes, &filter),
+            vec![(1, vec![])]
+        );
     }
 }
