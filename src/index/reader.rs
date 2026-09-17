@@ -1163,9 +1163,8 @@ impl IndexReader {
         &self.root_path
     }
 
-    /// A scan larger than the entire cache cannot remain resident. Bypass
-    /// admission for it instead of evicting useful entries and repeatedly
-    /// paying snapshot metadata checks for content that will not survive.
+    /// Decide whether this scan may evict existing cache entries. Oversized
+    /// scans may reuse hits and fill spare space, but must not churn the LRU.
     pub(crate) fn should_cache_scan(&self, candidates: &RoaringBitmap) -> bool {
         if !self.content_cache_enabled || self.file_cache.max_bytes == 0 {
             return false;
@@ -1191,11 +1190,7 @@ impl IndexReader {
     }
 
     pub(crate) fn read_file_for_scan(&self, path: &Path, cache_scan: bool) -> Option<FileContent> {
-        if cache_scan {
-            self.read_file_cached(path)
-        } else {
-            Self::read_file_uncached(path).map(FileContent::Owned)
-        }
+        self.read_file_with_cache_policy(path, cache_scan)
     }
 
     /// Read file content with LRU caching.
@@ -1205,17 +1200,40 @@ impl IndexReader {
     /// plain Strings without the Arc conversion copy.
     /// Returns None if the file cannot be read.
     pub fn read_file_cached(&self, path: &Path) -> Option<FileContent> {
+        self.read_file_with_cache_policy(path, true)
+    }
+
+    fn read_file_with_cache_policy(
+        &self,
+        path: &Path,
+        allow_eviction: bool,
+    ) -> Option<FileContent> {
         if !self.content_cache_enabled || self.file_cache.max_bytes == 0 {
             return Self::read_file_uncached(path).map(FileContent::Owned);
         }
         let shard = &self.file_cache.shards
             [self.file_cache.hasher.hash_one(path) as usize % FILE_CACHE_SHARDS];
         let stamp = FileStamp::from_metadata(&std::fs::metadata(path).ok()?);
-        if let Ok(mut cache) = shard.lock()
-            && let Some((cached_stamp, content)) = cache.entries.get(path)
-            && *cached_stamp == stamp
-        {
-            return Some(FileContent::Cached(Arc::clone(content)));
+        let may_admit = if let Ok(mut cache) = shard.lock() {
+            if let Some((cached_stamp, content)) = cache.entries.get(path)
+                && *cached_stamp == stamp
+            {
+                return Some(FileContent::Cached(Arc::clone(content)));
+            }
+            // A stale entry is not useful residency. Reclaim its budget even
+            // when this scan is forbidden from evicting other live entries.
+            if let Some((_, old)) = cache.entries.pop(path) {
+                cache.bytes -= old.len();
+            }
+            stamp.size <= self.file_cache.max_entry_bytes as u64
+                && (allow_eviction
+                    || (stamp.size <= cache.max_bytes.saturating_sub(cache.bytes) as u64
+                        && cache.entries.len() < cache.max_entries))
+        } else {
+            false
+        };
+        if !may_admit {
+            return Self::read_file_uncached(path).map(FileContent::Owned);
         }
 
         let mut file = File::open(path).ok()?;
@@ -1226,7 +1244,17 @@ impl IndexReader {
         if content.len() <= self.file_cache.max_entry_bytes && before == after {
             let content: Arc<str> = content.into();
             if let Ok(mut cache) = shard.lock() {
-                cache.put(path.to_path_buf(), after, Arc::clone(&content));
+                // Another worker may have filled the spare space while this
+                // file was read. Recheck under the insertion lock.
+                let previous = cache.entries.peek(path);
+                let replacing = previous.is_some();
+                let old_size = previous.map_or(0, |(_, old)| old.len());
+                if allow_eviction
+                    || (content.len() <= cache.max_bytes.saturating_sub(cache.bytes - old_size)
+                        && (replacing || cache.entries.len() < cache.max_entries))
+                {
+                    cache.put(path.to_path_buf(), after, Arc::clone(&content));
+                }
             }
             Some(FileContent::Cached(content))
         } else {
@@ -1776,19 +1804,12 @@ mod tests {
     }
 
     #[test]
-    fn uncached_scans_preserve_snapshot_and_utf8_semantics() {
+    fn scan_resistant_reads_preserve_snapshot_and_utf8_semantics() {
         let (_temp_dir, root) = create_test_index();
         let reader = IndexReader::open(&root).unwrap();
         let path = root.join("test.rs");
         let first = reader.read_file_for_scan(&path, false).unwrap();
-        assert!(matches!(first, FileContent::Owned(_)));
-        assert!(
-            reader.file_cache.shards.iter().all(|shard| !shard
-                .lock()
-                .unwrap()
-                .entries
-                .contains(&path))
-        );
+        assert!(matches!(first, FileContent::Cached(_)));
         let cached = reader.read_file_for_scan(&path, true).unwrap();
         assert_eq!(&*first, &*cached);
         fs::write(&path, "updated needle").unwrap();
@@ -1807,6 +1828,81 @@ mod tests {
         for use_cache in [false, true] {
             assert!(reader.read_file_for_scan(&path, use_cache).is_none());
         }
+    }
+
+    #[test]
+    fn oversized_scans_fill_spare_capacity_without_eviction() {
+        let (_temp, root) = create_test_index();
+        let mut reader = IndexReader::open(&root).unwrap();
+        reader.file_cache = Arc::new(SharedContentCache {
+            shards: std::array::from_fn(|_| {
+                let mut cache = ContentCache::new();
+                cache.max_bytes = 16;
+                cache.max_entries = 2;
+                Mutex::new(cache)
+            }),
+            hasher: ahash::RandomState::with_seeds(1, 2, 3, 4),
+            max_bytes: 16 * FILE_CACHE_SHARDS,
+            max_entry_bytes: 16,
+        });
+        let paths: Vec<_> = (0..1024)
+            .map(|i| root.join(format!("cache-{i}.txt")))
+            .filter(|path| {
+                (reader.file_cache.hasher.hash_one(path) as usize).is_multiple_of(FILE_CACHE_SHARDS)
+            })
+            .take(10)
+            .collect();
+        assert_eq!(paths.len(), 10);
+        for path in &paths {
+            fs::write(path, "12345678").unwrap();
+        }
+        let first = reader.read_file_for_scan(&paths[0], false).unwrap();
+        reader.read_file_for_scan(&paths[1], false).unwrap();
+        assert!(matches!(
+            reader.read_file_for_scan(&paths[2], false),
+            Some(FileContent::Owned(_))
+        ));
+        let again = reader.read_file_for_scan(&paths[0], false).unwrap();
+        match (&first, &again) {
+            (FileContent::Cached(a), FileContent::Cached(b)) => assert!(Arc::ptr_eq(a, b)),
+            _ => panic!("existing residency must survive an oversized scan"),
+        }
+        fs::write(&paths[0], "changed!").unwrap();
+        assert_eq!(
+            &*reader.read_file_for_scan(&paths[0], false).unwrap(),
+            "changed!"
+        );
+        assert_eq!(&*first, "12345678");
+        // Growing beyond the entry cap releases stale residency; another file
+        // can fill the freed space without evicting the untouched second file.
+        fs::write(&paths[0], "x".repeat(32)).unwrap();
+        assert_eq!(
+            reader.read_file_for_scan(&paths[0], false).unwrap().len(),
+            32
+        );
+        reader.read_file_for_scan(&paths[2], false).unwrap();
+        let cache = reader.file_cache.shards[0].lock().unwrap();
+        assert!(!cache.entries.contains(&paths[0]));
+        assert!(cache.entries.contains(&paths[1]));
+        assert!(cache.entries.contains(&paths[2]));
+        assert_eq!(cache.bytes, 16);
+        assert_eq!(cache.entries.len(), 2);
+        drop(cache);
+        reader.clear_file_cache();
+        let barrier = std::sync::Barrier::new(paths.len());
+        std::thread::scope(|scope| {
+            for path in &paths {
+                let reader = &reader;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    assert!(reader.read_file_for_scan(path, false).is_some());
+                });
+            }
+        });
+        let cache = reader.file_cache.shards[0].lock().unwrap();
+        assert_eq!(cache.bytes, 16);
+        assert_eq!(cache.entries.len(), 2);
     }
 
     #[test]

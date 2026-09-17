@@ -164,6 +164,10 @@ limit retained text to 1 GiB and entries to 131,072; `FXI_CACHE_MIB` accepts
 0–4096 MiB (0 disables admission). One-shot CLI readers bypass admission.
 Cached snapshots are validated against file metadata before each reuse.
 Concurrent queries can keep additional snapshots alive beyond those cache bounds.
+Scans estimated to exceed the cache budget reuse valid entries and may fill spare
+capacity, but cannot evict other entries. Smaller scans use normal LRU admission.
+This avoids repeated cache churn; it does not guarantee that every working set
+becomes resident. Filling the cache can increase first-query latency and RSS.
 
 
 ## Index loading and validation
