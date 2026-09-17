@@ -538,10 +538,26 @@ impl<'a> QueryExecutor<'a> {
         let candidate_count = candidate_ids.len();
         let cache_scan = self.reader.should_cache_scan(&candidates);
 
+        // Hold one compiled regex and literal finder for this query, avoiding
+        // shared-cache lookups and searcher construction for each candidate.
+        let prepared_regex = match verification {
+            VerificationStep::Regex(pattern) => get_regex_cache().get_or_compile(pattern),
+            _ => None,
+        };
+        let literal_finder = prepared_regex
+            .as_ref()
+            .and_then(|re| re.existence_literal.as_ref())
+            .map(memchr::memmem::Finder::new);
         let (line_start, line_end) = Self::extract_line_filter(&plan.steps);
         let has_match = |content: &str| {
             if line_start.is_none() && line_end.is_none() {
-                Self::has_match(content, verification)
+                if let Some(finder) = &literal_finder {
+                    finder.find(content.as_bytes()).is_some()
+                } else if let Some(re) = &prepared_regex {
+                    re.is_match_in_lines(content)
+                } else {
+                    Self::has_match(content, verification)
+                }
             } else {
                 Self::verify_content_static(content, verification, 0)
                     .iter()

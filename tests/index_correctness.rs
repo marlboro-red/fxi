@@ -565,3 +565,124 @@ fn file_limits_select_the_sorted_prefix_across_segments() {
         }
     }
 }
+
+#[test]
+fn prepared_file_regex_matches_line_oracle_with_limits_and_filters() {
+    use fxi::query::{QueryExecutor, parse_query};
+    let root = tempfile::tempdir().unwrap();
+    let texts = [
+        "\n",
+        "needle\n",
+        "xneedle\r\n",
+        "Needle\n",
+        "café needle\n",
+        "needle\nother\n",
+        "other needle end",
+        "nothing",
+    ];
+    for i in 0..256 {
+        fs::write(
+            root.path().join(format!("{i:04}.txt")),
+            texts[i % texts.len()],
+        )
+        .unwrap();
+    }
+    build_index_with_options(root.path(), true, true, Some(17)).unwrap();
+    let reader = IndexReader::open(root.path()).unwrap();
+    let executor = QueryExecutor::new(&reader);
+    for pattern in [
+        "needle",
+        "^needle$",
+        "(?i:needle)",
+        r"\bneedle\b",
+        "needle.*end",
+        "^$",
+        r"needle\nother",
+        "café",
+        "needle|nothing",
+        "(?:)",
+    ] {
+        let regex = regex::Regex::new(pattern).unwrap();
+        for line in [None, Some(2)] {
+            let expected: Vec<_> = (0..256)
+                .filter(|i| {
+                    texts[i % texts.len()].lines().enumerate().any(|(n, text)| {
+                        line.is_none_or(|wanted| n + 1 == wanted) && regex.is_match(text)
+                    })
+                })
+                .map(|i| PathBuf::from(format!("{i:04}.txt")))
+                .collect();
+            let query = parse_query(&format!(
+                "re:/{pattern}/{}",
+                line.map(|n| format!(" line:{n}")).unwrap_or_default()
+            ));
+            for limit in [0, 1, 17] {
+                let length = if limit == 0 {
+                    expected.len()
+                } else {
+                    expected.len().min(limit)
+                };
+                assert_eq!(
+                    executor.execute_files_only(&query, limit).unwrap(),
+                    expected[..length],
+                    "{pattern}, line {line:?}, limit {limit}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn prepared_bare_identifiers_preserve_unicode_case_folding() {
+    use fxi::query::{QueryExecutor, parse_query};
+    let root = tempfile::tempdir().unwrap();
+    let texts = [
+        "return",
+        "RETURN",
+        "xreturnx",
+        "ſtruct",
+        "STRUCT",
+        "Kelvin",
+        "KELVIN",
+        "café",
+        "CAFÉ",
+        "xx\nRETURN\r\n",
+        "none",
+        "\n",
+    ];
+    for i in 0..256 {
+        fs::write(
+            root.path().join(format!("{i:04}.txt")),
+            texts[i % texts.len()],
+        )
+        .unwrap();
+    }
+    build_index_with_options(root.path(), true, true, Some(17)).unwrap();
+    let reader = IndexReader::open(root.path()).unwrap();
+    let executor = QueryExecutor::new(&reader);
+    for pattern in ["return", "struct", "kelvin", "café"] {
+        let oracle = regex::Regex::new(&format!("(?i:{})", regex::escape(pattern))).unwrap();
+        let expected: Vec<_> = (0..256)
+            .filter(|i| {
+                texts[i % texts.len()]
+                    .lines()
+                    .any(|line| oracle.is_match(line))
+            })
+            .map(|i| PathBuf::from(format!("{i:04}.txt")))
+            .collect();
+        for limit in [0, 1, 17] {
+            let length = if limit == 0 {
+                expected.len()
+            } else {
+                expected.len().min(limit)
+            };
+            assert_eq!(
+                executor
+                    .execute_files_only(&parse_query(pattern), limit)
+                    .unwrap(),
+                expected[..length],
+                "{pattern}, limit {limit}"
+            );
+        }
+    }
+}
