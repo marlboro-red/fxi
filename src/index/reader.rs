@@ -264,7 +264,7 @@ struct SegmentReader {
     required_positions: bool,
     allowed_docs: Option<Arc<RoaringBitmap>>,
     /// Lazily loaded line maps - only loaded when first accessed
-    line_maps: OnceLock<HashMap<DocId, Vec<u32>>>,
+    line_maps: OnceLock<std::result::Result<HashMap<DocId, Vec<u32>>, String>>,
     /// Path to segment directory for lazy loading
     segment_path: PathBuf,
     /// Bloom filter for fast trigram pre-filtering (optional for backwards compat)
@@ -456,7 +456,7 @@ impl SegmentReader {
             })),
             required_positions: true,
             allowed_docs: None,
-            line_maps: OnceLock::from(line_maps),
+            line_maps: OnceLock::from(Ok(line_maps)),
             // All lazy cells are populated; this path is never opened.
             segment_path: PathBuf::new(),
             bloom_filter: Some(bloom),
@@ -609,12 +609,15 @@ impl SegmentReader {
         })
     }
 
-    /// Get line map for a document in this segment (lazy loads on first access)
-    fn get_line_map(&self, doc_id: DocId) -> Option<&Vec<u32>> {
-        let line_maps = self
-            .line_maps
-            .get_or_init(|| read_line_maps(&self.segment_path).unwrap_or_default());
-        line_maps.get(&doc_id)
+    /// Get a line map, preserving lazy validation failures for every caller.
+    fn get_line_map(&self, doc_id: DocId) -> Result<Option<&Vec<u32>>> {
+        let line_maps = self.line_maps.get_or_init(|| {
+            read_line_maps(&self.segment_path).map_err(|error| format!("{error:#}"))
+        });
+        match line_maps {
+            Ok(maps) => Ok(maps.get(&doc_id)),
+            Err(error) => anyhow::bail!("{error}"),
+        }
     }
 
     /// Check if trigrams might exist in this segment using bloom filter.
@@ -1315,29 +1318,27 @@ impl IndexReader {
         }
     }
 
-    /// Get line offsets for a document (searches all segments)
+    /// Get stored line offsets. Missing maps return `None`; unreadable or
+    /// malformed maps return an error instead of silently inventing line 1.
     #[allow(dead_code)]
-    pub fn get_line_map(&self, doc_id: DocId) -> Option<&Vec<u32>> {
+    pub fn get_line_map(&self, doc_id: DocId) -> Result<Option<&Vec<u32>>> {
         for segment in &self.segments {
-            if let Some(line_map) = segment.get_line_map(doc_id) {
-                return Some(line_map);
+            if let Some(line_map) = segment.get_line_map(doc_id)? {
+                return Ok(Some(line_map));
             }
         }
-        None
+        Ok(None)
     }
 
-    /// Convert byte offset to line number
+    /// Convert a representable byte offset to a one-based stored line number.
+    /// Returns `None` when no map is available. Offsets beyond EOF select the
+    /// last stored line, as before; this API does not validate source length.
     #[allow(dead_code)]
-    pub fn offset_to_line(&self, doc_id: DocId, offset: usize) -> u32 {
-        if let Some(line_map) = self.get_line_map(doc_id) {
-            // Binary search for the line
-            match line_map.binary_search(&(offset as u32)) {
-                Ok(i) => i as u32 + 1,
-                Err(i) => i as u32,
-            }
-        } else {
-            1
-        }
+    pub fn offset_to_line(&self, doc_id: DocId, offset: usize) -> Result<Option<u32>> {
+        let offset = u32::try_from(offset).context("Byte offset exceeds line map format")?;
+        Ok(self
+            .get_line_map(doc_id)?
+            .map(|map| map.partition_point(|&start| start <= offset) as u32))
     }
 
     /// Check if a trigram is a stop-gram - O(1) via HashSet
@@ -2046,11 +2047,14 @@ fn read_token_dict(
 pub(crate) fn read_line_maps(segment_path: &Path) -> Result<HashMap<DocId, Vec<u32>>> {
     let linemap_path = segment_path.join("linemap.bin");
 
-    if !linemap_path.exists() {
-        return Ok(HashMap::new());
-    }
-
-    let mut file = BufReader::new(File::open(&linemap_path)?);
+    let file = match File::open(&linemap_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HashMap::new());
+        }
+        Err(error) => return Err(error).context("Opening line map"),
+    };
+    let mut file = BufReader::new(file);
 
     let mut buf4 = [0u8; 4];
 
@@ -2094,11 +2098,16 @@ pub(crate) fn read_line_maps(segment_path: &Path) -> Result<HashMap<DocId, Vec<u
         );
         let offsets = delta_decode(&encoded);
         anyhow::ensure!(
+            offsets.first() == Some(&0) && offsets.windows(2).all(|pair| pair[0] < pair[1]),
+            "Line starts must begin at zero and strictly increase"
+        );
+        anyhow::ensure!(
             line_maps.insert(doc_id, offsets).is_none(),
             "Duplicate line map document"
         );
     }
 
+    anyhow::ensure!(remaining == 0, "Trailing line map data");
     Ok(line_maps)
 }
 
@@ -2186,6 +2195,76 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn line_map_errors_are_cached_and_missing_maps_are_distinct() {
+        let (_temp, root) = create_test_index();
+        let reader = IndexReader::open(&root).unwrap();
+        let segment = &reader.segments[0];
+        let path = segment.segment_path.join("linemap.bin");
+        let original = fs::read(&path).unwrap();
+        fs::write(&path, [1, 0]).unwrap();
+        assert!(reader.get_line_map(0).is_err());
+        assert!(reader.offset_to_line(0, 0).is_err());
+        fs::write(&path, original).unwrap();
+        assert!(
+            reader.get_line_map(0).is_err(),
+            "failure must remain cached"
+        );
+        drop(reader);
+        let reader = IndexReader::open(&root).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(reader.get_line_map(0).unwrap(), None);
+        assert_eq!(reader.offset_to_line(0, 0).unwrap(), None);
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn line_map_boundaries_and_large_offsets() {
+        let (_temp, root) = create_test_index();
+        let reader = IndexReader::open(&root).unwrap();
+        let doc = reader.documents[0].doc_id;
+        let starts = reader.get_line_map(doc).unwrap().unwrap();
+        for (index, &start) in starts.iter().enumerate() {
+            assert_eq!(
+                reader.offset_to_line(doc, start as usize).unwrap(),
+                Some(index as u32 + 1)
+            );
+            if start > 0 {
+                assert_eq!(
+                    reader.offset_to_line(doc, start as usize - 1).unwrap(),
+                    Some(index as u32)
+                );
+            }
+        }
+        assert_eq!(
+            reader.offset_to_line(doc, u32::MAX as usize).unwrap(),
+            Some(starts.len() as u32)
+        );
+        if let Some(large) = (u32::MAX as usize).checked_add(1) {
+            assert!(reader.offset_to_line(doc, large).is_err());
+        }
+        assert_eq!(reader.offset_to_line(u32::MAX, 0).unwrap(), None);
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn line_maps_reject_invalid_starts_and_trailing_bytes() {
+        let temp = TempDir::new().unwrap();
+        for offsets in [vec![], vec![1], vec![0, 0], vec![0, 2, 2]] {
+            super::super::segment_io::write_line_maps(temp.path(), &HashMap::from([(0, offsets)]))
+                .unwrap();
+            assert!(read_line_maps(temp.path()).is_err());
+        }
+        super::super::segment_io::write_line_maps(temp.path(), &HashMap::from([(0, vec![0, 3])]))
+            .unwrap();
+        assert_eq!(read_line_maps(temp.path()).unwrap()[&0], vec![0, 3]);
+        let path = temp.path().join("linemap.bin");
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.push(0);
+        fs::write(path, bytes).unwrap();
+        assert!(read_line_maps(temp.path()).is_err());
+    }
 
     /// Create a minimal test index for unit testing
     fn create_test_index() -> (TempDir, PathBuf) {
@@ -3086,7 +3165,7 @@ mod memory_delta_tests {
             .find(|doc| memory.get_path(doc).unwrap() == Path::new("old.rs"))
             .unwrap();
         assert_eq!(
-            memory.segments[0].get_line_map(base_doc.doc_id),
+            memory.segments[0].get_line_map(base_doc.doc_id).unwrap(),
             Some(&vec![0])
         );
         assert_eq!(

@@ -176,7 +176,7 @@ fn replay(operations: &[Operation]) -> Result<()> {
     let original_postings = pinned.get_token_docs("needle");
     let original_lines = original_postings
         .iter()
-        .map(|id| (id, pinned.get_line_map(id)))
+        .map(|id| (id, pinned.get_line_map(id).unwrap()))
         .collect::<Vec<_>>();
     verify(root)?;
     for (step, operation) in operations.iter().enumerate() {
@@ -222,7 +222,7 @@ fn replay(operations: &[Operation]) -> Result<()> {
                     );
                     for (id, lines) in &original_lines {
                         ensure!(
-                            pinned.get_line_map(*id) == *lines,
+                            pinned.get_line_map(*id)? == *lines,
                             "pinned line map changed for {id}"
                         );
                     }

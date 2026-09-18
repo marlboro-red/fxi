@@ -175,7 +175,7 @@ fn published_readers_remain_valid_across_compaction_and_rebuild() {
         old_bytes
     );
     for id in postings.iter() {
-        assert!(reader.get_line_map(id).is_some());
+        assert!(reader.get_line_map(id).unwrap().is_some());
     }
     build_index_with_options(fixture.0.path(), true, true, None).unwrap();
     assert_eq!(reader.get_token_docs("vector"), postings);
@@ -831,7 +831,7 @@ fn legacy_and_compact_token_segments_coexist_across_updates_and_compaction() {
         }
         assert_eq!(pinned.get_token_docs("vector"), original);
         for doc in &original {
-            assert!(pinned.get_line_map(doc).is_some());
+            assert!(pinned.get_line_map(doc).unwrap().is_some());
         }
     }
 }
