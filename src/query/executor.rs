@@ -102,6 +102,7 @@ struct CachedRegex {
     regex: Regex,
     line_local: bool,
     existence_literal: Option<Vec<u8>>,
+    required_literal: Option<memchr::memmem::Finder<'static>>,
 }
 
 impl std::ops::Deref for CachedRegex {
@@ -112,6 +113,22 @@ impl std::ops::Deref for CachedRegex {
 }
 
 impl CachedRegex {
+    /// Skip lines with no mandatory literal. Match against the complete line,
+    /// retaining the exact str::lines treatment of CRLF and final lone CR.
+    fn candidate_lines<'a>(&'a self, content: &'a str) -> impl Iterator<Item = &'a str> {
+        let finder = self.required_literal.as_ref().expect("required literal");
+        let mut remaining = content;
+        std::iter::from_fn(move || {
+            let at = finder.find(remaining.as_bytes())?;
+            let start = memchr::memrchr(b'\n', &remaining.as_bytes()[..at]).map_or(0, |n| n + 1);
+            let end = memchr::memchr(b'\n', &remaining.as_bytes()[at..])
+                .map_or(remaining.len(), |n| at + n + 1);
+            let line = remaining[start..end].lines().next();
+            remaining = &remaining[end..];
+            line
+        })
+    }
+
     /// Count one match per line, jumping over unmatched regions and the rest
     /// of each matching line when the HIR proves line-local existence.
     fn count_matching_lines(&self, content: &str) -> usize {
@@ -137,6 +154,11 @@ impl CachedRegex {
                 };
                 cursor = found.end() + newline + 1;
             }
+        } else if self.required_literal.is_some() {
+            count = self
+                .candidate_lines(content)
+                .filter(|line| self.regex.is_match(line))
+                .count();
         } else {
             count = content
                 .lines()
@@ -151,6 +173,9 @@ impl CachedRegex {
             memchr::memmem::find(content.as_bytes(), literal).is_some()
         } else if self.line_local {
             self.regex.is_match(content)
+        } else if self.required_literal.is_some() {
+            self.candidate_lines(content)
+                .any(|line| self.regex.is_match(line))
         } else {
             content.lines().any(|line| self.regex.is_match(line))
         }
@@ -190,6 +215,8 @@ impl RegexCache {
             regex: re,
             line_local: super::regex_plan::is_line_local(pattern),
             existence_literal: super::regex_plan::existence_literal(pattern),
+            required_literal: super::regex_plan::required_literal(pattern)
+                .map(|literal| memchr::memmem::Finder::new(&literal).into_owned()),
         });
 
         // Slow path: insert with write lock
@@ -2395,6 +2422,72 @@ def format_warning(msg: str) -> str:
         fs::write(index.join("segments/seg_0001/grams.postings"), []).unwrap();
         assert!(IndexReader::open_for_search_uncached(&root).is_err());
         crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn required_literal_line_routing_preserves_regex_semantics() {
+        let mut contents = vec![String::new()];
+        let mut level = contents.clone();
+        for _ in 0..5 {
+            level = level
+                .iter()
+                .flat_map(|prefix| {
+                    ["needle", "0", "\n", "\r", "K"].map(|suffix| format!("{prefix}{suffix}"))
+                })
+                .collect();
+            contents.extend(level.iter().cloned());
+        }
+        for pattern in [
+            "needle.*0",
+            "0.*needle",
+            "^needle$",
+            r"\bneedle\b",
+            r"\Aneedle\z",
+            "(?:needle)+.*0",
+            "(?:needle)?0",
+            "needle.*0|0.*needle",
+            "needle|0",
+            "(?i)needle.*0",
+            "(?s)needle.*0",
+            "needle\\r?$",
+            "(?:K)?needle.*0",
+            "needle.*",
+            "(?:^)?needle",
+            "needle|",
+            "needle\\n0",
+        ] {
+            let cached = get_regex_cache().get_or_compile(pattern).unwrap();
+            for content in &contents {
+                let expected = content
+                    .lines()
+                    .filter(|line| cached.regex.is_match(line))
+                    .count();
+                assert_eq!(
+                    cached.count_matching_lines(content),
+                    expected,
+                    "{pattern:?}, {content:?}"
+                );
+                assert_eq!(
+                    cached.is_match_in_lines(content),
+                    expected > 0,
+                    "{pattern:?}, {content:?}"
+                );
+            }
+        }
+        assert!(
+            get_regex_cache()
+                .get_or_compile("needle.*0")
+                .unwrap()
+                .required_literal
+                .is_some()
+        );
+        assert!(
+            get_regex_cache()
+                .get_or_compile("needle|0")
+                .unwrap()
+                .required_literal
+                .is_none()
+        );
     }
 
     #[test]

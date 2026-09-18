@@ -40,6 +40,63 @@ fn files(directory: &Path, name: &str) -> Vec<PathBuf> {
 }
 
 #[test]
+fn required_literal_regexes_match_across_compressed_block_boundaries() {
+    let root = tempfile::tempdir().unwrap();
+    let indexes = tempfile::tempdir().unwrap();
+    let mut texts = Vec::new();
+    for id in 0..132 {
+        let text = format!(
+            "{}needle{}\r\nneedle\n{}\nneedle\r",
+            "x".repeat(4090 + id % 12),
+            if id % 2 == 0 { "0" } else { "K" },
+            "needle unrelated ".repeat(700)
+        );
+        fs::write(root.path().join(format!("{id:03}.txt")), &text).unwrap();
+        texts.push(text);
+    }
+    run_codec(
+        root.path(),
+        indexes.path(),
+        &["index", "--force", "."],
+        true,
+    );
+    for pattern in [
+        "needle.*0",
+        "^needle$",
+        r"needle\r$",
+        r"\bneedle\b",
+        "needle.*K",
+        "needle.*[0-9]{12}",
+    ] {
+        let re = regex::Regex::new(pattern).unwrap();
+        let expected: Vec<_> = texts
+            .iter()
+            .enumerate()
+            .filter(|(_, text)| text.lines().any(|line| re.is_match(line)))
+            .map(|(id, _)| format!("{id:03}.txt"))
+            .collect();
+        let out = run_codec(
+            root.path(),
+            indexes.path(),
+            &["-l", "--color=never", &format!("re:/{pattern}/"), "-p", "."],
+            true,
+        );
+        let found: Vec<_> = out
+            .lines()
+            .map(|p| {
+                Path::new(p)
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(found, expected, "{pattern}");
+    }
+}
+
+#[test]
 fn packed_cli_matches_live_files_after_edits_corruption_compaction_and_rebuild() {
     packed_cli_matches_live_files_after_edits_corruption_compaction_and_rebuild_case(false);
 }

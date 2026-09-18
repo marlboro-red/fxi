@@ -10,6 +10,32 @@ use regex_syntax::hir::{Class, Hir, HirKind};
 const MAX_ALTERNATIVES: usize = 16;
 const MAX_LITERAL_BYTES: usize = 256;
 
+/// A byte substring required by every match. This is only a necessary
+/// condition: callers still verify the complete containing line. HIR literals
+/// already reflect case folding; classes and optional branches are declined.
+pub(super) fn required_literal(pattern: &str) -> Option<Vec<u8>> {
+    fn required(hir: &Hir) -> Option<&[u8]> {
+        match hir.kind() {
+            HirKind::Literal(lit) => Some(&lit.0),
+            HirKind::Capture(cap) => required(&cap.sub),
+            HirKind::Repetition(rep) if rep.min > 0 => required(&rep.sub),
+            HirKind::Concat(parts) => parts.iter().filter_map(required).max_by_key(|s| s.len()),
+            HirKind::Alternation(parts) => {
+                let first = required(parts.first()?)?;
+                parts
+                    .iter()
+                    .all(|p| required(p) == Some(first))
+                    .then_some(first)
+            }
+            _ => None,
+        }
+    }
+    let hir = regex_syntax::Parser::new().parse(pattern).ok()?;
+    let literal = required(&hir)?;
+    (literal.len() >= 3 && !literal.contains(&b'\n') && !literal.contains(&b'\r'))
+        .then(|| literal.to_vec())
+}
+
 pub(super) fn regex_steps(pattern: &str) -> Vec<PlanStep> {
     regex_syntax::Parser::new()
         .parse(pattern)
