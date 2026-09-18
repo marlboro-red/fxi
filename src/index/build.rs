@@ -800,6 +800,7 @@ pub(crate) fn reconcile_index_paths(
 
 /// Publish a bounded, fully indexed memory snapshot before durable generation
 /// construction. The callback must not mistake this snapshot for a disk commit.
+#[cfg_attr(target_os = "macos", allow(dead_code))] // Used by fxid, outside the CLI module tree.
 pub(crate) fn reconcile_index_paths_with_visibility(
     root_path: &Path,
     cached: Option<&IndexReader>,

@@ -1391,6 +1391,7 @@ impl IndexReader {
 
     /// Warm path lookups before accepting watcher events. Ordinary searches
     /// never call this and retain their allocation-free path-table access.
+    #[cfg_attr(target_os = "macos", allow(dead_code))] // Used by the separate daemon executable.
     pub(crate) fn prepare_watched_paths(&self) {
         self.paths.prepared_lookup();
     }

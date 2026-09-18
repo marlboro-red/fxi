@@ -3,6 +3,12 @@
 The correctness/UX fixes intentionally tighten several contracts. Rebuild and
 restart the daemon when updating the executable so clients use the new behavior.
 
+On macOS, the installation now includes a sibling `fxid` executable for daemon
+execution and native file watching. Install or copy both binaries together;
+`cargo install --path .` installs both. Existing `fxi daemon` commands and the
+VS Code binary-path setting stay the same. Linux and Windows continue to use
+the daemon implementation inside `fxi`.
+
 | Previous behavior | Current behavior / action |
 |---|---|
 | `fxi "fn main"` was described as literal text | It is file-level AND. Use `fxi -F 'fn main'` or `fxi '\"fn main\"'` for a phrase. |

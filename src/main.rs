@@ -1,6 +1,10 @@
 mod index;
 mod output;
 mod query;
+#[cfg(not(target_os = "macos"))]
+mod server;
+#[cfg(target_os = "macos")]
+#[path = "server/client_only.rs"]
 mod server;
 mod tui;
 mod utils;

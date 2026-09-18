@@ -61,6 +61,44 @@ jobs:
           FXI_DIFF_FAILURE_DIR: ${{ github.workspace }}/target/differential-failures
         run: cargo test --all-targets
 
+      - name: Install CLI and daemon helper (macOS)
+        if: runner.os == 'macOS'
+        run: cargo install --path . --locked --debug --root "${{ runner.temp }}/fxi-install"
+
+      - name: Exercise installed daemon helper (macOS)
+        if: runner.os == 'macOS'
+        env:
+          FXI_INSTALL_BIN: ${{ runner.temp }}/fxi-install/bin
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+
+          binaries = Path(os.environ["FXI_INSTALL_BIN"])
+          subprocess.run([binaries / "fxid", "--version"], check=True)
+          with tempfile.TemporaryDirectory(prefix="fxi-install-", dir="/tmp") as temporary:
+              base = Path(temporary)
+              root = base / "repository"
+              (root / ".git").mkdir(parents=True)
+              (root / "initial.txt").write_text("installInitialMarker\n")
+              env = dict(os.environ, FXI_APP_DATA=str(base / "data"),
+                         FXI_INDEXES=str(base / "indexes"), FXI_SOCKET=str(base / "s.sock"))
+              def run(*args):
+                  return subprocess.run([binaries / "fxi", *args], cwd=root, env=env,
+                                        check=True, capture_output=True, text=True)
+              try:
+                  run("index", "--force")
+                  run("daemon", "start", "--watch")
+                  run("installInitialMarker", "-l")
+                  (root / "saved.txt").write_text("installLastSaveMarker\n")
+                  run("daemon", "stop")
+                  assert "saved.txt" in run("installLastSaveMarker", "-l").stdout
+              finally:
+                  run("daemon", "stop", "--force")
+          PY
+
       - name: Verify tests left real app data unchanged
         if: always() && steps.app-data-before.outcome == 'success'
         run: python scripts/check-test-storage.py verify "${{ runner.temp }}/fxi-app-data-before.json"
