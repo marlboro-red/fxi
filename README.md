@@ -225,6 +225,8 @@ fxi remove /path/to/project
 ```
 
 Indexes live outside the source tree. `FXI_INDEXES` overrides their location.
+`FXI_APP_DATA` overrides the directory containing `config.toml` and the default
+`indexes/` directory; `FXI_INDEXES` takes precedence for indexes when both are set.
 
 | Platform | Default index directory |
 |---|---|

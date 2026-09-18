@@ -96,6 +96,7 @@ impl Corpus {
     fn run(&self, args: &[String]) -> Vec<u8> {
         let output = Command::new(env!("CARGO_BIN_EXE_fxi"))
             .current_dir(&self.root)
+            .env("FXI_APP_DATA", self.dir.path().join("app-data"))
             .env("FXI_INDEXES", self.dir.path().join("indexes"))
             .env("FXI_SOCKET", self.dir.path().join("isolated.sock"))
             .env("NO_COLOR", "1")

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const CHILD: &str = "FXI_TEST_STORAGE_PROBE";
+const CONFIG_CHILD: &str = "FXI_TEST_CONFIG_PROBE";
 
 #[test]
 fn storage_probe() {
@@ -48,6 +49,7 @@ fn probe(explicit: Option<&Path>) -> PathBuf {
     command
         .args(["--exact", "storage_probe", "--nocapture"])
         .env(CHILD, "1")
+        .env_remove("FXI_APP_DATA")
         .env_remove("FXI_INDEXES");
     if let Some(path) = explicit {
         command.env("FXI_INDEXES", path);
@@ -85,4 +87,65 @@ fn integration_storage_is_private_and_cleaned_but_explicit_indexes_are_preserved
             .unwrap()
             .any(|entry| entry.unwrap().path().is_dir())
     );
+}
+
+#[test]
+fn config_probe() {
+    let Ok(expected_debounce) = std::env::var(CONFIG_CHILD) else {
+        return;
+    };
+    let expected_debounce: u64 = expected_debounce.parse().unwrap();
+    let data = PathBuf::from(std::env::var_os("FXI_APP_DATA").unwrap());
+    let existed_before = data.exists();
+    // This is the ordinary library build, without the unit-test storage override.
+    assert_eq!(fxi::utils::get_app_data_path().unwrap(), data);
+    let config = fxi::server::watcher::WatcherConfig::load();
+    assert_eq!(config.debounce_ms, expected_debounce);
+    assert_eq!(data.exists(), existed_before);
+    assert!(!data.join("indexes").exists());
+}
+
+fn probe_config(data: &Path, expected_debounce: u64) {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "config_probe", "--nocapture"])
+        .env(CONFIG_CHILD, expected_debounce.to_string())
+        .env("FXI_APP_DATA", data)
+        .env_remove("FXI_INDEXES");
+    for name in [
+        "FXI_DEBOUNCE_MS",
+        "FXI_MAX_BATCH_AGE_MS",
+        "FXI_DELTA_FLUSH_SECS",
+        "FXI_MERGE_SEGMENTS",
+        "FXI_REBUILD_THRESHOLD",
+    ] {
+        command.env_remove(name);
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn reading_missing_config_does_not_create_app_data() {
+    let fixture = tempfile::tempdir().unwrap();
+    let data = fixture.path().join("missing-app-data");
+    probe_config(&data, fxi::server::watcher::DEFAULT_DEBOUNCE_MS);
+    assert!(!data.exists());
+}
+
+#[test]
+fn explicit_app_data_supplies_configuration_without_creating_indexes() {
+    let fixture = tempfile::tempdir().unwrap();
+    fs::write(
+        fixture.path().join("config.toml"),
+        "[watcher]\ndebounce_ms = 873\n",
+    )
+    .unwrap();
+    probe_config(fixture.path(), 873);
+    assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 1);
 }

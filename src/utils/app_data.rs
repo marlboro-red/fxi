@@ -21,7 +21,8 @@ static TEST_APP_DATA: OnceLock<std::result::Result<TestAppData, String>> = OnceL
 /// fixtures link the ordinary library, so they must call this explicitly before
 /// any index operation. All threads share one directory without changing the
 /// process environment. An explicit `FXI_INDEXES` still takes precedence; child
-/// CLI processes must receive the chosen indexes directory through `Command::env`.
+/// CLI processes must receive `FXI_APP_DATA` and `FXI_INDEXES` through `Command::env`
+/// so configuration reads also use the fixture's private directory.
 /// Normal process exit removes only the directory created here. An abort or kill
 /// can leave temporary files, but never creates indexes in the user's app data.
 #[doc(hidden)]
@@ -78,10 +79,14 @@ extern "C" fn cleanup_test_storage() {
     }
 }
 
-/// Get the application data directory for storing indexes
-pub fn get_app_data_dir() -> Result<PathBuf> {
+/// Resolve the application data path without creating production directories.
+/// Test builds and explicitly initialized test fixtures use private storage.
+pub fn get_app_data_path() -> Result<PathBuf> {
     if cfg!(test) || TEST_APP_DATA.get().is_some() {
         return isolate_test_storage();
+    }
+    if let Some(custom_dir) = env::var_os("FXI_APP_DATA") {
+        return Ok(PathBuf::from(custom_dir));
     }
     let base = if cfg!(target_os = "macos") {
         dirs::home_dir().map(|h| h.join("Library").join("Application Support"))
@@ -92,9 +97,14 @@ pub fn get_app_data_dir() -> Result<PathBuf> {
         dirs::data_dir()
     };
 
-    let base = base.context("Could not determine app data directory")?;
-    let app_dir = base.join(APP_NAME);
+    Ok(base
+        .context("Could not determine app data directory")?
+        .join(APP_NAME))
+}
 
+/// Get or create the application data directory for storing indexes.
+pub fn get_app_data_dir() -> Result<PathBuf> {
+    let app_dir = get_app_data_path()?;
     fs::create_dir_all(&app_dir)?;
     Ok(app_dir)
 }

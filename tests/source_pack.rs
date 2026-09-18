@@ -9,6 +9,7 @@ fn run_codec(root: &Path, indexes: &Path, args: &[&str], compression: bool) -> S
     let result = Command::new(env!("CARGO_BIN_EXE_fxi"))
         .args(args)
         .current_dir(root)
+        .env("FXI_APP_DATA", indexes.join("app-data"))
         .env("FXI_INDEXES", indexes)
         .env("FXI_SOURCE_PACK", "1")
         .env(
@@ -378,6 +379,7 @@ fn legacy_raw_and_captured_compressed_generations_match_live_cli_modes() {
         let live = Command::new(env!("CARGO_BIN_EXE_fxi"))
             .args(&args)
             .current_dir(root.path())
+            .env("FXI_APP_DATA", indexes.path().join("app-data"))
             .env("FXI_INDEXES", indexes.path())
             .env("FXI_SOURCE_PACK", "0")
             .env("FXI_SOCKET", indexes.path().join("absent.sock"))

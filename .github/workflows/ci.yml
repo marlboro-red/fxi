@@ -48,12 +48,12 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      # Keep FXI_INDEXES unset here: a forgotten fixture initializer must be
+      # Keep storage overrides unset: a forgotten fixture initializer must be
       # visible as a write to the real default app-data tree.
       - name: Snapshot real app data
         id: app-data-before
         run: |
-          python -c "import os; assert 'FXI_INDEXES' not in os.environ, 'CI must exercise the default storage path'"
+          python -c "import os; assert not {'FXI_INDEXES', 'FXI_APP_DATA'} & os.environ.keys(), 'CI must exercise the default storage path'"
           python scripts/check-test-storage.py snapshot "${{ runner.temp }}/fxi-app-data-before.json"
 
       - name: Test

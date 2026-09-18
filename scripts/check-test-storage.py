@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Detect tests touching the real default FXI app-data tree.
 
-This intentionally ignores FXI_INDEXES. Snapshot metadata only: file type, size
+This intentionally ignores FXI_INDEXES and FXI_APP_DATA. Snapshot metadata only: file type, size
 and mtime_ns, including directories and the root itself. Symlinks and Windows
 reparse points are recorded without traversing them. This is a cheap test
 pollution guard, not a content-integrity check against restored timestamps.

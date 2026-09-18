@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::utils::app_data::get_app_data_dir;
+use crate::utils::app_data::get_app_data_path;
 
 /// Default debounce window in milliseconds
 pub const DEFAULT_DEBOUNCE_MS: u64 = 1;
@@ -164,6 +164,7 @@ impl ChangeBatch {
 /// Located at ~/Library/Application Support/fxi/config.toml (macOS)
 /// or %LOCALAPPDATA%/fxi/config.toml (Windows)
 /// or ~/.local/share/fxi/config.toml (Linux)
+/// or $FXI_APP_DATA/config.toml when explicitly overridden
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ConfigFile {
     /// Watcher-related configuration
@@ -227,7 +228,7 @@ impl WatcherConfig {
     /// Load config from file in the app data directory
     /// Returns None if file doesn't exist or can't be parsed
     fn load_from_file() -> Option<ConfigFile> {
-        let app_dir = get_app_data_dir().ok()?;
+        let app_dir = get_app_data_path().ok()?;
         let config_path = app_dir.join("config.toml");
 
         if !config_path.exists() {

@@ -40,7 +40,7 @@ Tests must not create indexes in the user's application-data directory.
 - Unit-test builds automatically use private process storage.
 - Integration tests or Criterion fixtures calling the library must call
   `fxi::utils::app_data::isolate_test_storage()` before index operations.
-- CLI subprocess fixtures must pass their own `FXI_INDEXES` and socket/runtime
+- CLI subprocess fixtures must pass private `FXI_APP_DATA`, `FXI_INDEXES` and socket/runtime
   settings. `tests/support/mod.rs` provides a helper for this.
 - Do not mutate process-wide environment variables from parallel tests.
 - Normal process exit cleans process-owned test storage. Explicit fixture-owned

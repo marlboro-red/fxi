@@ -40,6 +40,7 @@ impl Fixture {
         let mut command = Command::new(env!("CARGO_BIN_EXE_fxi"));
         command
             .current_dir(&self.root)
+            .env("FXI_APP_DATA", self.dir.path().join("app-data"))
             .env("FXI_INDEXES", &self.indexes)
             .env("FXI_SOCKET", self.dir.path().join("isolated.sock"))
             .env("NO_COLOR", "1");

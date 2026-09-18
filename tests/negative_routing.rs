@@ -36,6 +36,7 @@ fn certified_cli_preserves_core_errors_invalid_regexes_and_updated_matches() {
         Command::new(env!("CARGO_BIN_EXE_fxi"))
             .args(args)
             .current_dir(root.path())
+            .env("FXI_APP_DATA", indexes.path().join("app-data"))
             .env("FXI_INDEXES", indexes.path())
             .env("FXI_NEGATIVE_ROUTING", "1")
             .env("FXI_SOCKET", indexes.path().join("absent.sock"))

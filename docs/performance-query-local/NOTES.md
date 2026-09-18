@@ -169,7 +169,11 @@ added/removed containers or changed container mtimes in real app data; see
 metadata check, not a full content audit. Subsequent targeted regressions also
 passed. CI now snapshots recursive real app-data metadata around the full suite
 on all three operating systems, with `FXI_INDEXES` unset. The guard does not follow
-symlinks and has five subprocess regression tests of its own.
+symlinks and has five subprocess regression tests of its own. Its first remote
+run caught an additional clean-machine side effect: reading watcher configuration
+created the otherwise absent app-data directory. Path resolution now separates
+reading from directory creation, and CLI fixtures explicitly override
+`FXI_APP_DATA` so they do not inherit user configuration either.
 
 The review's broader history claim—optimization preceded correctness—is not
 established by commit-prefix counts. The defects and fixes are documented in the
