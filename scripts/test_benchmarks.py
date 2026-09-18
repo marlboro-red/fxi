@@ -21,7 +21,7 @@ class StartupHarnessTests(unittest.TestCase):
             binary = base / 'fake-fxi'
             binary.write_text('#!/usr/bin/env python3\nimport json, os\n'
                               'with open(os.environ["BENCH_TEST_LOG"], "a") as out:\n'
-                              '    out.write(json.dumps({k: os.environ.get(k) for k in ["FXI_INDEXES", "RAYON_NUM_THREADS", "FXI_SEARCH_PARALLELISM"]}) + "\\n")\n')
+                              '    out.write(json.dumps({k: os.environ.get(k) for k in ["FXI_INDEXES", "RAYON_NUM_THREADS", "FXI_SEARCH_PARALLELISM", "FXI_QUERY_LOCAL", "FXI_GENERATION_ROUTING"]}) + "\\n")\n')
             binary.chmod(0o755)
             before, after = base / 'before', base / 'after'
             command = [sys.executable, str(Path(__file__).with_name('compare-startup.py')),
@@ -30,14 +30,17 @@ class StartupHarnessTests(unittest.TestCase):
                        '--candidate', str(binary), '--repetitions', '3',
                        '--before-threads', '2', '--after-threads', '8',
                        '--before-search-parallelism', '4', '--after-search-parallelism', '12',
+                       '--candidate-query-local', '--candidate-generation-routing',
                        '--patterns', 'definitelyAbsentNeedle', '--output', str(base / 'result.json')]
             subprocess.run(command, env={**os.environ, 'BENCH_TEST_LOG': str(log)},
                            check=True, capture_output=True, timeout=30)
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             self.assertEqual(calls.count({'FXI_INDEXES': str(before.resolve()),
-                'RAYON_NUM_THREADS': '2', 'FXI_SEARCH_PARALLELISM': '4'}), 4)
+                'RAYON_NUM_THREADS': '2', 'FXI_SEARCH_PARALLELISM': '4',
+                'FXI_QUERY_LOCAL': '0', 'FXI_GENERATION_ROUTING': '0'}), 4)
             self.assertEqual(calls.count({'FXI_INDEXES': str(after.resolve()),
-                'RAYON_NUM_THREADS': '8', 'FXI_SEARCH_PARALLELISM': '12'}), 4)
+                'RAYON_NUM_THREADS': '8', 'FXI_SEARCH_PARALLELISM': '12',
+                'FXI_QUERY_LOCAL': '1', 'FXI_GENERATION_ROUTING': '1'}), 4)
 
 
 def load_harness(name):

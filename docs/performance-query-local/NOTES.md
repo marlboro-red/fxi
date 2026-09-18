@@ -467,7 +467,8 @@ both binaries and exercises an installed watched daemon. All eight CI jobs passe
 for `0683a00`.
 
 For this campaign, the pre-existing watch daemon was paused and resumed in a
-`finally` block. No compilation or source edits ran during timed measurements.
+`finally` block. No compilation ran during timed measurements; pausing the daemon prevented
+background indexing of repository changes.
 Both binaries use identical index bytes and policy flags in each paired test.
 [31-pair startup calibration](startup-helper.json):
 
@@ -520,3 +521,14 @@ baseline to the current helper + generation router: **+14.2%**.
 commands and publication breakdown. This update regression is real; the router
 currently rebuilds its whole summary for one added file. Reusing an unchanged
 summary safely is a remaining architecture task, not an achieved optimization.
+
+
+## Rejected linker experiment
+
+A macOS CLI-only `-Wl,-dead_strip_dylibs` build removed the unused libiconv
+dependency while retaining libSystem. The helper binary was unchanged, and
+process smoke checks passed. However, [31 paired samples](startup-linker.json)
+measured `--version` at 2.517 → 2.475 ms and checked empty absence at
+2.774 → 2.760 ms. The sample ranges overlap substantially; 19/31 pairs favored
+the candidate in each case. This does not justify another platform-specific
+linker setting, so the flag was discarded.
