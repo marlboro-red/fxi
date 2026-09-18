@@ -1,20 +1,20 @@
-//! Experimental independently compressed source blocks. Filters describe the
-//! same captured source bytes, not the earlier tokenization snapshot.
+//! Independently compressed source blocks. New packs bind descriptors, filters
+//! and source bytes to the indexing capture; legacy headers remain readable.
 use super::{BLOCK_BYTES, DATA, TABLE, path_hash, stamp};
 use crate::index::types::DocId;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use crate::index::types::Document;
 use anyhow::{Result, ensure};
 use memmap2::Mmap;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use rayon::prelude::*;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::io::{BufWriter, Write};
 use std::{
     fs::{self, File},
     path::Path,
 };
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::{io::Read, path::PathBuf};
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -49,7 +49,7 @@ pub(super) struct Encoded {
     pub descriptors: Vec<u8>,
     pub payload: Vec<u8>,
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn encode_document(root: &Path, doc: &Document, paths: &[PathBuf]) -> Option<Encoded> {
     let relative = paths.get(doc.path_id as usize)?;
     let Ok(mut file) = File::open(root.join(relative)) else {
@@ -121,7 +121,7 @@ pub(super) fn encode(relative: &Path, bytes: &[u8], before: [u64; 7]) -> Encoded
         payload,
     }
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn write_segment(
     directory: &Path,
     root: &Path,

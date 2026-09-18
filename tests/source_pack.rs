@@ -335,6 +335,14 @@ fn legacy_raw_and_captured_compressed_generations_match_live_cli_modes() {
         assert_eq!(packed, String::from_utf8(live.stdout).unwrap(), "{args:?}");
     }
     run_codec(root.path(), indexes.path(), &["compact", "."], true);
+    let tables = files(indexes.path(), "source.table");
+    assert_eq!(tables.len(), 1);
+    let table = fs::read(&tables[0]).unwrap();
+    assert_eq!(
+        u64::from_le_bytes(table[8..16].try_into().unwrap()),
+        1,
+        "only the captured delta has proven posting provenance; legacy records must be omitted"
+    );
     let output = run_codec(
         root.path(),
         indexes.path(),

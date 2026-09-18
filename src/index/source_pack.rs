@@ -25,6 +25,7 @@ impl SourcePack {
             RawSourcePack::open(directory).map(Self::Raw)
         }
     }
+    /// Stored revision only, for maintenance; this does not validate live source.
     pub(crate) fn captured(
         &self,
         id: DocId,
@@ -354,9 +355,8 @@ pub(crate) fn merge_captured(
     writer.finish(new_docs, new_paths, destination)
 }
 
-/// Write only new segments, never mutate inherited hard-linked files. Generation
-/// publication syncs both files before making the new generation visible.
-#[cfg(test)]
+/// Legacy-format fixture writer. Production packs require the indexing capture.
+#[cfg(all(test, unix))]
 pub(crate) fn write_missing(
     index: &Path,
     root: &Path,
