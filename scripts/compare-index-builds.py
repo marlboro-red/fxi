@@ -16,6 +16,19 @@ import tempfile
 import time
 
 
+def corpus_manifest(root):
+    paths = sp.check_output(['rg', '--files', '-0'], cwd=root).decode().split('\0')
+    paths = sorted(path for path in paths if path)
+    digest = hashlib.sha256()
+    size = 0
+    for name in paths:
+        data = (root / name).read_bytes()
+        size += len(data)
+        digest.update(json.dumps([name, hashlib.sha256(data).hexdigest()],
+                                 separators=(',', ':')).encode() + b'\n')
+    return {'files': len(paths), 'source_bytes': size, 'sha256': digest.hexdigest()}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--corpus', type=Path, required=True)
@@ -28,6 +41,7 @@ def main():
     if args.repetitions < 1:
         parser.error('repetitions must be positive')
     root = args.corpus.resolve(strict=True)
+    manifest = corpus_manifest(root)
     binaries = {name: path.resolve(strict=True) for name, path in
                 [('before', args.baseline), ('after', args.candidate)]}
     runtime = Path(tempfile.mkdtemp(prefix='fxi-build-comparison-'))
@@ -83,7 +97,9 @@ def main():
             retained[name] = indexes
             print(repetition, name, round(elapsed, 3), 'seconds',
                   sum(components.values()), 'bytes', flush=True)
-    result = {'corpus': str(root), 'runtime': str(runtime), 'source_pack': args.source_pack,
+    assert corpus_manifest(root) == manifest, 'Corpus changed during comparison'
+    result = {'corpus': str(root), 'corpus_manifest': manifest,
+              'runtime': str(runtime), 'source_pack': args.source_pack,
               'mode': 'full builds, warm filesystem; oracle checks outside timing',
               'harness_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'retained_indexes': {name: str(path) for name, path in retained.items()},
