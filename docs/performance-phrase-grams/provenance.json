@@ -1,0 +1,6 @@
+{
+  "lab_sha256": "77c828df3c9ee7f6d337d68b14bddaadd10a08f444a25aaf262bbb9594ac7586",
+  "binary_sha256": "1129f6eb86e1b15eadb8aa5e8c30eb7cd47d18448127d933c059980de7f1119c",
+  "fixture_provenance": "../performance-after-audit/NOTES.md",
+  "mode": "offline candidate precision, no timings"
+}

@@ -1,0 +1,138 @@
+{
+  "method": "Offline exact longer-byte-gram presence, ASCII-folded source and query, inside existing trigram candidates. Bridge grams contain alphanumeric and delimiter bytes. Every retained set must contain independent ripgrep matches. This is a precision upper bound: no storage, indexing or query overhead included; no speed or novelty claim. Sources must match the existing index.",
+  "root": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "rows": [
+    {
+      "baseline_files": 3787,
+      "baseline_source_bytes": 217774192,
+      "literal": "struct file_operations",
+      "matching_files": 1240,
+      "widths": [
+        {
+          "all_gram_files": 1583,
+          "best_single_files": 2054,
+          "best_single_gram": "le_o",
+          "bridge_grams": 8,
+          "bridge_only_files": 1605,
+          "query_grams": 19,
+          "width": 4
+        },
+        {
+          "all_gram_files": 1501,
+          "best_single_files": 1668,
+          "best_single_gram": "ile_o",
+          "bridge_grams": 10,
+          "bridge_only_files": 1501,
+          "query_grams": 18,
+          "width": 5
+        },
+        {
+          "all_gram_files": 1318,
+          "best_single_files": 1588,
+          "best_single_gram": " file_",
+          "bridge_grams": 11,
+          "bridge_only_files": 1318,
+          "query_grams": 17,
+          "width": 6
+        },
+        {
+          "all_gram_files": 1240,
+          "best_single_files": 1254,
+          "best_single_gram": "t file_o",
+          "bridge_grams": 12,
+          "bridge_only_files": 1240,
+          "query_grams": 15,
+          "width": 8
+        }
+      ]
+    },
+    {
+      "baseline_files": 23547,
+      "baseline_source_bytes": 632676674,
+      "literal": "static const",
+      "matching_files": 21570,
+      "widths": [
+        {
+          "all_gram_files": 22171,
+          "best_single_files": 22630,
+          "best_single_gram": "c co",
+          "bridge_grams": 4,
+          "bridge_only_files": 22260,
+          "query_grams": 9,
+          "width": 4
+        },
+        {
+          "all_gram_files": 21607,
+          "best_single_files": 22107,
+          "best_single_gram": "c con",
+          "bridge_grams": 5,
+          "bridge_only_files": 21609,
+          "query_grams": 8,
+          "width": 5
+        },
+        {
+          "all_gram_files": 21572,
+          "best_single_files": 21642,
+          "best_single_gram": "tic co",
+          "bridge_grams": 6,
+          "bridge_only_files": 21572,
+          "query_grams": 7,
+          "width": 6
+        },
+        {
+          "all_gram_files": 21572,
+          "best_single_files": 21573,
+          "best_single_gram": "tic cons",
+          "bridge_grams": 5,
+          "bridge_only_files": 21572,
+          "query_grams": 5,
+          "width": 8
+        }
+      ]
+    },
+    {
+      "baseline_files": 36769,
+      "baseline_source_bytes": 789390244,
+      "literal": "const struct",
+      "matching_files": 30667,
+      "widths": [
+        {
+          "all_gram_files": 31269,
+          "best_single_files": 32347,
+          "best_single_gram": "st s",
+          "bridge_grams": 4,
+          "bridge_only_files": 31321,
+          "query_grams": 9,
+          "width": 4
+        },
+        {
+          "all_gram_files": 30701,
+          "best_single_files": 30980,
+          "best_single_gram": "nst s",
+          "bridge_grams": 5,
+          "bridge_only_files": 30701,
+          "query_grams": 8,
+          "width": 5
+        },
+        {
+          "all_gram_files": 30669,
+          "best_single_files": 30718,
+          "best_single_gram": "nst st",
+          "bridge_grams": 6,
+          "bridge_only_files": 30669,
+          "query_grams": 7,
+          "width": 6
+        },
+        {
+          "all_gram_files": 30668,
+          "best_single_files": 30669,
+          "best_single_gram": "nst stru",
+          "bridge_grams": 5,
+          "bridge_only_files": 30668,
+          "query_grams": 5,
+          "width": 8
+        }
+      ]
+    }
+  ]
+}
