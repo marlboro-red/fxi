@@ -6,21 +6,29 @@ claim or a change to default corruption handling.
 
 ## Design and correctness boundary
 
-A published `grams.checks` sidecar contains a version magic, a checksum over its
-header and posting-hash array, the exact dictionary checksum, the posting-file
-length, entry count, and one 64-bit XXH3 checksum per posting. Publication creates
-this only after validating the staging segment with the strict reader. Existing
-inherited evidence is validated, never refreshed to bless changed bytes. All new
-files use the existing sync-before-CURRENT publication protocol.
+The first `FXIGRAM1` prototype stored a whole-dictionary checksum and one 64-bit
+XXH3 checksum per posting. The current `FXIGRAM2` format divides the sorted
+vocabulary into pages of at most 512 entries. A checksummed root records the
+complete entry count, posting-file length, and every page's first/last key and
+checksums for its dictionary records and posting-hash slice. The root's ordered,
+disjoint ranges prove outer-range/interpage absence. A key within a page requires
+checking that entire page before lookup. Fixed partitions cover every record;
+page endpoints, ordering and posting ranges are validated before use.
 
-Experimental readers check the entire dictionary and sidecar and validate
-ordering/ranges at open. They disable Bloom pruning and use dictionary membership
-for routing. Each accessed posting is checksummed and fully validated for count,
+Publication creates evidence only after validating the staging segment with the
+strict reader. Existing inherited evidence is validated, never refreshed to bless
+changed bytes. All new files use the existing sync-before-CURRENT protocol.
+Version 1 remains readable; inherited v1 segments keep the whole-dictionary cost.
+A forced rebuild generates v2 pages for every segment.
+
+Experimental readers validate the root at open and disable Bloom pruning. Each
+accessed page and posting is checksummed; postings are fully validated for count,
 ordering and document membership before decoding, including before an intersection
 can stop decoding early. Successful checks are cached within that immutable
-reader using one byte per entry; failures remain errors. Missing sidecars use the
-legacy eager path; malformed sidecars fail. Public eager opening and compaction
-validate every posting, including its checksum when evidence exists.
+reader using one byte per posting plus small page state; failures remain errors.
+Missing sidecars use the legacy eager path; malformed roots fail at open and
+malformed dependent pages fail on use. Public eager opening and compaction
+validate every page and posting, including checksums when evidence exists.
 
 An unrelated damaged posting need not fail a query that does not depend on it.
 `fxi stats PATH` uses the eager reader and checks all gram postings and full-profile
@@ -61,7 +69,8 @@ times. Parallel segment times overlap and must not be added as elapsed time.
 ## Validation
 
 Tests cover every single-byte mutation and every truncation of a small dictionary
-and sidecar, truncated posting files, structurally valid posting damage, damage
+and sidecar through opening or dependent lookup, empty/512/513-entry page boundaries,
+partial final pages and interpage gaps, later-page dictionary/hash corruption, truncated posting files, structurally valid posting damage, damage
 beyond filtered decoding's early exit, repeated errors, eager fallback without
 evidence, independent queries against unrelated damage, and strict rejection.
 CLI comparisons exercise full/lean multisegment indexes, positive/absent and

@@ -82,8 +82,15 @@ impl TrigramDict {
         (0..self.count).map(|i| self.entry(i))
     }
     fn lookup(&self, trigram: Trigram) -> Option<TrigramDictEntry> {
-        let mut lo = 0;
-        let mut hi = self.count;
+        self.lookup_range(trigram, 0..self.count)
+    }
+    fn lookup_range(
+        &self,
+        trigram: Trigram,
+        range: std::ops::Range<usize>,
+    ) -> Option<TrigramDictEntry> {
+        let mut lo = range.start;
+        let mut hi = range.end;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let entry = self.entry(mid);
@@ -282,11 +289,21 @@ struct SegmentReader {
 impl SegmentReader {
     /// Get the document frequency for a trigram (for selectivity-based ordering)
     #[inline]
-    fn get_trigram_doc_freq(&self, trigram: Trigram) -> u32 {
-        self.trigram_dict
-            .lookup(trigram)
-            .map(|e| e.doc_freq)
-            .unwrap_or(0)
+    fn get_trigram_doc_freq(&self, trigram: Trigram) -> Result<u32> {
+        Ok(self.lookup_gram(trigram)?.map_or(0, |e| e.doc_freq))
+    }
+
+    fn lookup_gram(&self, trigram: Trigram) -> Result<Option<TrigramDictEntry>> {
+        if let Some(checks) = &self.gram_checks {
+            let range = checks.lookup_range(
+                trigram,
+                &self.trigram_dict.data,
+                self.trigram_postings.len(),
+            )?;
+            Ok(self.trigram_dict.lookup_range(trigram, range))
+        } else {
+            Ok(self.trigram_dict.lookup(trigram))
+        }
     }
 
     /// Open a segment from disk (lazy loading for line maps)
@@ -335,6 +352,7 @@ impl SegmentReader {
         let validator = crate::utils::encoding::DocumentPostingsValidator::new(&allowed_docs);
         let validate_entry = |index: usize| -> Result<()> {
             let entry = trigram_dict.entry(index);
+            anyhow::ensure!(entry.trigram <= 0x00ff_ffff, "Invalid trigram key");
             anyhow::ensure!(
                 posting_range_fits(entry.offset, entry.length, trigram_postings.len()),
                 "Truncated trigram postings"
@@ -354,7 +372,13 @@ impl SegmentReader {
             }
             Ok(())
         };
-        if trigram_postings.len() >= 1024 * 1024 && trigram_dict.count >= 512 {
+        if !lazy && let Some(checks) = &gram_checks {
+            checks.validate_directory(&trigram_dict.data, trigram_postings.len())?;
+        }
+        if lazy && gram_checks.as_ref().is_some_and(|checks| checks.is_paged()) {
+            // The checked root establishes page coverage and boundaries. Page
+            // hashes, order and posting ranges are checked at lookup time.
+        } else if trigram_postings.len() >= 1024 * 1024 && trigram_dict.count >= 512 {
             (0..trigram_dict.count)
                 .into_par_iter()
                 .try_for_each(validate_entry)?;
@@ -553,8 +577,8 @@ impl SegmentReader {
         }
         let mut sorted: Vec<_> = trigrams
             .iter()
-            .map(|&g| (g, self.get_trigram_doc_freq(g)))
-            .collect();
+            .map(|&g| self.get_trigram_doc_freq(g).map(|frequency| (g, frequency)))
+            .collect::<Result<Vec<_>>>()?;
         sorted.sort_unstable_by_key(|&(_, frequency)| frequency);
         let mut result = self.get_trigram_docs(sorted[0].0)?;
         for &(gram, _) in &sorted[1..] {
@@ -568,7 +592,7 @@ impl SegmentReader {
 
     /// Get documents matching a trigram in this segment as a RoaringBitmap
     fn get_trigram_docs(&self, trigram: Trigram) -> Result<RoaringBitmap> {
-        if let Some(entry) = self.trigram_dict.lookup(trigram) {
+        if let Some(entry) = self.lookup_gram(trigram)? {
             let start = entry.offset as usize;
             let end = start + entry.length as usize;
 
@@ -589,7 +613,7 @@ impl SegmentReader {
         trigram: Trigram,
         filter: &RoaringBitmap,
     ) -> Result<RoaringBitmap> {
-        if let Some(entry) = self.trigram_dict.lookup(trigram) {
+        if let Some(entry) = self.lookup_gram(trigram)? {
             let start = entry.offset as usize;
             let end = start + entry.length as usize;
 
@@ -1808,18 +1832,25 @@ impl IndexReader {
         if !self.content_cache_enabled || self.file_cache.max_bytes == 0 || literal.len() < 8 {
             return None;
         }
-        literal
-            .windows(3)
-            .enumerate()
-            .filter(|(_, bytes)| !self.is_stop_gram(bytes_to_trigram(bytes[0], bytes[1], bytes[2])))
-            .min_by_key(|(_, bytes)| {
-                let gram = bytes_to_trigram(bytes[0], bytes[1], bytes[2]);
-                self.segments
-                    .iter()
-                    .map(|segment| u64::from(segment.get_trigram_doc_freq(gram)))
-                    .sum::<u64>()
-            })
-            .map(|(offset, _)| offset)
+        // This is only a source-scan heuristic. If optional frequency evidence
+        // is damaged, decline the cached anchor and use the ordinary verifier.
+        let mut best = None;
+        for (offset, bytes) in literal.windows(3).enumerate() {
+            let gram = bytes_to_trigram(bytes[0], bytes[1], bytes[2]);
+            if self.is_stop_gram(gram) {
+                continue;
+            }
+            let frequency = self
+                .segments
+                .iter()
+                .map(|segment| segment.get_trigram_doc_freq(gram).map(u64::from))
+                .sum::<Result<u64>>()
+                .ok()?;
+            if best.is_none_or(|(_, previous)| frequency < previous) {
+                best = Some((offset, frequency));
+            }
+        }
+        best.map(|(offset, _)| offset)
     }
 
     /// Read file content with LRU caching.
@@ -2363,6 +2394,131 @@ mod tests {
     }
 
     #[test]
+    fn query_local_empty_dictionary_is_valid() {
+        let dir = TempDir::new().unwrap();
+        let dictionary = 0u32.to_le_bytes();
+        fs::write(dir.path().join("grams.dict"), dictionary).unwrap();
+        fs::write(dir.path().join("grams.postings"), []).unwrap();
+        crate::index::query_local::write(dir.path(), &dictionary, &[]).unwrap();
+        for lazy in [true, false] {
+            assert!(
+                open_checked_segment(dir.path(), lazy)
+                    .unwrap()
+                    .get_trigram_docs(1)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn query_local_pages_cover_boundaries_gaps_and_unrelated_damage() {
+        let dir = TempDir::new().unwrap();
+        let count = 1030u32;
+        let mut dictionary = count.to_le_bytes().to_vec();
+        let mut postings = Vec::new();
+        for index in 0..count {
+            let gram = index * 3 + 1;
+            dictionary.extend_from_slice(&gram.to_le_bytes());
+            dictionary.extend_from_slice(&(postings.len() as u64).to_le_bytes());
+            dictionary.extend_from_slice(&1u32.to_le_bytes());
+            dictionary.extend_from_slice(&1u32.to_le_bytes());
+            postings.push((index % 4 + 1) as u8);
+        }
+        fs::write(dir.path().join("grams.dict"), &dictionary).unwrap();
+        fs::write(dir.path().join("grams.postings"), &postings).unwrap();
+        crate::index::query_local::write(dir.path(), &dictionary, &postings).unwrap();
+        for lazy in [true, false] {
+            let reader = open_checked_segment(dir.path(), lazy).unwrap();
+            for gram in 0..count * 3 + 5 {
+                let found = reader.get_trigram_docs(gram).unwrap();
+                let index = gram.saturating_sub(1) / 3;
+                let expected = if gram % 3 == 1 && index < count {
+                    [index % 4 + 1].into_iter().collect()
+                } else {
+                    RoaringBitmap::new()
+                };
+                assert_eq!(found, expected, "gram {gram}");
+            }
+        }
+        // Unqueried pages are deliberately independent integrity domains.
+        dictionary[4 + 516 * 20 + 16] ^= 1;
+        fs::write(dir.path().join("grams.dict"), &dictionary).unwrap();
+        let reader = open_checked_segment(dir.path(), true).unwrap();
+        assert_eq!(reader.get_trigram_docs(1).unwrap().len(), 1);
+        assert!(reader.get_trigram_docs(516 * 3 + 1).is_err());
+        assert!(reader.get_trigram_docs(516 * 3 + 2).is_err()); // absent inside damaged page
+        assert!(reader.get_trigram_docs(count * 3 + 100).unwrap().is_empty());
+        assert!(open_checked_segment(dir.path(), false).is_err());
+        drop(reader);
+        dictionary[4 + 516 * 20 + 16] ^= 1;
+        fs::write(dir.path().join("grams.dict"), &dictionary).unwrap();
+        let path = dir.path().join("grams.checks");
+        let mut hashes = fs::read(&path).unwrap();
+        *hashes.last_mut().unwrap() ^= 1;
+        fs::write(&path, hashes).unwrap();
+        let reader = open_checked_segment(dir.path(), true).unwrap();
+        assert_eq!(reader.get_trigram_docs(1).unwrap().len(), 1);
+        assert!(reader.get_trigram_docs((count - 1) * 3 + 1).is_err());
+        assert!(open_checked_segment(dir.path(), false).is_err());
+        drop(reader);
+        for count in [512usize, 513] {
+            let mut truncated = dictionary[..4 + count * 20].to_vec();
+            truncated[..4].copy_from_slice(&(count as u32).to_le_bytes());
+            let postings = &postings[..count];
+            fs::write(dir.path().join("grams.dict"), &truncated).unwrap();
+            fs::write(dir.path().join("grams.postings"), postings).unwrap();
+            fs::remove_file(&path).unwrap();
+            crate::index::query_local::write(dir.path(), &truncated, postings).unwrap();
+            for lazy in [true, false] {
+                let reader = open_checked_segment(dir.path(), lazy).unwrap();
+                assert_eq!(
+                    reader
+                        .get_trigram_docs((count as u32 - 1) * 3 + 1)
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                assert!(
+                    reader
+                        .get_trigram_docs((count as u32 - 1) * 3 + 2)
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn query_local_v1_checks_remain_readable() {
+        let dir = checked_segment_fixture();
+        let dictionary = fs::read(dir.path().join("grams.dict")).unwrap();
+        let postings = fs::read(dir.path().join("grams.postings")).unwrap();
+        let mut bytes = b"FXIGRAM1".to_vec();
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(&dictionary).to_le_bytes());
+        bytes.extend_from_slice(&(postings.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&3u64.to_le_bytes());
+        for record in dictionary[4..].as_chunks::<20>().0 {
+            let start = le64(&record[4..]) as usize;
+            let end = start + le32(&record[12..]) as usize;
+            bytes.extend_from_slice(
+                &xxhash_rust::xxh3::xxh3_64(&postings[start..end]).to_le_bytes(),
+            );
+        }
+        let hash = xxhash_rust::xxh3::xxh3_64(&bytes[16..]);
+        bytes[8..16].copy_from_slice(&hash.to_le_bytes());
+        fs::write(dir.path().join("grams.checks"), bytes).unwrap();
+        for lazy in [true, false] {
+            let reader = open_checked_segment(dir.path(), lazy).unwrap();
+            assert_eq!(
+                reader.get_trigram_docs(1).unwrap(),
+                [1, 3].into_iter().collect()
+            );
+        }
+    }
+
+    #[test]
     fn query_local_checks_validate_dependencies_and_full_open_checks_everything() {
         let dir = checked_segment_fixture();
         for lazy in [false, true] {
@@ -2398,6 +2554,7 @@ mod tests {
                 .get_trigram_docs_intersect(2, &[1].into_iter().collect())
                 .is_err()
         );
+        drop(segment);
         // Missing evidence uses full structural validation, never unchecked data.
         fs::remove_file(dir.path().join("grams.checks")).unwrap();
         bytes[2] = 0x80;
@@ -2416,10 +2573,10 @@ mod tests {
                 let mut changed = original.clone();
                 changed[at] ^= 1;
                 fs::write(&path, changed).unwrap();
-                assert!(
-                    open_checked_segment(dir.path(), true).is_err(),
-                    "{name} byte {at}"
-                );
+                let result = open_checked_segment(dir.path(), true)
+                    .and_then(|segment| segment.get_trigram_docs(1));
+                assert!(result.is_err(), "{name} byte {at}");
+                assert!(open_checked_segment(dir.path(), false).is_err());
             }
             for len in 0..original.len() {
                 fs::write(&path, &original[..len]).unwrap();
