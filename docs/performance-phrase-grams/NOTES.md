@@ -77,3 +77,60 @@ queries × four widths × two constraint choices) retain the ripgrep matches.
 [Raw precision counts](precision.json), [lab](../../examples/phrase_gram_lab.rs).
 The lab holds candidate source bytes in memory to perform the offline comparison;
 that allocation is not a proposal for production resource use.
+
+## Bounded verification prototype
+
+A second standalone experiment measures the opportunity with identical verifiers:
+normal trigram lookup in both cases, then either all original candidates or an
+intersection with precomputed boundary eight-gram postings. Both paths use the
+same eight-thread pool, prepared literal finder, `IndexReader::read_file_cached`
+(live metadata validation included), and sorted complete file output. It does
+not call the production executor or API. Source-pack/position-probe fast paths
+are not substituted for one side: both sides use exactly the same verifier.
+
+The fixture is assumed immutable throughout this offline experiment. The filter
+is built from live source bytes before timing and is **not safe to deploy as an
+index**. A production filter must be computed from the same indexed snapshot,
+carried through every update path, and conservatively handle absent evidence.
+Optional existing source packs are reread after tokenization and do not prove
+that their bytes are the exact original indexing input, so deriving exclusion
+filters from them without additional identity checks would be unsafe.
+
+Two warmups then 21 alternating-order samples per variant, warm filesystem and
+source cache. All 126 timed responses and 12 warmups exactly match independent
+ripgrep file sets. No concurrent tests, compilation, or local benchmarks ran.
+Reported times include ordinary trigram lookup, optional filter intersection,
+live metadata/source verification, and final path sorting; oracle comparison is
+outside timing. They exclude source preparation, process startup and transport.
+
+| Literal | Before ms | Filtered ms | Reduction | Selected build ms | Selected encoded bytes |
+|---|---:|---:|---:|---:|---:|
+| `struct file_operations` | 5.228 | 2.781 | 46.8% | 225.8 | 21,632 |
+| `static const` | 29.396 | 27.723 | 5.7% | 677.8 | 108,587 |
+| `const struct` | 43.651 | 38.969 | 10.7% | 986.9 | 153,946 |
+
+The phrase lookup median rose from 0.959 to 1.090 ms; the gain comes from reducing
+verification from 3,787 to 1,240 candidates. This supports investing in precision,
+but is **not** a shipped speedup or a new comparison against Zoekt. Even this
+optimistic prototype has a substantial common trigram-lookup cost.
+
+The builder deliberately indexes only each query's boundary grams, only within
+that query's existing candidate set. Its build times and byte counts are optimistic
+lower bounds, not estimates of a general index. Encoded bytes count eight-byte
+keys, eight-byte posting lengths and delta-varint document IDs; headers, checksums,
+complete dictionaries, generation binding and heap allocation are omitted. A full
+schema/build/memory/delta integration was intentionally not introduced based on
+these limited measurements.
+
+```sh
+cargo clippy --example phrase_filter_lab -- -D warnings
+cargo build --release --example phrase_filter_lab
+FXI_INDEXES=/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-indexer-comparison-4tmf41uv/fxi \
+  target/release/examples/phrase_filter_lab \
+  /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex \
+  'struct file_operations' 'static const' 'const struct' \
+  > docs/performance-phrase-grams/prototype.json
+```
+
+Clippy and the release build passed. [Raw interleaved samples](prototype.json),
+[prototype source](../../examples/phrase_filter_lab.rs).

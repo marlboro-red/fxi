@@ -2,5 +2,14 @@
   "lab_sha256": "77c828df3c9ee7f6d337d68b14bddaadd10a08f444a25aaf262bbb9594ac7586",
   "binary_sha256": "1129f6eb86e1b15eadb8aa5e8c30eb7cd47d18448127d933c059980de7f1119c",
   "fixture_provenance": "../performance-after-audit/NOTES.md",
-  "mode": "offline candidate precision, no timings"
+  "mode": "offline candidate precision, no timings",
+  "prototype": {
+    "source_sha256": "0d0c4e13b9e9d1125ff39e8ff34c70faa3e5f9d2e4d90d4ded8fd4bc9d0d30d3",
+    "binary_sha256": "02fa7e9d8eab1adb6130d2d8b58bdda8d9412196abe905070f5a132cc8a7c80f",
+    "environment": {
+      "FXI_SOURCE_PACK": null,
+      "FXI_SEARCH_PARALLELISM": null
+    },
+    "mode": "offline query-selected filter; matched verifier and exact file-set parity"
+  }
 }
