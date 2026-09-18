@@ -532,3 +532,40 @@ measured `--version` at 2.517 → 2.475 ms and checked empty absence at
 2.774 → 2.760 ms. The sample ranges overlap substantially; 19/31 pairs favored
 the candidate in each case. This does not justify another platform-specific
 linker setting, so the flag was discarded.
+
+
+## Reusing gram validation under complete content evidence
+
+Query-local readers now reuse publication's gram structure/frequency/membership
+validation only when a supported manifest binds the actual metadata, document and
+path bytes, the exact ordered segment list, and each actual checked segment root
+with its dictionary count and posting length. Accessed dictionary/hash pages and
+**complete** posting payloads still require checksums before decoding, including
+early intersections. Missing or mismatched certification retains structural and
+membership validation; strict public opening and certificate issuance retain full
+validation. This is the existing opt-in accidental-corruption model, not
+authentication against coordinated rewriting.
+
+One deferred membership map retains the original generation's immutable documents
+and is shared by its segments, including across memory snapshots. Explicit
+memory/eager/deferred states prevent absent membership from authorizing a disk
+validation bypass. Tokens, line maps and uncertified grams still force membership
+checks. The new tests exercise sparse/stale/tombstoned IDs, actual core mutations,
+incomplete/unsupported proofs, page/payload damage and repeated errors, token and
+line-map membership, strict issuance, mixed legacy segments and memory snapshots.
+
+The full suite passed 980 executions, Clippy and Rust 1.88 checks passed, and both
+release binaries built. With the watch daemon paused and compilation stopped,
+[31 paired searches on identical checked indexes](queries-reuse.json) measured:
+
+| Pattern | Before (ms) | Validation reuse (ms) |
+| --- | ---: | ---: |
+| `auditNonexistentSymbol94283` | 3.232 | 3.243 |
+| `folio_wait_bit_common` | 11.830 | 10.629 |
+| `struct file_operations` | 19.976 | 18.835 |
+| `return.*0` | 95.606 | 95.232 |
+
+Exact result sets matched ripgrep for every sample. Selective search improves
+about 10%; absence and broad search are essentially unchanged. The
+[default strict-mode control](default-reuse.json) shows no material regression
+(29.166 → 29.219 ms absent; 31.298 → 30.866 selective; 115.896 → 115.290 broad).

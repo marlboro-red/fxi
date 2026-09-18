@@ -246,6 +246,35 @@ impl PostingChecks {
         self.validated[index].store(1, Ordering::Release);
         Ok(())
     }
+
+    /// Reuse the publisher's structural/membership validation only after its
+    /// complete generation and this actual root were certified. The dictionary
+    /// and hash page must still be checked before hashing the complete payload.
+    pub(crate) fn validate_certified(
+        &self,
+        index: usize,
+        bytes: &[u8],
+        certificate: &CertifiedSegment,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.pages.is_some() && u64_at(&self.bytes, 8) == certificate.root_hash,
+            "Gram validation certificate root mismatch"
+        );
+        anyhow::ensure!(
+            self.pages.as_ref().unwrap()[index / PAGE_ENTRIES]
+                .validated
+                .load(Ordering::Acquire)
+                != 0,
+            "Gram validation requires a checked dictionary/hash page"
+        );
+        if self.validated[index].load(Ordering::Acquire) != 0 {
+            return Ok(());
+        }
+        let expected = u64_at(&self.bytes, self.hashes_offset + index * 8);
+        anyhow::ensure!(xxh3_64(bytes) == expected, "Gram posting checksum mismatch");
+        self.validated[index].store(1, Ordering::Release);
+        Ok(())
+    }
 }
 
 /// Called only on a fully validated staging segment. Never rewrite inherited
@@ -369,6 +398,78 @@ struct RoutingManifest {
     docs_hash: u64,
     paths_hash: u64,
     segments: Vec<RoutingSegment>,
+}
+
+/// Private construction prevents a payload hash alone from authorizing reuse of
+/// document membership validation. Epoch 1 has always required strict gram
+/// structure, frequency and membership validation before manifest issuance.
+/// A future strengthening of those invariants must use a new validation epoch.
+pub(crate) struct CertifiedGeneration {
+    segments: Vec<RoutingSegment>,
+}
+
+pub(crate) struct CertifiedSegment {
+    root_hash: u64,
+}
+
+impl CertifiedGeneration {
+    /// Optional acceleration: unavailable or mismatched proof uses the existing
+    /// structural validator. Actual gram sidecar failures remain mandatory errors.
+    pub(crate) fn open(
+        index: &Path,
+        metadata: &[u8],
+        documents: &[u8],
+        paths: &[u8],
+        meta: &super::types::IndexMeta,
+    ) -> Option<Self> {
+        (|| -> Result<Self> {
+            let bytes = std::fs::read(index.join(ROUTING_NAME))?;
+            anyhow::ensure!(
+                bytes.len() >= 16 && &bytes[..8] == ROUTING_MAGIC,
+                "Invalid gram certification header"
+            );
+            anyhow::ensure!(
+                u64_at(&bytes, 8) == xxh3_64(&bytes[16..]),
+                "Gram certification checksum mismatch"
+            );
+            let manifest: RoutingManifest = serde_json::from_slice(&bytes[16..])?;
+            anyhow::ensure!(manifest.epoch == 1, "Unsupported gram validation epoch");
+            anyhow::ensure!(
+                manifest.meta_hash == xxh3_64(metadata)
+                    && manifest.docs_hash == xxh3_64(documents)
+                    && manifest.paths_hash == xxh3_64(paths),
+                "Gram certification core content mismatch"
+            );
+            anyhow::ensure!(
+                meta.base_segment
+                    .into_iter()
+                    .chain(meta.delta_segments.iter().copied())
+                    .eq(manifest.segments.iter().map(|segment| segment.id)),
+                "Gram certification segment coverage mismatch"
+            );
+            Ok(Self {
+                segments: manifest.segments,
+            })
+        })()
+        .ok()
+    }
+
+    pub(crate) fn segment(
+        &self,
+        id: super::types::SegmentId,
+        checks: &PostingChecks,
+    ) -> Option<CertifiedSegment> {
+        let segment = self.segments.iter().find(|segment| segment.id == id)?;
+        // PostingChecks::open already checked the actual root bytes and bound
+        // its count/length to the opened dictionary and posting mappings.
+        (checks.is_paged()
+            && segment.root_hash == u64_at(&checks.bytes, 8)
+            && segment.count == checks.validated.len()
+            && segment.posting_len as u64 == u64_at(&checks.bytes, 16))
+        .then_some(CertifiedSegment {
+            root_hash: segment.root_hash,
+        })
+    }
 }
 
 pub(crate) fn routing_segment(

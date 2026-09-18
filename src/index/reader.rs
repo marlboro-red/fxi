@@ -267,6 +267,56 @@ impl TokenIndex {
     }
 }
 
+/// One lazy membership map is shared by every disk segment of a generation.
+/// Retaining the original immutable documents also keeps deferred validation
+/// correct when a newer memory snapshot shares these segment readers.
+struct DeferredMembership {
+    documents: Arc<Vec<Document>>,
+    segments: OnceLock<HashMap<SegmentId, Arc<RoaringBitmap>>>,
+    empty: RoaringBitmap,
+}
+
+impl DeferredMembership {
+    fn new(documents: Arc<Vec<Document>>) -> Self {
+        Self {
+            documents,
+            segments: OnceLock::new(),
+            empty: RoaringBitmap::new(),
+        }
+    }
+
+    fn get(&self, segment: SegmentId) -> &RoaringBitmap {
+        self.segments
+            .get_or_init(|| segment_document_ids(&self.documents))
+            .get(&segment)
+            .map_or(&self.empty, |documents| documents.as_ref())
+    }
+}
+
+enum SegmentMembership {
+    /// Memory segments already contain constructed tokens and line maps. This
+    /// state must never authorize skipping validation of a disk dependency.
+    Memory,
+    Eager(Arc<RoaringBitmap>),
+    Deferred {
+        generation: Arc<DeferredMembership>,
+        segment: SegmentId,
+    },
+}
+
+impl SegmentMembership {
+    fn disk_ids(&self) -> Result<&RoaringBitmap> {
+        match self {
+            Self::Memory => anyhow::bail!("Memory segment cannot load disk membership"),
+            Self::Eager(documents) => Ok(documents),
+            Self::Deferred {
+                generation,
+                segment,
+            } => Ok(generation.get(*segment)),
+        }
+    }
+}
+
 /// Reader for a single segment
 struct SegmentReader {
     source_pack: OnceLock<Option<crate::index::source_pack::SourcePack>>,
@@ -275,9 +325,10 @@ struct SegmentReader {
     trigram_dict: TrigramDict,
     trigram_postings: MappedBytes,
     gram_checks: Option<crate::index::query_local::PostingChecks>,
+    certified_grams: Option<crate::index::query_local::CertifiedSegment>,
     tokens: OnceLock<std::result::Result<TokenIndex, String>>,
     required_positions: bool,
-    allowed_docs: Option<Arc<RoaringBitmap>>,
+    membership: SegmentMembership,
     /// Lazily loaded line maps - only loaded when first accessed
     line_maps: OnceLock<std::result::Result<HashMap<DocId, Vec<u32>>, String>>,
     /// Path to segment directory for lazy loading
@@ -319,8 +370,9 @@ impl SegmentReader {
             segment_id,
             required_positions,
             load_tokens,
-            allowed_docs,
+            SegmentMembership::Eager(allowed_docs),
             false,
+            None,
         )
     }
 
@@ -329,8 +381,9 @@ impl SegmentReader {
         segment_id: SegmentId,
         required_positions: bool,
         load_tokens: bool,
-        allowed_docs: Arc<RoaringBitmap>,
+        membership: SegmentMembership,
         query_local: bool,
+        certification: Option<&crate::index::query_local::CertifiedGeneration>,
     ) -> Result<Self> {
         let started = std::time::Instant::now();
         // Read trigram dictionary (already sorted from BTreeMap write)
@@ -345,11 +398,24 @@ impl SegmentReader {
             trigram_dict.count,
         )?;
         let lazy = query_local && gram_checks.is_some();
+        let certified_grams = if lazy {
+            certification.and_then(|certificate| {
+                certificate.segment(segment_id, gram_checks.as_ref().unwrap())
+            })
+        } else {
+            None
+        };
         let mapped = std::time::Instant::now();
         // Validate every payload before exposing the segment. Large segments
         // use the existing Rayon pool so a single base segment does not serialize
         // validation; small segments avoid scheduling overhead.
-        let validator = crate::utils::encoding::DocumentPostingsValidator::new(&allowed_docs);
+        let validator = if lazy {
+            None
+        } else {
+            Some(crate::utils::encoding::DocumentPostingsValidator::new(
+                membership.disk_ids()?,
+            ))
+        };
         let validate_entry = |index: usize| -> Result<()> {
             let entry = trigram_dict.entry(index);
             anyhow::ensure!(entry.trigram <= 0x00ff_ffff, "Invalid trigram key");
@@ -365,9 +431,17 @@ impl SegmentReader {
                 [entry.offset as usize..entry.offset as usize + entry.length as usize];
             if !lazy {
                 if let Some(checks) = &gram_checks {
-                    checks.validate(entry.index, bytes, entry.doc_freq, &validator)?;
+                    checks.validate(
+                        entry.index,
+                        bytes,
+                        entry.doc_freq,
+                        validator.as_ref().unwrap(),
+                    )?;
                 } else {
-                    validator.validate(bytes, entry.doc_freq)?;
+                    validator
+                        .as_ref()
+                        .unwrap()
+                        .validate(bytes, entry.doc_freq)?;
                 }
             }
             Ok(())
@@ -414,9 +488,10 @@ impl SegmentReader {
             trigram_dict,
             trigram_postings,
             gram_checks: if lazy { gram_checks } else { None },
+            certified_grams,
             tokens: OnceLock::new(),
             required_positions,
-            allowed_docs: Some(allowed_docs),
+            membership,
             line_maps: OnceLock::new(),
             segment_path: segment_path.to_path_buf(),
             bloom_filter,
@@ -526,6 +601,7 @@ impl SegmentReader {
             },
             trigram_postings: MappedBytes::Owned(gram_postings),
             gram_checks: None,
+            certified_grams: None,
             tokens: OnceLock::from(Ok(TokenIndex {
                 dictionary: TokenDict {
                     data: MappedBytes::Owned(token_dictionary),
@@ -537,7 +613,7 @@ impl SegmentReader {
                 positions: Some(MappedBytes::Owned(token_positions)),
             })),
             required_positions: true,
-            allowed_docs: None,
+            membership: SegmentMembership::Memory,
             line_maps: OnceLock::from(Ok(line_maps)),
             // All lazy cells are populated; this path is never opened.
             segment_path: PathBuf::new(),
@@ -548,13 +624,13 @@ impl SegmentReader {
     fn ensure_tokens(&self) -> Result<()> {
         self.tokens
             .get_or_init(|| {
-                TokenIndex::open(
-                    &self.segment_path,
-                    self.required_positions,
-                    self.allowed_docs
-                        .as_deref()
-                        .expect("disk segment document IDs"),
-                )
+                (|| {
+                    TokenIndex::open(
+                        &self.segment_path,
+                        self.required_positions,
+                        self.membership.disk_ids()?,
+                    )
+                })()
                 .map_err(|error| format!("{error:#}"))
             })
             .as_ref()
@@ -637,14 +713,18 @@ impl SegmentReader {
 
     fn validate_gram(&self, entry: &TrigramDictEntry, bytes: &[u8]) -> Result<()> {
         if let Some(checks) = &self.gram_checks {
-            checks.validate(
-                entry.index,
-                bytes,
-                entry.doc_freq,
-                &crate::utils::encoding::DocumentPostingsValidator::new(
-                    self.allowed_docs.as_deref().expect("disk membership"),
-                ),
-            )?;
+            if let Some(certificate) = &self.certified_grams {
+                checks.validate_certified(entry.index, bytes, certificate)?;
+            } else {
+                checks.validate(
+                    entry.index,
+                    bytes,
+                    entry.doc_freq,
+                    &crate::utils::encoding::DocumentPostingsValidator::new(
+                        self.membership.disk_ids()?,
+                    ),
+                )?;
+            }
         }
         Ok(())
     }
@@ -721,10 +801,9 @@ impl SegmentReader {
         let line_maps = self.line_maps.get_or_init(|| {
             (|| -> Result<_> {
                 let maps = read_line_maps(&self.segment_path)?;
+                let allowed = self.membership.disk_ids()?;
                 anyhow::ensure!(
-                    self.allowed_docs
-                        .as_ref()
-                        .is_none_or(|allowed| maps.keys().all(|id| allowed.contains(*id))),
+                    maps.keys().all(|id| allowed.contains(*id)),
                     "Line map references an unknown segment document"
                 );
                 Ok(maps)
@@ -999,6 +1078,14 @@ impl PathTable {
         })
     }
 
+    fn disk_bytes(&self) -> Option<&[u8]> {
+        match self.base.as_ref() {
+            #[cfg(test)]
+            PathStorage::Owned(_) => None,
+            PathStorage::Mapped(paths) => Some(&paths.data),
+        }
+    }
+
     #[inline]
     fn get(&self, index: usize) -> Option<&PathBuf> {
         if index < self.base.len() {
@@ -1064,7 +1151,7 @@ pub struct IndexReader {
     index_path: PathBuf,
     pub meta: IndexMeta,
     /// Documents stored in on-disk order for iteration.
-    documents: Vec<Document>,
+    documents: Arc<Vec<Document>>,
     /// O(1) lookup index: doc_id -> index in documents Vec
     doc_id_to_index: DocumentLookup,
     paths: PathTable,
@@ -1097,10 +1184,11 @@ impl IndexReader {
 
     /// Internal search constructor. Only QueryExecutor should perform
     /// token operations on this reader, using its fallible dependency barrier.
-    /// Documents and gram dictionaries are validated immediately. By default
-    /// all gram payloads are too; FXI_QUERY_LOCAL opts into checked on-demand
-    /// payloads when publication checksums exist. Token data are validated once,
-    /// before a dependent query can use them.
+    /// Documents and gram roots are checked immediately. By default all gram
+    /// payloads are too; FXI_QUERY_LOCAL checks dependent pages and payload bytes
+    /// on demand. A matching generation certificate reuses publication's gram
+    /// structure/membership validation; otherwise that validation runs on access.
+    /// Token and line-map data retain their own lazy validation barriers.
     pub(crate) fn open_for_search(root: &Path) -> Result<Self> {
         Self::open_with_tokens(root, false, crate::index::query_local::requested())
     }
@@ -1140,8 +1228,8 @@ impl IndexReader {
 
         // Read metadata first (needed for segment IDs)
         let meta_path = index_path.join("meta.json");
-        let meta_file = File::open(&meta_path).context("Failed to open meta.json")?;
-        let meta: IndexMeta = serde_json::from_reader(meta_file)?;
+        let metadata = std::fs::read(&meta_path).context("Failed to open meta.json")?;
+        let meta: IndexMeta = serde_json::from_slice(&metadata)?;
         meta.validate_format()?;
         if !query_local {
             crate::index::generation_routing::validate(&index_path)?;
@@ -1158,14 +1246,36 @@ impl IndexReader {
         // Document membership is required to validate segment payloads. Read
         // metadata in parallel, then validate independent segments in parallel.
         let (documents, paths) = rayon::join(
-            || read_documents_version(&index_path, meta.version),
+            || -> Result<_> {
+                let data = MappedBytes::open(&index_path.join("docs.bin"))?;
+                let documents = Arc::new(decode_documents_version(&data, meta.version)?);
+                Ok((documents, data))
+            },
             || PathTable::open(&index_path, query_local),
         );
-        let documents = documents?;
+        let (documents, document_bytes) = documents?;
         let paths = paths?;
         let tables_loaded = std::time::Instant::now();
         validate_document_references(&meta, &documents, paths.len())?;
-        let allowed = segment_document_ids(&documents);
+        let certification = if query_local {
+            paths.disk_bytes().and_then(|path_bytes| {
+                crate::index::query_local::CertifiedGeneration::open(
+                    &index_path,
+                    &metadata,
+                    &document_bytes,
+                    path_bytes,
+                    &meta,
+                )
+            })
+        } else {
+            None
+        };
+        let deferred = query_local.then(|| Arc::new(DeferredMembership::new(documents.clone())));
+        let allowed = if query_local {
+            HashMap::new()
+        } else {
+            segment_document_ids(&documents)
+        };
         let membership_ready = std::time::Instant::now();
         let segments = segment_ids
             .par_iter()
@@ -1176,8 +1286,17 @@ impl IndexReader {
                     seg_id,
                     meta.has_positions,
                     load_tokens && meta.profile == IndexProfile::Full,
-                    allowed.get(&seg_id).cloned().unwrap_or_default(),
+                    match &deferred {
+                        Some(generation) => SegmentMembership::Deferred {
+                            generation: Arc::clone(generation),
+                            segment: seg_id,
+                        },
+                        None => SegmentMembership::Eager(
+                            allowed.get(&seg_id).cloned().unwrap_or_default(),
+                        ),
+                    },
                     query_local,
+                    certification.as_ref(),
                 )
                 .map(Arc::new)
                 .with_context(|| format!("Cannot open segment {seg_id}; rebuild the index"))
@@ -1315,7 +1434,7 @@ impl IndexReader {
         }
         let superseded_path_ids: AHashSet<PathId> =
             replacement_path_ids.values().copied().collect();
-        let mut documents = self.documents.clone();
+        let mut documents = (*self.documents).clone();
         for doc in &mut documents {
             if superseded_path_ids.contains(&doc.path_id)
                 || (!aliased_replacements.is_empty()
@@ -1376,7 +1495,7 @@ impl IndexReader {
             root_path: self.root_path.clone(),
             index_path: self.index_path.clone(),
             meta,
-            documents,
+            documents: Arc::new(documents),
             doc_id_to_index,
             paths,
             segments,
@@ -2114,13 +2233,17 @@ pub fn read_documents(index_path: &Path) -> Result<Vec<Document>> {
 }
 
 fn read_documents_version(index_path: &Path, version: u32) -> Result<Vec<Document>> {
+    let data = MappedBytes::open(&index_path.join("docs.bin"))?;
+    decode_documents_version(&data, version)
+}
+
+fn decode_documents_version(data: &[u8], version: u32) -> Result<Vec<Document>> {
     anyhow::ensure!(
         matches!(version, 1..=3),
         "Unsupported index version; rebuild the index"
     );
-    let data = MappedBytes::open(&index_path.join("docs.bin"))?;
     anyhow::ensure!(data.len() >= 4, "Truncated document header");
-    let count = le32(&data) as usize;
+    let count = le32(data) as usize;
     anyhow::ensure!(
         count <= (data.len() - 4) / 30,
         "Index count exceeds file bounds"
@@ -2518,7 +2641,357 @@ mod tests {
     }
 
     fn open_checked_segment(path: &Path, lazy: bool) -> Result<SegmentReader> {
-        SegmentReader::open_with_policy(path, 1, false, false, Arc::new((1..=4).collect()), lazy)
+        SegmentReader::open_with_policy(
+            path,
+            1,
+            false,
+            false,
+            SegmentMembership::Eager(Arc::new((1..=4).collect())),
+            lazy,
+            None,
+        )
+    }
+
+    fn certified_membership_fixture() -> (TempDir, PathBuf) {
+        let root = TempDir::new().unwrap();
+        let index = crate::utils::get_index_container(root.path()).unwrap();
+        fs::create_dir_all(&index).unwrap();
+        let mut documents: Vec<_> = [1, 3, 7, 11]
+            .into_iter()
+            .enumerate()
+            .map(|(path, doc_id)| Document {
+                doc_id,
+                path_id: path as u32,
+                size: 10,
+                mtime: 1,
+                language: Language::Rust,
+                flags: DocFlags::new(),
+                segment_id: if path < 2 { 1 } else { 2 },
+            })
+            .collect();
+        documents[0].flags.set_tombstone();
+        documents[3].flags.0 |= DocFlags::STALE;
+        let paths: Vec<PathBuf> = ["a.rs", "b.rs", "c.rs", "d.rs"]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        for path in &paths {
+            fs::write(root.path().join(path), "alpha beta\n").unwrap();
+        }
+        super::super::writer::write_documents_atomic(&index, &documents).unwrap();
+        super::super::writer::write_paths_atomic(&index, &paths).unwrap();
+        let meta = IndexMeta {
+            root_path: root.path().to_path_buf(),
+            base_segment: Some(1),
+            delta_segments: vec![2],
+            segment_count: 2,
+            doc_count: 4,
+            valid_doc_count: 2,
+            ..IndexMeta::default()
+        };
+        super::super::writer::write_meta_atomic(&index, &meta).unwrap();
+        for (id, docs) in [(1, vec![1, 3]), (2, vec![7, 11])] {
+            let segment = index.join("segments").join(format!("seg_{id:04}"));
+            fs::create_dir_all(&segment).unwrap();
+            let postings = BTreeMap::from([(1, docs.clone()), (id + 1, vec![docs[1]])]);
+            super::super::segment_io::write_trigram_index(&segment, &postings, None).unwrap();
+            super::super::segment_io::write_token_index(
+                &segment,
+                &BTreeMap::from([("shared".into(), docs.clone())]),
+                None,
+            )
+            .unwrap();
+            super::super::segment_io::write_line_maps(
+                &segment,
+                &docs.iter().map(|&id| (id, vec![0])).collect(),
+            )
+            .unwrap();
+            let mut bloom = BloomFilter::new(postings.len(), 0.01);
+            for &gram in postings.keys() {
+                bloom.insert(gram);
+            }
+            super::super::segment_io::write_bloom_file(&segment, &bloom).unwrap();
+        }
+        write_query_local_checks(&index).unwrap();
+        (root, index)
+    }
+
+    fn deferred_membership(reader: &IndexReader) -> &Arc<DeferredMembership> {
+        let SegmentMembership::Deferred { generation, .. } = &reader.segments[0].membership else {
+            panic!("search reader must retain deferred membership")
+        };
+        generation
+    }
+
+    fn rewrite_gram_certificate(index: &Path, change: impl FnOnce(&mut serde_json::Value)) {
+        let path = index.join("query-routing.bin");
+        let bytes = fs::read(&path).unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_slice(&bytes[16..]).unwrap();
+        change(&mut manifest);
+        let payload = serde_json::to_vec(&manifest).unwrap();
+        let mut changed = bytes[..8].to_vec();
+        changed.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(&payload).to_le_bytes());
+        changed.extend_from_slice(&payload);
+        fs::write(path, changed).unwrap();
+    }
+
+    #[test]
+    fn certified_grams_reuse_membership_but_preserve_sparse_tombstoned_ids() {
+        let (root, _index) = certified_membership_fixture();
+        let reader = IndexReader::open_with_tokens(root.path(), false, true).unwrap();
+        let membership = deferred_membership(&reader);
+        assert!(membership.segments.get().is_none());
+        for segment in &reader.segments {
+            assert!(segment.certified_grams.is_some());
+            let SegmentMembership::Deferred { generation, .. } = &segment.membership else {
+                panic!("deferred segment expected")
+            };
+            assert!(Arc::ptr_eq(membership, generation));
+        }
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    assert_eq!(
+                        reader.get_trigram_docs(1).unwrap(),
+                        [1, 3, 7, 11].into_iter().collect()
+                    );
+                });
+            }
+        });
+        assert_eq!(*reader.valid_doc_ids(), [3, 7].into_iter().collect());
+        assert!(membership.segments.get().is_none());
+        assert_eq!(reader.get_line_map(3).unwrap(), Some(&vec![0]));
+        let allowed = membership.segments.get().unwrap();
+        assert_eq!(*allowed[&1], [1, 3].into_iter().collect());
+        assert_eq!(*allowed[&2], [7, 11].into_iter().collect());
+        drop(reader);
+        crate::utils::remove_index(root.path()).unwrap();
+    }
+
+    #[test]
+    fn certified_grams_require_actual_core_bytes_and_supported_complete_proof() {
+        let (root, index) = certified_membership_fixture();
+        for name in ["meta.json", "docs.bin", "paths.bin", "query-routing.bin"] {
+            let path = index.join(name);
+            let original = fs::read(&path).unwrap();
+            let mut changed = original.clone();
+            match name {
+                "meta.json" => changed.push(b' '),
+                "docs.bin" => changed[4 + 16] ^= 1, // Structurally valid mtime change.
+                "paths.bin" => changed[8] = b'z',   // Structurally safe path change.
+                _ => changed[8] ^= 1,
+            }
+            fs::write(&path, changed).unwrap();
+            let reader = IndexReader::open_with_tokens(root.path(), false, true).unwrap();
+            assert!(
+                reader
+                    .segments
+                    .iter()
+                    .all(|segment| segment.certified_grams.is_none()),
+                "{name}"
+            );
+            assert_eq!(reader.get_trigram_docs(1).unwrap().len(), 4);
+            assert!(deferred_membership(&reader).segments.get().is_some());
+            drop(reader);
+            fs::write(path, original).unwrap();
+        }
+        let path = index.join("query-routing.bin");
+        let original = fs::read(&path).unwrap();
+        for kind in ["epoch", "id", "count", "posting_len", "root_hash"] {
+            rewrite_gram_certificate(&index, |manifest| {
+                if kind == "epoch" {
+                    manifest["epoch"] = 99.into();
+                } else {
+                    let field = &mut manifest["segments"][0][kind];
+                    *field = (field.as_u64().unwrap().wrapping_add(1)).into();
+                }
+            });
+            let reader = IndexReader::open_with_tokens(root.path(), false, true).unwrap();
+            assert!(reader.segments[0].certified_grams.is_none(), "{kind}");
+            assert_eq!(reader.get_trigram_docs(1).unwrap().len(), 4);
+            assert!(deferred_membership(&reader).segments.get().is_some());
+            drop(reader);
+            fs::write(&path, &original).unwrap();
+        }
+        fs::remove_file(path).unwrap();
+        let reader = IndexReader::open_with_tokens(root.path(), false, true).unwrap();
+        assert!(
+            reader
+                .segments
+                .iter()
+                .all(|segment| segment.certified_grams.is_none())
+        );
+        assert_eq!(reader.get_trigram_docs(1).unwrap().len(), 4);
+        drop(reader);
+        crate::utils::remove_index(root.path()).unwrap();
+    }
+
+    #[test]
+    fn certified_grams_never_hide_changed_document_membership() {
+        let (root, index) = certified_membership_fixture();
+        let path = index.join("docs.bin");
+        let original = fs::read(&path).unwrap();
+        for mutation in ["unknown_id", "wrong_segment", "duplicate_id"] {
+            let mut changed = original.clone();
+            match mutation {
+                "unknown_id" => changed[4..8].copy_from_slice(&2u32.to_le_bytes()),
+                "wrong_segment" => changed[4 + 28..4 + 30].copy_from_slice(&2u16.to_le_bytes()),
+                _ => changed[4..8].copy_from_slice(&3u32.to_le_bytes()),
+            }
+            fs::write(&path, changed).unwrap();
+            match IndexReader::open_with_tokens(root.path(), false, true) {
+                Ok(reader) => {
+                    assert!(reader.segments[0].certified_grams.is_none());
+                    assert!(reader.get_trigram_docs(1).is_err(), "{mutation}");
+                    assert!(reader.get_trigram_docs(1).is_err(), "repeated {mutation}");
+                }
+                Err(_) => assert_eq!(mutation, "duplicate_id"),
+            }
+            fs::write(&path, &original).unwrap();
+        }
+        crate::utils::remove_index(root.path()).unwrap();
+    }
+
+    #[test]
+    fn certified_grams_check_pages_and_entire_payloads_before_early_intersection() {
+        let (root, index) = certified_membership_fixture();
+        let segment_path = index.join("segments/seg_0001");
+        for (name, at) in [
+            ("grams.dict", 20),
+            ("grams.dict", 8),
+            ("grams.postings", 1),
+            ("grams.checks", 56),
+        ] {
+            let path = segment_path.join(name);
+            let original = fs::read(&path).unwrap();
+            let mut changed = original.clone();
+            changed[at] ^= 1;
+            fs::write(&path, changed).unwrap();
+            let reader = IndexReader::open_with_tokens(root.path(), false, true).unwrap();
+            assert!(reader.segments[0].certified_grams.is_some());
+            for _ in 0..2 {
+                assert!(
+                    reader.segments[0]
+                        .get_trigram_docs_intersect(1, &[1].into_iter().collect())
+                        .is_err(),
+                    "{name}@{at}"
+                );
+            }
+            assert!(deferred_membership(&reader).segments.get().is_none());
+            drop(reader);
+            assert!(IndexReader::open(root.path()).is_err());
+            fs::write(path, original).unwrap();
+        }
+        for name in ["grams.checks", "grams.postings"] {
+            let path = segment_path.join(name);
+            let original = fs::read(&path).unwrap();
+            let mut changed = original.clone();
+            if name == "grams.checks" {
+                changed[32] ^= 1;
+            } else {
+                changed.push(0);
+            }
+            fs::write(&path, changed).unwrap();
+            assert!(IndexReader::open_with_tokens(root.path(), false, true).is_err());
+            fs::write(path, original).unwrap();
+        }
+        crate::utils::remove_index(root.path()).unwrap();
+    }
+
+    #[test]
+    fn certified_grams_do_not_certify_tokens_or_line_maps() {
+        let (root, index) = certified_membership_fixture();
+        let segment = index.join("segments/seg_0001");
+        super::super::segment_io::write_token_index(
+            &segment,
+            &BTreeMap::from([("shared".into(), vec![99])]),
+            None,
+        )
+        .unwrap();
+        super::super::segment_io::write_line_maps(&segment, &HashMap::from([(99, vec![0])]))
+            .unwrap();
+        let reader = IndexReader::open_with_tokens(root.path(), false, true).unwrap();
+        assert_eq!(reader.get_trigram_docs(1).unwrap().len(), 4);
+        assert!(deferred_membership(&reader).segments.get().is_none());
+        assert!(reader.ensure_tokens().is_err());
+        assert!(reader.ensure_tokens().is_err());
+        assert!(reader.get_line_map(99).is_err());
+        assert!(reader.get_line_map(99).is_err());
+        assert!(deferred_membership(&reader).segments.get().is_some());
+        drop(reader);
+        crate::utils::remove_index(root.path()).unwrap();
+    }
+
+    #[test]
+    fn certified_grams_fall_back_to_structure_and_issuer_never_reuses_certification() {
+        let (root, index) = certified_membership_fixture();
+        let segment = index.join("segments/seg_0001");
+        let mut payload = fs::read(segment.join("grams.postings")).unwrap();
+        payload[0] = 0; // Illegal zero document ID, but give it a matching payload hash.
+        fs::write(segment.join("grams.postings"), &payload).unwrap();
+        fs::remove_file(segment.join("grams.checks")).unwrap();
+        let dictionary = fs::read(segment.join("grams.dict")).unwrap();
+        // Deliberately fabricate checksum-valid malformed evidence to test the
+        // fallback and strict issuer; ordinary callers cannot skip issuance checks.
+        crate::index::query_local::write(&segment, &dictionary, &payload).unwrap();
+        let reader = IndexReader::open_with_tokens(root.path(), false, true).unwrap();
+        assert!(reader.segments[0].certified_grams.is_none());
+        assert!(reader.get_trigram_docs(1).is_err());
+        assert!(reader.get_trigram_docs(1).is_err());
+        drop(reader);
+        let root_hash = le64(&fs::read(segment.join("grams.checks")).unwrap()[8..]);
+        rewrite_gram_certificate(&index, |manifest| {
+            manifest["segments"][0]["root_hash"] = root_hash.into()
+        });
+        assert!(
+            write_query_local_checks(&index).is_err(),
+            "issuer must perform full validation even with a matching certificate"
+        );
+        assert!(IndexReader::open(root.path()).is_err());
+        crate::utils::remove_index(root.path()).unwrap();
+    }
+
+    #[test]
+    fn certified_grams_retain_generation_membership_across_memory_snapshots() {
+        let (root, _index) = certified_membership_fixture();
+        let base = IndexReader::open_with_tokens(root.path(), false, true).unwrap();
+        let memory = base
+            .with_memory_delta(vec![], &[PathBuf::from("b.rs")])
+            .unwrap();
+        assert_eq!(*base.valid_doc_ids(), [3, 7].into_iter().collect());
+        assert_eq!(*memory.valid_doc_ids(), [7].into_iter().collect());
+        assert!(Arc::ptr_eq(
+            deferred_membership(&base),
+            deferred_membership(&memory)
+        ));
+        assert!(deferred_membership(&base).segments.get().is_none());
+        drop(base);
+        assert_eq!(memory.get_trigram_docs(1).unwrap().len(), 4);
+        assert!(deferred_membership(&memory).segments.get().is_none());
+        assert_eq!(memory.get_token_docs("shared").unwrap().len(), 4);
+        assert!(deferred_membership(&memory).segments.get().is_some());
+        drop(memory);
+        crate::utils::remove_index(root.path()).unwrap();
+    }
+
+    #[test]
+    fn certified_grams_keep_mixed_legacy_segments_and_strict_readers_checked() {
+        let (root, index) = certified_membership_fixture();
+        fs::remove_file(index.join("segments/seg_0002/grams.checks")).unwrap();
+        let reader = IndexReader::open_with_tokens(root.path(), false, true).unwrap();
+        assert!(reader.segments[0].certified_grams.is_some());
+        assert!(reader.segments[1].certified_grams.is_none());
+        assert!(deferred_membership(&reader).segments.get().is_some());
+        assert_eq!(reader.get_trigram_docs(1).unwrap().len(), 4);
+        drop(reader);
+        let strict = IndexReader::open(root.path()).unwrap();
+        assert!(strict.segments.iter().all(|segment| {
+            segment.certified_grams.is_none()
+                && matches!(segment.membership, SegmentMembership::Eager(_))
+        }));
+        assert_eq!(strict.get_trigram_docs(1).unwrap().len(), 4);
+        drop(strict);
+        crate::utils::remove_index(root.path()).unwrap();
     }
 
     #[test]
@@ -3325,7 +3798,8 @@ mod tests {
     fn noncacheable_files_do_not_consume_scan_admission_budget() {
         let (_temp_dir, root) = create_test_index();
         let mut reader = IndexReader::open(&root).unwrap();
-        reader.documents[0].size = (FILE_CACHE_SHARDS * FILE_CACHE_SHARD_BYTES + 1) as u64;
+        Arc::make_mut(&mut reader.documents)[0].size =
+            (FILE_CACHE_SHARDS * FILE_CACHE_SHARD_BYTES + 1) as u64;
         assert!(reader.should_cache_scan(reader.valid_doc_ids()));
     }
 
@@ -4017,15 +4491,16 @@ mod memory_delta_tests {
         reader.prepare_watched_paths();
 
         for ids in [[1, 2, 3], [1, 5, 9], [9, 1, 5]] {
-            reader.documents = ids
-                .iter()
-                .map(|&doc_id| Document {
-                    doc_id,
-                    size: u64::from(doc_id) + 10,
-                    mtime: u64::from(doc_id) + 100,
-                    ..template.clone()
-                })
-                .collect();
+            reader.documents = Arc::new(
+                ids.iter()
+                    .map(|&doc_id| Document {
+                        doc_id,
+                        size: u64::from(doc_id) + 10,
+                        mtime: u64::from(doc_id) + 100,
+                        ..template.clone()
+                    })
+                    .collect(),
+            );
             reader.doc_id_to_index = DocumentLookup::new(&reader.documents);
             let mut newest_first = ids;
             newest_first.sort_unstable_by(|left, right| right.cmp(left));
@@ -4047,8 +4522,7 @@ mod memory_delta_tests {
                     "rows {ids:?}"
                 );
                 if let Some(id) = expected {
-                    reader
-                        .documents
+                    Arc::make_mut(&mut reader.documents)
                         .iter_mut()
                         .find(|doc| doc.doc_id == id)
                         .unwrap()
@@ -4077,7 +4551,7 @@ mod memory_delta_tests {
         let mut newest = first.clone();
         newest.doc_id = 2;
         newest.path_id = 0;
-        base.documents = vec![first, newest];
+        base.documents = Arc::new(vec![first, newest]);
         base.doc_id_to_index = DocumentLookup::new(&base.documents);
         base.meta.doc_count = 2;
         base.meta.valid_doc_count = 2;
@@ -4092,14 +4566,14 @@ mod memory_delta_tests {
                 .doc_id,
             2
         );
-        base.documents[1].flags.set_tombstone();
+        Arc::make_mut(&mut base.documents)[1].flags.set_tombstone();
         assert_eq!(
             base.document_for_path(Path::new("nested/./same.rs"))
                 .unwrap()
                 .doc_id,
             1
         );
-        base.documents[1].flags = DocFlags::new();
+        Arc::make_mut(&mut base.documents)[1].flags = DocFlags::new();
         let memory = base
             .with_memory_delta(vec![processed(&root, "nested/same.rs")], &[])
             .unwrap();
@@ -4172,9 +4646,9 @@ mod memory_delta_tests {
         let mut invalid = good.clone();
         invalid.flags.set_tombstone();
         assert!(base.with_memory_delta(vec![invalid], &[]).is_err());
-        base.documents[0].doc_id = u32::MAX;
+        Arc::make_mut(&mut base.documents)[0].doc_id = u32::MAX;
         assert!(base.with_memory_delta(vec![good.clone()], &[]).is_err());
-        base.documents[0].doc_id = 1;
+        Arc::make_mut(&mut base.documents)[0].doc_id = 1;
         Arc::get_mut(&mut base.segments[0]).unwrap().segment_id = u16::MAX;
         assert!(base.with_memory_delta(vec![good], &[]).is_err());
         assert_eq!(crate::utils::get_index_dir(&root).unwrap(), generation);
