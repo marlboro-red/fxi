@@ -28,9 +28,10 @@ issuing this proof. Readers hash the actual root and loaded filter, without file
 stamps; absent, damaged or mismatched proof disables Bloom pruning and falls back
 to checked pages. This adds 32 bytes per segment and retains safe fallback for
 legacy filters. Each
-accessed page and posting is checksummed; postings are fully validated for count,
-ordering and document membership before decoding, including before an intersection
-can stop decoding early. Successful checks are cached within that immutable
+accessed page and complete posting is checksummed before decoding, including
+before an intersection can stop early. Count, ordering and document membership
+are validated on access unless the complete content-bound generation certificate
+authorizes reuse of publication's validation, as described below. Successful checks are cached within that immutable
 reader using one byte per posting plus small page state; failures remain errors.
 Missing sidecars use the legacy eager path; malformed roots fail at open and
 malformed dependent pages fail on use. Public eager opening and compaction
@@ -39,13 +40,14 @@ validate every page and posting, including checksums when evidence exists.
 An unrelated damaged posting need not fail a query that does not depend on it.
 `fxi stats PATH` uses the eager reader and checks all gram postings and full-profile
 token evidence; it is not a source-to-index completeness audit or a check of every
-lazy optional artifact. Invalid evidence never becomes an empty result. Setting
-both experimental flags disables timestamp-based `FXI_NEGATIVE_ROUTING` preflight,
-so that it cannot bypass the checked reader.
+lazy optional artifact. Invalid evidence never becomes an empty result. Enabling `FXI_QUERY_LOCAL`
+disables timestamp-based `FXI_NEGATIVE_ROUTING` preflight, so that it cannot bypass
+the checked reader.
 
 Checksums detect accidental damage relative to publication bytes; they do not
-provide authentication against coordinated rewriting. Ordinary reader document/path/metadata validation retains its existing structural
-policy. The checked absence preflight described below additionally binds the
+provide authentication against coordinated rewriting. Document/metadata validation
+retains its structural policy; matching path-content evidence may reuse publication's
+path validation on supported platforms, as described below. The checked absence preflight described below additionally binds the
 actual metadata, document and path bytes to publication hashes. Immutable published files
 remain a reader-lifetime requirement. This experiment does not claim to discover
 unindexed source changes.
@@ -569,3 +571,46 @@ Exact result sets matched ripgrep for every sample. Selective search improves
 about 10%; absence and broad search are essentially unchanged. The
 [default strict-mode control](default-reuse.json) shows no material regression
 (29.166 → 29.219 ms absent; 31.298 → 30.866 selective; 115.896 → 115.290 broad).
+
+
+## Sparse radix routing construction
+
+The routing publisher now uses a sparse three-level radix directory over the
+24-bit gram universe. Twelve high bits select a branch, then two groups of six
+bits select a leaf and mask row. Only populated branches/leaves allocate storage.
+This replaces a hash-table lookup per segment occurrence and the final key sort;
+the serialized routing format and reader are unchanged. This is a conventional
+radix technique applied to the workload, not a claim of a new indexing algorithm.
+
+Independent reference tests compare complete masks across 129 segments, sparse
+high/low keys, radix boundaries and mask-word boundaries. Existing corruption,
+empty-generation, ordering and absence tests remain in place. Ten focused tests,
+Clippy and Rust 1.88 checks passed before timing.
+
+On the privately copied Linux corpus, [seven paired one-file updates](publication-radix.json)
+measured **481.76 → 447.37 ms**. Six of seven pairs favored radix; every run
+verified new and existing results against source scans. The
+[small synthetic controls](publication-radix-small.json) are essentially unchanged:
+36.93 → 37.74 ms with one inherited segment, 248.84 → 250.27 ms with 64, and
+908.08 → 910.46 ms with 256 (five pairs each).
+
+The [first three paired full-profile packed builds](builds-radix.json) were slower:
+5.636 → 6.032 s. That unresolved regression prompted
+[seven additional pairs](builds-radix-confirm.json), which measured 5.557 → 5.547 s;
+both versions had slower outliers. These samples do not support a full-build
+speedup or a sustained slowdown. Median peak RSS in the follow-up was
+302.25 → 310.11 MiB, so this is not a demonstrated memory win. Both versions
+produced the same component sizes; total bytes differ only with variable-length
+metadata. The full profile here includes token positions and occupies about
+1.353 GB, unlike the earlier lean checked indexes.
+
+To isolate the remaining router cost, the publication harness also compared
+[routing disabled versus enabled in the same radix binary](publication-routing-overhead.json),
+with query-local validation enabled in both: **403.14 → 419.72 ms (+4.1%)**,
+seven pairs. The whole summary still rebuilds for one added file. This is a more
+direct current measurement than subtracting medians from different campaigns;
+the earlier +14.2% result is retained above as historical evidence.
+
+All these timing campaigns paused/resumed the existing watch daemon and ran
+without compilation. The build harness now records generation routing separately
+for both variants.

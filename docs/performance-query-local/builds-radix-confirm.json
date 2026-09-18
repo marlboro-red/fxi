@@ -1,0 +1,526 @@
+{
+  "corpus": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "corpus_manifest": {
+    "files": 65284,
+    "source_bytes": 1311592608,
+    "sha256": "adb3052a8f1cd3f0d7b49c7dff2cc5ad36b831da7a4c238c2f899db85ae57854"
+  },
+  "runtime": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-g0k3vyjv",
+  "source_pack": "1",
+  "candidate_query_local": true,
+  "baseline_query_local": true,
+  "candidate_generation_routing": true,
+  "baseline_generation_routing": true,
+  "mode": "full builds, warm filesystem; oracle checks outside timing",
+  "harness_sha256": "98c9bce4ef50f7f8866fecadff7018cc0468e5204c544f1b4404d6ba5b969992",
+  "retained_indexes": {
+    "before": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-g0k3vyjv/6-before",
+    "after": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-g0k3vyjv/6-after"
+  },
+  "oracle_file_counts": {
+    "auditNonexistentSymbol94283": 0,
+    "folio_wait_bit_common": 1,
+    "struct file_operations": 1240,
+    "return": 44258
+  },
+  "binaries": {
+    "before": {
+      "path": "/private/tmp/fxi-reuse-before-builder/fxi",
+      "sha256": "87dbfcbbe2f7d5985616dded7dae512da3fa056dccc5522e5bad2cd95360af4b"
+    },
+    "after": {
+      "path": "/private/tmp/fxi-radix-before-bloom/fxi",
+      "sha256": "13efd787071aea24df7a9d5047c86b7d4f257d855ff4eed3d102c8484b3d878e"
+    }
+  },
+  "tools": {
+    "before": {
+      "samples": [
+        {
+          "seconds": 5.757931833,
+          "peak_rss_bytes": 313884672,
+          "index_bytes": 1353108775,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "query-routing.bin": 3852,
+            "generation-routing.bin": 3888454,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 690,
+            "docs.bin": 1958524,
+            "grams.checks": 33936592,
+            "grams.postings": 134770424,
+            "source.table": 7312600,
+            "grams.dict": 84343552,
+            "grams.bloom-check": 1056,
+            "linemap.bin": 37307976,
+            "source.data": 705328641,
+            "tokens.positions": 258514066,
+            "tokens.dict": 53595984,
+            "bloom.bin": 5053475,
+            "tokens.postings": 24504072
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-reuse-before-builder/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force"
+          ]
+        },
+        {
+          "seconds": 7.034097083,
+          "peak_rss_bytes": 316932096,
+          "index_bytes": 1353108774,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "query-routing.bin": 3851,
+            "generation-routing.bin": 3888454,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 690,
+            "docs.bin": 1958524,
+            "grams.checks": 33936592,
+            "grams.postings": 134770424,
+            "source.table": 7312600,
+            "grams.dict": 84343552,
+            "grams.bloom-check": 1056,
+            "linemap.bin": 37307976,
+            "source.data": 705328641,
+            "tokens.positions": 258514066,
+            "tokens.dict": 53595984,
+            "bloom.bin": 5053475,
+            "tokens.postings": 24504072
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-reuse-before-builder/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force"
+          ]
+        },
+        {
+          "seconds": 5.764817125,
+          "peak_rss_bytes": 327303168,
+          "index_bytes": 1353108775,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "query-routing.bin": 3852,
+            "generation-routing.bin": 3888454,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 690,
+            "docs.bin": 1958524,
+            "grams.checks": 33936592,
+            "grams.postings": 134770424,
+            "source.table": 7312600,
+            "grams.dict": 84343552,
+            "grams.bloom-check": 1056,
+            "linemap.bin": 37307976,
+            "source.data": 705328641,
+            "tokens.positions": 258514066,
+            "tokens.dict": 53595984,
+            "bloom.bin": 5053475,
+            "tokens.postings": 24504072
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-reuse-before-builder/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force"
+          ]
+        },
+        {
+          "seconds": 5.515798542,
+          "peak_rss_bytes": 330743808,
+          "index_bytes": 1353108775,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "query-routing.bin": 3852,
+            "generation-routing.bin": 3888454,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 690,
+            "docs.bin": 1958524,
+            "grams.checks": 33936592,
+            "grams.postings": 134770424,
+            "source.table": 7312600,
+            "grams.dict": 84343552,
+            "grams.bloom-check": 1056,
+            "linemap.bin": 37307976,
+            "source.data": 705328641,
+            "tokens.positions": 258514066,
+            "tokens.dict": 53595984,
+            "bloom.bin": 5053475,
+            "tokens.postings": 24504072
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-reuse-before-builder/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force"
+          ]
+        },
+        {
+          "seconds": 5.529492833,
+          "peak_rss_bytes": 317931520,
+          "index_bytes": 1353108774,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "query-routing.bin": 3851,
+            "generation-routing.bin": 3888454,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 690,
+            "docs.bin": 1958524,
+            "grams.checks": 33936592,
+            "grams.postings": 134770424,
+            "source.table": 7312600,
+            "grams.dict": 84343552,
+            "grams.bloom-check": 1056,
+            "linemap.bin": 37307976,
+            "source.data": 705328641,
+            "tokens.positions": 258514066,
+            "tokens.dict": 53595984,
+            "bloom.bin": 5053475,
+            "tokens.postings": 24504072
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-reuse-before-builder/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force"
+          ]
+        },
+        {
+          "seconds": 5.556647958,
+          "peak_rss_bytes": 310165504,
+          "index_bytes": 1353108774,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "query-routing.bin": 3851,
+            "generation-routing.bin": 3888454,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 690,
+            "docs.bin": 1958524,
+            "grams.checks": 33936592,
+            "grams.postings": 134770424,
+            "source.table": 7312600,
+            "grams.dict": 84343552,
+            "grams.bloom-check": 1056,
+            "linemap.bin": 37307976,
+            "source.data": 705328641,
+            "tokens.positions": 258514066,
+            "tokens.dict": 53595984,
+            "bloom.bin": 5053475,
+            "tokens.postings": 24504072
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-reuse-before-builder/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force"
+          ]
+        },
+        {
+          "seconds": 5.541974208,
+          "peak_rss_bytes": 309723136,
+          "index_bytes": 1353108774,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "query-routing.bin": 3851,
+            "generation-routing.bin": 3888454,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 690,
+            "docs.bin": 1958524,
+            "grams.checks": 33936592,
+            "grams.postings": 134770424,
+            "source.table": 7312600,
+            "grams.dict": 84343552,
+            "grams.bloom-check": 1056,
+            "linemap.bin": 37307976,
+            "source.data": 705328641,
+            "tokens.positions": 258514066,
+            "tokens.dict": 53595984,
+            "bloom.bin": 5053475,
+            "tokens.postings": 24504072
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-reuse-before-builder/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force"
+          ]
+        }
+      ],
+      "median_seconds": 5.556647958,
+      "median_peak_rss_bytes": 316932096
+    },
+    "after": {
+      "samples": [
+        {
+          "seconds": 5.902508792,
+          "peak_rss_bytes": 327598080,
+          "index_bytes": 1353108775,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "query-routing.bin": 3852,
+            "generation-routing.bin": 3888454,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 690,
+            "docs.bin": 1958524,
+            "grams.checks": 33936592,
+            "grams.postings": 134770424,
+            "source.table": 7312600,
+            "grams.dict": 84343552,
+            "grams.bloom-check": 1056,
+            "linemap.bin": 37307976,
+            "source.data": 705328641,
+            "tokens.positions": 258514066,
+            "tokens.dict": 53595984,
+            "bloom.bin": 5053475,
+            "tokens.postings": 24504072
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-radix-before-bloom/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force"
+          ]
+        },
+        {
+          "seconds": 6.163889042,
+          "peak_rss_bytes": 324976640,
+          "index_bytes": 1353108774,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "query-routing.bin": 3851,
+            "generation-routing.bin": 3888454,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 690,
+            "docs.bin": 1958524,
+            "grams.checks": 33936592,
+            "grams.postings": 134770424,
+            "source.table": 7312600,
+            "grams.dict": 84343552,
+            "grams.bloom-check": 1056,
+            "linemap.bin": 37307976,
+            "source.data": 705328641,
+            "tokens.positions": 258514066,
+            "tokens.dict": 53595984,
+            "bloom.bin": 5053475,
+            "tokens.postings": 24504072
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-radix-before-bloom/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force"
+          ]
+        },
+        {
+          "seconds": 5.58342575,
+          "peak_rss_bytes": 328531968,
+          "index_bytes": 1353108774,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "query-routing.bin": 3851,
+            "generation-routing.bin": 3888454,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 690,
+            "docs.bin": 1958524,
+            "grams.checks": 33936592,
+            "grams.postings": 134770424,
+            "source.table": 7312600,
+            "grams.dict": 84343552,
+            "grams.bloom-check": 1056,
+            "linemap.bin": 37307976,
+            "source.data": 705328641,
+            "tokens.positions": 258514066,
+            "tokens.dict": 53595984,
+            "bloom.bin": 5053475,
+            "tokens.postings": 24504072
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-radix-before-bloom/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force"
+          ]
+        },
+        {
+          "seconds": 5.547195583,
+          "peak_rss_bytes": 316620800,
+          "index_bytes": 1353108775,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "query-routing.bin": 3852,
+            "generation-routing.bin": 3888454,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 690,
+            "docs.bin": 1958524,
+            "grams.checks": 33936592,
+            "grams.postings": 134770424,
+            "source.table": 7312600,
+            "grams.dict": 84343552,
+            "grams.bloom-check": 1056,
+            "linemap.bin": 37307976,
+            "source.data": 705328641,
+            "tokens.positions": 258514066,
+            "tokens.dict": 53595984,
+            "bloom.bin": 5053475,
+            "tokens.postings": 24504072
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-radix-before-bloom/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force"
+          ]
+        },
+        {
+          "seconds": 5.541954167,
+          "peak_rss_bytes": 330235904,
+          "index_bytes": 1353108774,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "query-routing.bin": 3851,
+            "generation-routing.bin": 3888454,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 690,
+            "docs.bin": 1958524,
+            "grams.checks": 33936592,
+            "grams.postings": 134770424,
+            "source.table": 7312600,
+            "grams.dict": 84343552,
+            "grams.bloom-check": 1056,
+            "linemap.bin": 37307976,
+            "source.data": 705328641,
+            "tokens.positions": 258514066,
+            "tokens.dict": 53595984,
+            "bloom.bin": 5053475,
+            "tokens.postings": 24504072
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-radix-before-bloom/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force"
+          ]
+        },
+        {
+          "seconds": 5.534767,
+          "peak_rss_bytes": 325074944,
+          "index_bytes": 1353108775,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "query-routing.bin": 3852,
+            "generation-routing.bin": 3888454,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 690,
+            "docs.bin": 1958524,
+            "grams.checks": 33936592,
+            "grams.postings": 134770424,
+            "source.table": 7312600,
+            "grams.dict": 84343552,
+            "grams.bloom-check": 1056,
+            "linemap.bin": 37307976,
+            "source.data": 705328641,
+            "tokens.positions": 258514066,
+            "tokens.dict": 53595984,
+            "bloom.bin": 5053475,
+            "tokens.postings": 24504072
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-radix-before-bloom/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force"
+          ]
+        },
+        {
+          "seconds": 5.544876625,
+          "peak_rss_bytes": 325173248,
+          "index_bytes": 1353108774,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "query-routing.bin": 3851,
+            "generation-routing.bin": 3888454,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 690,
+            "docs.bin": 1958524,
+            "grams.checks": 33936592,
+            "grams.postings": 134770424,
+            "source.table": 7312600,
+            "grams.dict": 84343552,
+            "grams.bloom-check": 1056,
+            "linemap.bin": 37307976,
+            "source.data": 705328641,
+            "tokens.positions": 258514066,
+            "tokens.dict": 53595984,
+            "bloom.bin": 5053475,
+            "tokens.postings": 24504072
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-radix-before-bloom/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force"
+          ]
+        }
+      ],
+      "median_seconds": 5.547195583,
+      "median_peak_rss_bytes": 325173248
+    }
+  }
+}

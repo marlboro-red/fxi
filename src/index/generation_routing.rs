@@ -11,7 +11,7 @@
 
 use super::reader::MappedBytes;
 use super::types::{IndexMeta, SegmentId};
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashSet;
 use anyhow::{Context, Result, ensure};
 use std::path::Path;
 use xxhash_rust::xxh3::xxh3_64;
@@ -37,6 +37,77 @@ pub(crate) fn requested() -> bool {
         && std::env::var_os("FXI_GENERATION_ROUTING").is_some_and(|value| value == "1")
 }
 
+// Sparse radix directory over the fixed 24-bit gram universe. Twelve high bits
+// select a branch; the remaining two groups of six bits select a leaf and row.
+// This avoids hashing each segment occurrence and sorting the final dictionary.
+// Only populated branches/leaves allocate storage, keeping small builds small.
+// All sentinel/index casts are bounded by the 24-bit universe validated by add().
+struct GramRows {
+    directory: Vec<u32>,
+    branches: Vec<[u32; 64]>,
+    leaves: Vec<[u32; 64]>,
+    len: usize,
+}
+
+impl GramRows {
+    fn new() -> Self {
+        Self {
+            directory: vec![u32::MAX; 4096],
+            branches: Vec::new(),
+            leaves: Vec::new(),
+            len: 0,
+        }
+    }
+
+    fn insert(&mut self, gram: u32) -> (usize, bool) {
+        let gram = gram as usize;
+        let branch = &mut self.directory[gram >> 12];
+        if *branch == u32::MAX {
+            *branch = self.branches.len() as u32;
+            self.branches.push([u32::MAX; 64]);
+        }
+        let leaf = &mut self.branches[*branch as usize][(gram >> 6) & 63];
+        if *leaf == u32::MAX {
+            *leaf = self.leaves.len() as u32;
+            self.leaves.push([u32::MAX; 64]);
+        }
+        let row = &mut self.leaves[*leaf as usize][gram & 63];
+        let added = *row == u32::MAX;
+        if added {
+            *row = self.len as u32;
+            self.len += 1;
+        }
+        (*row as usize, added)
+    }
+
+    fn row(&self, gram: u32) -> usize {
+        let gram = gram as usize;
+        let branch = self.directory[gram >> 12] as usize;
+        let leaf = self.branches[branch][(gram >> 6) & 63] as usize;
+        self.leaves[leaf][gram & 63] as usize
+    }
+
+    fn ordered_keys(&self) -> Vec<u32> {
+        let mut keys = Vec::with_capacity(self.len);
+        for (high, &branch) in self.directory.iter().enumerate() {
+            if branch == u32::MAX {
+                continue;
+            }
+            for (middle, &leaf) in self.branches[branch as usize].iter().enumerate() {
+                if leaf == u32::MAX {
+                    continue;
+                }
+                for (low, &row) in self.leaves[leaf as usize].iter().enumerate() {
+                    if row != u32::MAX {
+                        keys.push(((high << 12) | (middle << 6) | low) as u32);
+                    }
+                }
+            }
+        }
+        keys
+    }
+}
+
 /// Each `add` input must have passed strict segment validation, including posting
 /// membership, before it reaches this builder. The caller also strictly validates
 /// the complete generation's document/path tables before `write`.
@@ -44,7 +115,7 @@ pub(crate) struct Builder {
     segment_ids: Vec<SegmentId>,
     added: usize,
     mask_words: usize,
-    offsets: AHashMap<u32, usize>,
+    rows: GramRows,
     // A single arena avoids one allocation per distinct gram.
     masks: Vec<u64>,
 }
@@ -61,7 +132,7 @@ impl Builder {
             segment_ids: segment_ids.to_vec(),
             added: 0,
             mask_words: segment_ids.len().div_ceil(64),
-            offsets: AHashMap::new(),
+            rows: GramRows::new(),
             masks: Vec::new(),
         })
     }
@@ -87,11 +158,11 @@ impl Builder {
                 "Invalid routing source dictionary ordering"
             );
             previous = Some(gram);
-            let offset = *self.offsets.entry(gram).or_insert_with(|| {
-                let offset = self.masks.len();
+            let (row, added) = self.rows.insert(gram);
+            let offset = row * self.mask_words;
+            if added {
                 self.masks.resize(offset + self.mask_words, 0);
-                offset
-            });
+            }
             self.masks[offset + word] |= bit;
         }
         self.added += 1;
@@ -116,8 +187,7 @@ impl Builder {
                 .eq(self.segment_ids.iter().copied()),
             "Generation routing metadata coverage mismatch"
         );
-        let mut grams: Vec<_> = self.offsets.keys().copied().collect();
-        grams.sort_unstable();
+        let grams = self.rows.ordered_keys();
         let pages = grams.len().div_ceil(PAGE_ENTRIES);
         let directory = HEADER + self.segment_ids.len() * 2;
         let root_end = directory + pages * PAGE_RECORD;
@@ -147,7 +217,7 @@ impl Builder {
         for (slot, gram) in grams.iter().enumerate() {
             let at = root_end + slot * record_bytes;
             bytes[at..at + 4].copy_from_slice(&gram.to_le_bytes());
-            let offset = self.offsets[gram];
+            let offset = self.rows.row(*gram) * self.mask_words;
             for (word, bits) in self.masks[offset..offset + self.mask_words]
                 .iter()
                 .enumerate()
@@ -473,6 +543,67 @@ mod tests {
         }
         builder.write(index.path()).unwrap();
         index
+    }
+
+    #[test]
+    fn radix_rows_preserve_identity_order_and_sparse_allocation() {
+        let mut rows = GramRows::new();
+        assert!(rows.branches.is_empty() && rows.leaves.is_empty());
+        assert_eq!(rows.insert(0), (0, true));
+        assert_eq!(rows.insert(0), (0, false));
+        assert_eq!((rows.branches.len(), rows.leaves.len()), (1, 1));
+        let keys: std::collections::BTreeSet<_> = (0..GRAM_UNIVERSE as u32)
+            .step_by(1023)
+            .chain([0, 63, 64, 4095, 4096, 0x00ff_ffff])
+            .collect();
+        let mut expected = std::collections::BTreeMap::from([(0, 0)]);
+        for &gram in keys.iter().rev() {
+            let next = expected.len();
+            let wanted = *expected.entry(gram).or_insert(next);
+            assert_eq!(rows.insert(gram).0, wanted);
+            assert_eq!(rows.insert(gram), (wanted, false));
+        }
+        assert_eq!(rows.ordered_keys(), keys.into_iter().collect::<Vec<_>>());
+        for (gram, row) in expected {
+            assert_eq!(rows.row(gram), row);
+        }
+    }
+
+    #[test]
+    fn routing_builder_matches_independent_masks_across_radix_and_word_boundaries() {
+        let mut expected = std::collections::BTreeMap::<u32, Vec<u64>>::new();
+        let mut keys = Vec::new();
+        let mut random = 0x92ab_15c7u32;
+        for segment in 0..129 {
+            let mut grams = std::collections::BTreeSet::new();
+            for _ in 0..64 {
+                random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+                grams.insert(random >> 8);
+            }
+            for (offset, gram) in [0, 63, 64, 4095, 4096, 0x00ff_ffff].into_iter().enumerate() {
+                if (segment + offset) % 3 != 0 {
+                    grams.insert(gram);
+                }
+            }
+            for &gram in &grams {
+                expected.entry(gram).or_insert_with(|| vec![0; 3])[segment / 64] |=
+                    1u64 << (segment % 64);
+            }
+            keys.push(grams.into_iter().collect());
+        }
+        let index = fixture(&keys, Vec::new());
+        let routes = Routes::open(index.path()).unwrap();
+        let actual_keys: Vec<_> = (0..routes.gram_count)
+            .map(|row| u32_at(&routes.bytes, routes.root_end + row * routes.record_bytes))
+            .collect();
+        assert_eq!(actual_keys, expected.keys().copied().collect::<Vec<_>>());
+        for (gram, expected_mask) in expected {
+            let actual = routes.lookup(gram).unwrap().unwrap();
+            for (word, mask) in expected_mask.into_iter().enumerate() {
+                assert_eq!(u64_at(actual, word * 8), mask, "gram {gram}, word {word}");
+            }
+        }
+        validate(index.path()).unwrap();
     }
 
     #[test]
