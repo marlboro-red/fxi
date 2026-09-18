@@ -278,6 +278,10 @@ cargo fmt --check
 python3 scripts/test_benchmarks.py
 ```
 
+[Generated correctness testing](docs/GENERATED_CORRECTNESS.md) documents the
+independent query oracle, CLI cross-product, stateful update tests, byte-mutation
+checks and commands to replay or expand a seeded campaign.
+
 Benchmark tools under `scripts/` validate matching file sets and retain raw
 samples. Keep compilation and tests outside timing windows; distinguish warm API
 latency from CLI startup and output serialization.

@@ -45,7 +45,17 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
+        env:
+          FXI_DIFF_FAILURE_DIR: ${{ github.workspace }}/target/differential-failures
         run: cargo test --all-targets
+
+      - name: Retain minimized differential failures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: differential-failures-${{ matrix.os }}
+          path: target/differential-failures/*.json
+          if-no-files-found: ignore
 
   fmt:
     name: rustfmt
@@ -73,6 +83,17 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: python3 scripts/test_benchmarks.py
+
+  fuzz-targets:
+    name: compile bounded fuzz targets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo check --manifest-path fuzz/Cargo.toml --locked
 
   extension:
     name: extension tests and build
