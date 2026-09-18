@@ -31,7 +31,8 @@ fn hash_pair(item: u32) -> (u64, u64) {
 /// Borrowed view of an immutable Bloom whose complete checksum and gram
 /// coverage were already validated by a generation certificate. Header guards
 /// remain local, but this type deliberately does not recheck the payload hash.
-/// Callers must bind the opened file's strong stamp to that certificate first.
+/// Before trusting a negative, callers must bind the actual content digest (or
+/// the legacy routing policy's strong file stamp) to a coverage certificate.
 pub(crate) struct CertifiedBloomView<'a> {
     words: &'a [u8],
     num_bits: usize,
@@ -58,6 +59,24 @@ impl<'a> CertifiedBloomView<'a> {
             num_bits,
             num_hashes,
         })
+    }
+
+    /// Canonical strong digest shared with the owned Bloom coverage proof.
+    pub(crate) fn content_digest(&self) -> u64 {
+        let mut header = [0u8; 9];
+        header[0] = self.num_hashes;
+        header[1..].copy_from_slice(&((self.words.len() / 8) as u64).to_le_bytes());
+        let mut hash = xxhash_rust::xxh3::Xxh3::new();
+        hash.update(&header);
+        hash.update(self.words);
+        hash.digest()
+    }
+
+    pub(crate) fn checksum(&self) -> u64 {
+        self.words.as_chunks::<8>().0.iter().fold(
+            mix64((self.words.len() / 8) as u64 ^ u64::from(self.num_hashes)),
+            |state, word| state.rotate_left(7) ^ mix64(u64::from_le_bytes(*word)),
+        )
     }
 
     #[inline]
@@ -269,6 +288,14 @@ mod tests {
                 }
                 let bytes = serialized(&filter);
                 let view = CertifiedBloomView::from_prevalidated_bytes(&bytes).unwrap();
+                assert_eq!(view.checksum(), filter.checksum());
+                let mut canonical = vec![filter.num_hashes()];
+                canonical.extend_from_slice(&(filter.bits().len() as u64).to_le_bytes());
+                canonical.extend_from_slice(&bytes[11..bytes.len() - 8]);
+                assert_eq!(
+                    view.content_digest(),
+                    xxhash_rust::xxh3::xxh3_64(&canonical)
+                );
                 for value in (0..2048).chain([65535, 0x00ff_ffff, u32::MAX]) {
                     assert_eq!(view.might_contain(value), filter.might_contain(value));
                 }

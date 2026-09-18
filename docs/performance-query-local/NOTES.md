@@ -290,3 +290,22 @@ daemon was paused for this check and resumed afterward with its loaded state
 preserved. An earlier unpaused check correctly detected that daemon updating the
 new repository index; it was not counted as a clean isolation result. The remote
 Linux/macOS tests also pass the clean-machine storage guard.
+
+
+## Allocation-light checked routing
+
+The next controlled experiment preserves the existing checked absence policy and
+on-disk format. Its root validator borrows the root bytes without creating any
+per-posting validation cache or page objects. Bloom checks use a mapped view,
+retain the legacy checksum check, and stream the canonical strong digest directly
+from little-endian file bytes instead of decoding and copying all words. Tests
+compare mapped/owned checksums and strong digests across every supported probe
+count; existing changed-root/Bloom/truncation and CLI fallback regressions pass.
+
+Both binaries use `FXI_QUERY_LOCAL=1` on the same immutable checked index in
+[31 paired samples](queries-mapped-routing.json): absence **9.519 → 6.677 ms**,
+selective **17.253 → 17.175 ms**, broad `return.*0` **100.624 → 100.758 ms**.
+These are direct paired results, not subtraction from an earlier campaign.
+The gain is confined to the intended negative preflight. No format rebuild or
+additional storage is required. This still reads all segment routing dependencies;
+it does not eliminate the structural startup cost.

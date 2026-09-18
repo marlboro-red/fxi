@@ -45,6 +45,39 @@ pub(crate) struct PostingChecks {
     validated: Vec<AtomicU8>,
 }
 
+// Validate routing evidence without allocating per-posting or page cache state.
+fn checked_root(bytes: &[u8], posting_len: usize, count: usize) -> Result<usize> {
+    let page_count = count.div_ceil(PAGE_ENTRIES);
+    let root_end = page_count
+        .checked_mul(PAGE_RECORD)
+        .and_then(|n| n.checked_add(ROOT_HEADER))
+        .context("Gram root size overflow")?;
+    let expected_len = count
+        .checked_mul(8)
+        .and_then(|n| n.checked_add(root_end))
+        .context("Gram checks size overflow")?;
+    anyhow::ensure!(bytes.len() == expected_len, "Gram checks size mismatch");
+    anyhow::ensure!(
+        u64_at(bytes, 8) == xxh3_64(&bytes[16..root_end]),
+        "Gram root checksum mismatch"
+    );
+    anyhow::ensure!(
+        u64_at(bytes, 16) == posting_len as u64 && u64_at(bytes, 24) == count as u64,
+        "Gram checks length/count mismatch"
+    );
+    let mut previous = None;
+    for entry in bytes[ROOT_HEADER..root_end].as_chunks::<PAGE_RECORD>().0 {
+        let first = u32_at(entry, 0);
+        let last = u32_at(entry, 4);
+        anyhow::ensure!(
+            first <= last && last <= 0x00ff_ffff && previous.is_none_or(|p| p < first),
+            "Invalid gram page directory"
+        );
+        previous = Some(last);
+    }
+    Ok(root_end)
+}
+
 impl PostingChecks {
     pub(crate) fn open(
         path: &Path,
@@ -99,40 +132,19 @@ impl PostingChecks {
     }
 
     fn open_paged(bytes: MappedBytes, posting_len: usize, count: usize) -> Result<Self> {
-        let page_count = count.div_ceil(PAGE_ENTRIES);
-        let root_end = page_count
-            .checked_mul(PAGE_RECORD)
-            .and_then(|n| n.checked_add(ROOT_HEADER))
-            .context("Gram root size overflow")?;
-        let expected_len = count
-            .checked_mul(8)
-            .and_then(|n| n.checked_add(root_end))
-            .context("Gram checks size overflow")?;
-        anyhow::ensure!(bytes.len() == expected_len, "Gram checks size mismatch");
-        anyhow::ensure!(
-            u64_at(&bytes, 8) == xxh3_64(&bytes[16..root_end]),
-            "Gram root checksum mismatch"
-        );
-        anyhow::ensure!(
-            u64_at(&bytes, 16) == posting_len as u64 && u64_at(&bytes, 24) == count as u64,
-            "Gram checks length/count mismatch"
-        );
-        let mut pages: Vec<Page> = Vec::with_capacity(page_count);
-        for entry in bytes[ROOT_HEADER..root_end].as_chunks::<PAGE_RECORD>().0 {
-            let first = u32_at(entry, 0);
-            let last = u32_at(entry, 4);
-            anyhow::ensure!(
-                first <= last && last <= 0x00ff_ffff && pages.last().is_none_or(|p| p.last < first),
-                "Invalid gram page directory"
-            );
-            pages.push(Page {
-                first,
-                last,
+        let root_end = checked_root(&bytes, posting_len, count)?;
+        let pages = bytes[ROOT_HEADER..root_end]
+            .as_chunks::<PAGE_RECORD>()
+            .0
+            .iter()
+            .map(|entry| Page {
+                first: u32_at(entry, 0),
+                last: u32_at(entry, 4),
                 dictionary_hash: u64_at(entry, 8),
                 postings_hash: u64_at(entry, 16),
                 validated: AtomicU8::new(0),
-            });
-        }
+            })
+            .collect();
         Ok(Self {
             bytes,
             hashes_offset: root_end,
@@ -474,14 +486,20 @@ fn prove_absent(index: &Path, literal: &[u8]) -> Result<Option<super::types::Ind
             "Checked routing requires paged grams"
         );
         // Hash/validate the actual root, not just its stored digest field.
-        let checks = PostingChecks::open_paged(checks, segment.posting_len, segment.count)?;
+        checked_root(&checks, segment.posting_len, segment.count)?;
         anyhow::ensure!(
-            u64_at(&checks.bytes, 8) == segment.root_hash,
+            u64_at(&checks, 8) == segment.root_hash,
             "Checked routing root changed"
         );
-        let bloom = super::reader::read_bloom_filter(&path)?;
+        let mapped = MappedBytes::open(&path.join("bloom.bin"))?;
+        let bloom = crate::utils::bloom::CertifiedBloomView::from_prevalidated_bytes(&mapped)
+            .context("Invalid checked routing Bloom")?;
         anyhow::ensure!(
-            bloom_digest(&bloom) == segment.bloom_hash,
+            bloom.checksum() == u64_at(&mapped, mapped.len() - 8),
+            "Bloom checksum mismatch"
+        );
+        anyhow::ensure!(
+            bloom.content_digest() == segment.bloom_hash,
             "Checked routing Bloom changed"
         );
         if bloom.might_contain_all(&grams) {
