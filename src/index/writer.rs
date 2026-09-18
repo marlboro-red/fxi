@@ -696,7 +696,7 @@ impl ChunkedIndexWriter {
             let mut dict_file = BufWriter::new(File::create(&dict_path)?);
             let _ = File::create(&postings_path)?;
             let _ = File::create(&positions_path)?;
-            dict_file.write_all(&0u32.to_le_bytes())?;
+            super::token_dictionary::write_header(&mut dict_file, 0)?;
             dict_file.flush()?;
             return Ok(());
         }
@@ -739,21 +739,24 @@ impl ChunkedIndexWriter {
         let mut dict_file = BufWriter::with_capacity(65536, File::create(&dict_path)?);
         let mut postings_file = BufWriter::with_capacity(65536, File::create(&postings_path)?);
         let mut positions_file = BufWriter::with_capacity(65536, File::create(&positions_path)?);
-        dict_file.write_all(&(entry_count as u32).to_le_bytes())?;
+        super::token_dictionary::write_header(&mut dict_file, entry_count)?;
         let mut offset = 0u64;
         let mut pos_offset = 0u64;
         for (token_rank, enc, doc_freq) in encoded {
-            let token_bytes = symbols_sorted[token_rank as usize].as_bytes();
-            dict_file.write_all(&(token_bytes.len() as u16).to_le_bytes())?;
-            dict_file.write_all(token_bytes)?;
-            dict_file.write_all(&offset.to_le_bytes())?;
-            dict_file.write_all(&(enc.len() as u32).to_le_bytes())?;
-            dict_file.write_all(&doc_freq.to_le_bytes())?;
-
             let pos_buf = &positions[token_rank as usize];
             let entry_pos_offset = if pos_buf.is_empty() { 0 } else { pos_offset };
-            dict_file.write_all(&entry_pos_offset.to_le_bytes())?;
-            dict_file.write_all(&(pos_buf.len() as u32).to_le_bytes())?;
+            super::token_dictionary::write_entry(
+                &mut dict_file,
+                super::token_dictionary::Entry {
+                    token: &symbols_sorted[token_rank as usize],
+                    offset,
+                    length: enc.len() as u32,
+                    doc_freq,
+                    pos_offset: entry_pos_offset,
+                    pos_length: pos_buf.len() as u32,
+                },
+                true,
+            )?;
             positions_file.write_all(pos_buf)?;
             pos_offset += pos_buf.len() as u64;
             postings_file.write_all(&enc)?;
@@ -1627,11 +1630,32 @@ mod tests {
                 ("tokens.postings", &postings),
                 ("tokens.positions", &positions),
             ] {
-                assert_eq!(
-                    fs::read(temp.path().join(name)).unwrap(),
-                    *expected,
-                    "{name}, count={count}"
-                );
+                let actual = fs::read(temp.path().join(name)).unwrap();
+                let actual = if name == "tokens.dict" {
+                    let header = crate::index::token_dictionary::header(&actual, true).unwrap();
+                    let mut legacy = (header.count as u32).to_le_bytes().to_vec();
+                    let mut cursor = header.start;
+                    for _ in 0..header.count {
+                        let (entry, consumed) = crate::index::token_dictionary::entry(
+                            &actual[cursor..],
+                            header.compact,
+                            true,
+                        )
+                        .unwrap();
+                        cursor += consumed;
+                        legacy.extend_from_slice(&(entry.token.len() as u16).to_le_bytes());
+                        legacy.extend_from_slice(entry.token.as_bytes());
+                        legacy.extend_from_slice(&entry.offset.to_le_bytes());
+                        legacy.extend_from_slice(&entry.length.to_le_bytes());
+                        legacy.extend_from_slice(&entry.doc_freq.to_le_bytes());
+                        legacy.extend_from_slice(&entry.pos_offset.to_le_bytes());
+                        legacy.extend_from_slice(&entry.pos_length.to_le_bytes());
+                    }
+                    legacy
+                } else {
+                    actual
+                };
+                assert_eq!(actual, *expected, "{name}, count={count}");
             }
         }
     }

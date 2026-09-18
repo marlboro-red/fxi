@@ -52,6 +52,7 @@ pub(crate) mod source_pack;
 pub(crate) mod source_positions;
 pub mod stats;
 pub mod types;
+pub(crate) mod token_dictionary;
 pub mod writer;
 
 // Re-exports for public API

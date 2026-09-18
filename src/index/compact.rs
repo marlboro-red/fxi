@@ -444,46 +444,19 @@ fn merge_token_segment(
     // Check if this segment has positions (affects dict entry size)
     let has_positions = segment_path.join("tokens.positions").exists();
 
-    // Read dictionary
-    let mut dict_file = BufReader::new(File::open(&dict_path)?);
-    let mut buf2 = [0u8; 2];
-    let mut buf4 = [0u8; 4];
-    let mut buf8 = [0u8; 8];
-
-    dict_file.read_exact(&mut buf4)?;
-    let entry_count = u32::from_le_bytes(buf4) as usize;
-
-    // mmap postings file
+    let dictionary = MappedBytes::open(&dict_path)?;
+    let header = super::token_dictionary::header(&dictionary, has_positions)?;
     let postings_mmap = MappedBytes::open(&postings_path)?;
-
-    for _ in 0..entry_count {
-        // Read token length
-        dict_file.read_exact(&mut buf2)?;
-        let token_len = u16::from_le_bytes(buf2) as usize;
-
-        // Read token (moves the byte buffer when valid UTF-8 — no copy)
-        let mut token_bytes = vec![0u8; token_len];
-        dict_file.read_exact(&mut token_bytes)?;
-        let token = String::from_utf8(token_bytes).context("Invalid token UTF-8")?;
-
-        // Read offset
-        dict_file.read_exact(&mut buf8)?;
-        let offset = u64::from_le_bytes(buf8) as usize;
-
-        // Read length
-        dict_file.read_exact(&mut buf4)?;
-        let length = u32::from_le_bytes(buf4) as usize;
-
-        // Stored frequency must agree with a complete, valid posting list.
-        dict_file.read_exact(&mut buf4)?;
-        let doc_freq = u32::from_le_bytes(buf4) as usize;
-
-        // Skip position offset/length if present
-        if has_positions {
-            dict_file.read_exact(&mut buf8)?; // pos_offset
-            dict_file.read_exact(&mut buf4)?; // pos_length
-        }
-
+    let mut cursor = header.start;
+    for _ in 0..header.count {
+        let (entry, consumed) =
+            super::token_dictionary::entry(&dictionary[cursor..], header.compact, has_positions)?;
+        cursor += consumed;
+        let token = entry.token.to_owned();
+        let offset =
+            usize::try_from(entry.offset).context("Posting offset exceeds platform bounds")?;
+        let length = entry.length as usize;
+        let doc_freq = entry.doc_freq as usize;
         // Decode posting list
         let end = offset
             .checked_add(length)
@@ -556,38 +529,18 @@ fn merge_token_positions_segment(
         return Ok(());
     }
 
-    // Read dictionary
-    let mut dict_file = BufReader::new(File::open(&dict_path)?);
-    let mut buf2 = [0u8; 2];
-    let mut buf4 = [0u8; 4];
-    let mut buf8 = [0u8; 8];
-
-    dict_file.read_exact(&mut buf4)?;
-    let entry_count = u32::from_le_bytes(buf4) as usize;
-
-    // mmap positions file
+    let dictionary = MappedBytes::open(&dict_path)?;
+    let header = super::token_dictionary::header(&dictionary, true)?;
     let positions_mmap = MappedBytes::open(&positions_path)?;
-
-    for _ in 0..entry_count {
-        // Read token length
-        dict_file.read_exact(&mut buf2)?;
-        let token_len = u16::from_le_bytes(buf2) as usize;
-
-        // Read token
-        let mut token_bytes = vec![0u8; token_len];
-        dict_file.read_exact(&mut token_bytes)?;
-        let token = String::from_utf8(token_bytes).context("Invalid token UTF-8")?;
-
-        // Read postings offset, length, doc_freq (skip for position merging)
-        dict_file.read_exact(&mut buf8)?; // offset
-        dict_file.read_exact(&mut buf4)?; // length
-        dict_file.read_exact(&mut buf4)?; // doc_freq
-
-        // Read position offset and length
-        dict_file.read_exact(&mut buf8)?;
-        let pos_offset = u64::from_le_bytes(buf8) as usize;
-        dict_file.read_exact(&mut buf4)?;
-        let pos_length = u32::from_le_bytes(buf4) as usize;
+    let mut cursor = header.start;
+    for _ in 0..header.count {
+        let (entry, consumed) =
+            super::token_dictionary::entry(&dictionary[cursor..], header.compact, true)?;
+        cursor += consumed;
+        let token = entry.token.to_owned();
+        let pos_offset =
+            usize::try_from(entry.pos_offset).context("Position offset exceeds platform bounds")?;
+        let pos_length = entry.pos_length as usize;
 
         if pos_length == 0 {
             continue;

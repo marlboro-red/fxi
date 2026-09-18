@@ -3,6 +3,34 @@ use fxi::utils::app_data::{get_index_dir, remove_index};
 use std::fs;
 use std::path::PathBuf;
 
+// Explicit legacy conversion keeps fixed-width corruption/compatibility fixtures
+// meaningful while production writers emit compact token metadata.
+fn legacy_token_dictionary(bytes: &[u8]) -> Vec<u8> {
+    if bytes[..4] != [255; 4] {
+        return bytes.to_vec();
+    }
+    assert_eq!(&bytes[4..8], b"FXT1");
+    let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    let mut legacy = count.to_le_bytes().to_vec();
+    let mut cursor = 12;
+    for _ in 0..count {
+        let len = u16::from_le_bytes(bytes[cursor..cursor + 2].try_into().unwrap()) as usize;
+        legacy.extend_from_slice(&bytes[cursor..cursor + 2 + len]);
+        cursor += 2 + len;
+        for wide in [true, false, false, true, false] {
+            let (value, consumed) = fxi::utils::decode_varint_u64(&bytes[cursor..]).unwrap();
+            cursor += consumed;
+            if wide {
+                legacy.extend_from_slice(&value.to_le_bytes());
+            } else {
+                legacy.extend_from_slice(&(value as u32).to_le_bytes());
+            }
+        }
+    }
+    assert_eq!(cursor, bytes.len());
+    legacy
+}
+
 struct Fixture(tempfile::TempDir);
 impl Fixture {
     fn new() -> Self {
@@ -286,7 +314,8 @@ fn impossible_record_counts_and_path_lengths_fail_before_allocation() {
         let fixture = Fixture::new();
         let path = fixture.index().join(name);
         let mut bytes = fs::read(&path).unwrap();
-        bytes[..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let count_start = if name.ends_with("tokens.dict") { 8 } else { 0 };
+        bytes[count_start..count_start + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         fs::write(&path, bytes).unwrap();
         assert!(IndexReader::open(fixture.0.path()).is_err(), "{name}");
     }
@@ -305,9 +334,9 @@ fn mapped_dictionaries_reject_bad_lengths_and_token_encoding() {
         let path = fixture.index().join("segments/seg_0001/tokens.dict");
         let mut bytes = fs::read(&path).unwrap();
         if corrupt_length {
-            bytes[4..6].copy_from_slice(&u16::MAX.to_le_bytes());
+            bytes[12..14].copy_from_slice(&u16::MAX.to_le_bytes());
         } else {
-            bytes[6] = 0xff;
+            bytes[14] = 0xff;
         }
         fs::write(path, bytes).unwrap();
         assert!(IndexReader::open(fixture.0.path()).is_err());
@@ -364,7 +393,7 @@ fn token_dictionary_order_and_overflowed_ranges_fail_open() {
     for corruption in 0..4 {
         let fixture = Fixture::new();
         let path = fixture.index().join("segments/seg_0001/tokens.dict");
-        let original = fs::read(&path).unwrap();
+        let original = legacy_token_dictionary(&fs::read(&path).unwrap());
         assert!(u32::from_le_bytes(original[..4].try_into().unwrap()) >= 2);
         let first_len = u16::from_le_bytes(original[4..6].try_into().unwrap()) as usize;
         let second = 4 + 30 + first_len;
@@ -402,7 +431,7 @@ fn legacy_token_dictionaries_without_positions_remain_readable() {
     let fixture = Fixture::new();
     let index = fixture.index();
     let dict_path = index.join("segments/seg_0001/tokens.dict");
-    let bytes = fs::read(&dict_path).unwrap();
+    let bytes = legacy_token_dictionary(&fs::read(&dict_path).unwrap());
     let count = u32::from_le_bytes(bytes[..4].try_into().unwrap());
     let mut legacy = bytes[..4].to_vec();
     let mut cursor = 4;
@@ -746,4 +775,116 @@ fn positional_source_evidence_is_invalidated_by_edits_and_invalid_utf8() {
     fs::remove_file(root.path().join("0065.txt")).unwrap();
     check();
     check();
+}
+
+#[test]
+fn legacy_and_compact_token_segments_coexist_across_updates_and_compaction() {
+    use fxi::index::{build::update_index, compact::merge_segments};
+    use fxi::query::{QueryExecutor, parse_query};
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.0.path().join(".git")).unwrap();
+    for i in 0..20 {
+        fs::write(
+            fixture.0.path().join(format!("filler{i}.txt")),
+            "unrelated text\n",
+        )
+        .unwrap();
+    }
+    build_index_with_options(fixture.0.path(), true, true, Some(4)).unwrap();
+    for entry in fs::read_dir(fixture.index().join("segments")).unwrap() {
+        let dictionary = entry.unwrap().path().join("tokens.dict");
+        fs::write(
+            &dictionary,
+            legacy_token_dictionary(&fs::read(&dictionary).unwrap()),
+        )
+        .unwrap();
+    }
+    let pinned = IndexReader::open(fixture.0.path()).unwrap();
+    let original = pinned.get_token_docs("vector");
+    fs::write(fixture.0.path().join("added.txt"), "vector::start\n").unwrap();
+    {
+        let _lock = fxi::utils::IndexLock::acquire(fixture.0.path()).unwrap();
+        update_index(fixture.0.path()).unwrap();
+    }
+    let formats = fs::read_dir(fixture.index().join("segments"))
+        .unwrap()
+        .map(|entry| {
+            fs::read(entry.unwrap().path().join("tokens.dict"))
+                .unwrap()
+                .starts_with(&[255; 4])
+        })
+        .collect::<Vec<_>>();
+    assert!(formats.contains(&true) && formats.contains(&false));
+    for compact in [false, true] {
+        if compact {
+            merge_segments(fixture.0.path()).unwrap();
+        }
+        let reader = IndexReader::open(fixture.0.path()).unwrap();
+        assert_eq!(reader.get_token_docs("vector").len(), 2);
+        for pattern in ["vector", "\"vector::start\"", "re:/vector::start/"] {
+            assert_eq!(
+                QueryExecutor::new(&reader)
+                    .execute_files_only(&parse_query(pattern), 0)
+                    .unwrap(),
+                vec![PathBuf::from("a.txt"), PathBuf::from("added.txt")]
+            );
+        }
+        assert_eq!(pinned.get_token_docs("vector"), original);
+        for doc in &original {
+            assert!(pinned.get_line_map(doc).is_some());
+        }
+    }
+}
+
+#[test]
+fn compact_token_dictionary_rejects_order_ranges_frequencies_and_trailing_bytes() {
+    for corruption in 0..5 {
+        let fixture = Fixture::new();
+        let path = fixture.index().join("segments/seg_0001/tokens.dict");
+        let original = fs::read(&path).unwrap();
+        assert!(original.starts_with(&[255; 4]));
+        let len = u16::from_le_bytes(original[12..14].try_into().unwrap()) as usize;
+        let fields = 14 + len;
+        let mut cursor = fields;
+        let mut starts = Vec::new();
+        for _ in 0..5 {
+            starts.push(cursor);
+            cursor += fxi::utils::decode_varint_u64(&original[cursor..])
+                .unwrap()
+                .1;
+        }
+        let end_first = cursor;
+        let second_len =
+            u16::from_le_bytes(original[cursor..cursor + 2].try_into().unwrap()) as usize;
+        cursor += 2 + second_len;
+        for _ in 0..5 {
+            cursor += fxi::utils::decode_varint_u64(&original[cursor..])
+                .unwrap()
+                .1;
+        }
+        let mut bytes = original.clone();
+        match corruption {
+            0 => {
+                bytes.truncate(12);
+                bytes.extend_from_slice(&original[end_first..cursor]);
+                bytes.extend_from_slice(&original[12..end_first]);
+                bytes.extend_from_slice(&original[cursor..]);
+            }
+            1 | 2 => {
+                let field = if corruption == 1 { 0 } else { 3 };
+                let mut overflow = Vec::new();
+                fxi::utils::encode_varint_u64(u64::MAX, &mut overflow);
+                bytes.splice(starts[field]..starts[field + 1], overflow);
+            }
+            3 => {
+                bytes[starts[2]] = 0;
+            }
+            _ => bytes.push(0),
+        }
+        fs::write(path, bytes).unwrap();
+        assert!(
+            IndexReader::open(fixture.0.path()).is_err(),
+            "corruption {corruption}"
+        );
+    }
 }

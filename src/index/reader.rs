@@ -110,44 +110,37 @@ struct TokenDict {
     data: MappedBytes,
     offsets: Vec<usize>,
     has_positions: bool,
+    compact: bool,
 }
 
 impl TokenDict {
     fn entry(&self, index: usize) -> TokenDictEntry<'_> {
-        let bytes = &self.data[self.offsets[index]..];
-        let len = u16::from_le_bytes(bytes[..2].try_into().unwrap()) as usize;
-        let token =
-            std::str::from_utf8(&bytes[2..2 + len]).expect("validated immutable token dictionary");
-        let fields = &bytes[2 + len..];
+        let (entry, _) = super::token_dictionary::entry(
+            &self.data[self.offsets[index]..],
+            self.compact,
+            self.has_positions,
+        )
+        .expect("validated immutable token dictionary");
         TokenDictEntry {
-            token,
-            offset: le64(fields),
-            length: le32(&fields[8..]),
-            pos_offset: if self.has_positions {
-                le64(&fields[16..])
-            } else {
-                0
-            },
-            pos_length: if self.has_positions {
-                le32(&fields[24..])
-            } else {
-                0
-            },
+            token: entry.token,
+            offset: entry.offset,
+            length: entry.length,
+            pos_offset: entry.pos_offset,
+            pos_length: entry.pos_length,
         }
     }
-    fn iter(&self) -> impl Iterator<Item = TokenDictEntry<'_>> {
-        (0..self.offsets.len()).map(|i| self.entry(i))
-    }
+
     fn lookup(&self, token: &str) -> Option<TokenDictEntry<'_>> {
         let mut lo = 0;
         let mut hi = self.offsets.len();
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let entry = self.entry(mid);
-            match entry.token.cmp(token) {
+            let (candidate, _) = super::token_dictionary::token(&self.data[self.offsets[mid]..])
+                .expect("validated immutable token dictionary");
+            match candidate.cmp(token) {
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
-                std::cmp::Ordering::Equal => return Some(entry),
+                std::cmp::Ordering::Equal => return Some(self.entry(mid)),
             }
         }
         None
@@ -456,6 +449,7 @@ impl SegmentReader {
                     data: MappedBytes::Owned(token_dictionary),
                     offsets: token_offsets,
                     has_positions: true,
+                    compact: false,
                 },
                 postings: MappedBytes::Owned(token_postings),
                 positions: Some(MappedBytes::Owned(token_positions)),
@@ -570,8 +564,14 @@ impl SegmentReader {
         let finder = memmem::Finder::new(needle.as_bytes());
 
         let mut result = RoaringBitmap::new();
-        for entry in self.tokens().dictionary.iter() {
-            if entry.token.len() >= needle.len() && finder.find(entry.token.as_bytes()).is_some() {
+        let dictionary = &self.tokens().dictionary;
+        for index in 0..dictionary.offsets.len() {
+            let (token, _) =
+                super::token_dictionary::token(&dictionary.data[dictionary.offsets[index]..])
+                    .expect("validated immutable token dictionary");
+            if token.len() >= needle.len() && finder.find(token.as_bytes()).is_some() {
+                let entry = dictionary.entry(index);
+                debug_assert_eq!(entry.token, token);
                 let start = entry.offset as usize;
                 let end = start + entry.length as usize;
                 if end <= self.tokens().postings.len() {
@@ -1974,65 +1974,48 @@ fn read_token_dict(
 ) -> Result<TokenDict> {
     let has_positions = positions.is_some();
     let data = MappedBytes::open(&segment_path.join("tokens.dict"))?;
-    anyhow::ensure!(data.len() >= 4, "Truncated token dictionary header");
-    let count = le32(&data) as usize;
-    let fixed_size = if has_positions { 30 } else { 18 };
-    anyhow::ensure!(
-        count <= (data.len() - 4) / fixed_size,
-        "Token dictionary count exceeds file bounds"
-    );
-    let mut offsets = Vec::with_capacity(count);
-    let mut cursor = 4;
+    let header = super::token_dictionary::header(&data, has_positions)?;
+    let mut offsets = Vec::with_capacity(header.count);
+    let mut cursor = header.start;
     let mut previous_token = None;
-    for _ in 0..count {
+    for _ in 0..header.count {
+        let (entry, consumed) =
+            super::token_dictionary::entry(&data[cursor..], header.compact, has_positions)?;
         anyhow::ensure!(
-            data.len() - cursor >= fixed_size,
-            "Truncated token dictionary record"
-        );
-        let len = u16::from_le_bytes(data[cursor..cursor + 2].try_into().unwrap()) as usize;
-        anyhow::ensure!(
-            len <= data.len() - cursor - fixed_size,
-            "Token length exceeds file bounds"
-        );
-        let token = std::str::from_utf8(&data[cursor + 2..cursor + 2 + len])
-            .context("Invalid token UTF-8")?;
-        anyhow::ensure!(
-            previous_token.is_none_or(|previous| previous < token),
+            previous_token.is_none_or(|previous| previous < entry.token),
             "Unsorted token dictionary"
         );
-        previous_token = Some(token);
-        let fields = &data[cursor + 2 + len..cursor + fixed_size + len];
+        previous_token = Some(entry.token);
         anyhow::ensure!(
-            posting_range_fits(le64(fields), le32(&fields[8..]), postings.len()),
+            posting_range_fits(entry.offset, entry.length, postings.len()),
             "Truncated token postings"
         );
-        let start = le64(fields) as usize;
-        let end = start + le32(&fields[8..]) as usize;
+        let start = entry.offset as usize;
         crate::utils::encoding::validate_document_postings(
-            &postings[start..end],
-            le32(&fields[12..]),
+            &postings[start..start + entry.length as usize],
+            entry.doc_freq,
             allowed_docs,
         )?;
         if let Some(positions) = positions {
             anyhow::ensure!(
-                posting_range_fits(le64(&fields[16..]), le32(&fields[24..]), positions.len()),
+                posting_range_fits(entry.pos_offset, entry.pos_length, positions.len()),
                 "Truncated token positions"
             );
-            let start = le64(&fields[16..]) as usize;
-            let end = start + le32(&fields[24..]) as usize;
+            let start = entry.pos_offset as usize;
             crate::utils::encoding::validate_position_stream_with_documents(
-                &positions[start..end],
+                &positions[start..start + entry.pos_length as usize],
                 Some(allowed_docs),
             )?;
         }
         offsets.push(cursor);
-        cursor += fixed_size + len;
+        cursor += consumed;
     }
     anyhow::ensure!(cursor == data.len(), "Trailing token dictionary bytes");
     Ok(TokenDict {
         data,
         offsets,
         has_positions,
+        compact: header.compact,
     })
 }
 

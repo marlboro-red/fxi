@@ -102,7 +102,7 @@ pub fn write_token_index(
     };
 
     // Write entry count
-    dict_file.write_all(&(postings.len() as u32).to_le_bytes())?;
+    super::token_dictionary::write_header(&mut dict_file, postings.len())?;
 
     let mut postings_offset: u64 = 0;
     let mut pos_offset: u64 = 0;
@@ -112,16 +112,8 @@ pub fn write_token_index(
         encoded.clear();
         let doc_freq = encode_postings(doc_ids, &mut encoded);
 
-        // Write token (length-prefixed)
-        let token_bytes = token.as_bytes();
-        dict_file.write_all(&(token_bytes.len() as u16).to_le_bytes())?;
-        dict_file.write_all(token_bytes)?;
-
-        // Write offset, length, freq
-        dict_file.write_all(&postings_offset.to_le_bytes())?;
-        dict_file.write_all(&(encoded.len() as u32).to_le_bytes())?;
-        dict_file.write_all(&(doc_freq as u32).to_le_bytes())?;
-
+        let entry_pos_offset = pos_offset;
+        let mut pos_length = 0;
         // Write position offset and length (a zero length means "no
         // position data for this token"; readers ignore the offset then)
         if let Some(ref mut pf) = positions_file {
@@ -134,8 +126,7 @@ pub fn write_token_index(
                 encode_position_postings(&refs, &mut pos_encoded);
             }
 
-            dict_file.write_all(&pos_offset.to_le_bytes())?;
-            dict_file.write_all(&(pos_encoded.len() as u32).to_le_bytes())?;
+            pos_length = pos_encoded.len() as u32;
 
             if !pos_encoded.is_empty() {
                 pf.write_all(&pos_encoded)?;
@@ -143,6 +134,18 @@ pub fn write_token_index(
             }
         }
 
+        super::token_dictionary::write_entry(
+            &mut dict_file,
+            super::token_dictionary::Entry {
+                token,
+                offset: postings_offset,
+                length: encoded.len() as u32,
+                doc_freq: doc_freq as u32,
+                pos_offset: entry_pos_offset,
+                pos_length,
+            },
+            positions.is_some(),
+        )?;
         // Write postings
         postings_file.write_all(&encoded)?;
         postings_offset += encoded.len() as u64;
