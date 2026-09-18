@@ -248,6 +248,7 @@ fn compress_trigram_postings(files: &mut [AssignedFile]) -> Option<CompressedTri
 
 /// Data needed to write a segment to disk (sent to background thread)
 struct SegmentWriteJob {
+    profile: IndexProfile,
     segment_id: SegmentId,
     segment_path: PathBuf,
     files: Vec<AssignedFile>,
@@ -465,6 +466,7 @@ impl ChunkedIndexWriter {
             let segment_path = self.index_path.join("segments").join(&segment_name);
 
             let job = SegmentWriteJob {
+                profile: self.config.profile,
                 segment_id,
                 segment_path,
                 files: assigned_files,
@@ -556,6 +558,9 @@ impl ChunkedIndexWriter {
                 }
             });
             let token_handle = s.spawn(|| {
+                if job.profile == IndexProfile::Lean {
+                    return Ok(());
+                }
                 Self::write_token_index_flat(
                     &job.segment_path,
                     &token_pairs,
@@ -563,8 +568,13 @@ impl ChunkedIndexWriter {
                     &symbols_sorted,
                 )
             });
-            let linemap_handle =
-                s.spawn(|| Self::write_line_maps_flat(&job.segment_path, &line_maps));
+            let linemap_handle = s.spawn(|| {
+                if job.profile == IndexProfile::Full {
+                    Self::write_line_maps_flat(&job.segment_path, &line_maps)
+                } else {
+                    Ok(())
+                }
+            });
             let bloom_handle =
                 s.spawn(|| Self::write_bloom_filter(&job.segment_path, &bloom_filter));
 
@@ -953,6 +963,7 @@ impl ChunkedIndexWriter {
         let delta_baseline = delta_segments.len();
 
         let meta = IndexMeta {
+            profile: self.config.profile,
             version: 2,
             root_path: self.root_path.clone(),
             doc_count: self.all_documents.len() as u32,
@@ -965,7 +976,7 @@ impl ChunkedIndexWriter {
             tombstone_count: 0, // Fresh index has no tombstones
             valid_doc_count,
             delta_baseline,
-            has_positions: true,
+            has_positions: self.config.profile == IndexProfile::Full,
             rejected_files: self.rejected_files.clone(),
         };
 
@@ -1192,7 +1203,7 @@ impl DeltaSegmentWriter {
             fs::create_dir(&segment_path)?;
 
             // Write segment files
-            self.write_segment_files(&segment_path)?;
+            self.write_segment_files(&segment_path, meta.profile)?;
         }
 
         // Merge existing and new documents, applying tombstones
@@ -1266,18 +1277,20 @@ impl DeltaSegmentWriter {
     }
 
     /// Write segment files (trigrams, tokens, line maps, bloom filter)
-    fn write_segment_files(&self, segment_path: &Path) -> Result<()> {
+    fn write_segment_files(&self, segment_path: &Path, profile: IndexProfile) -> Result<()> {
         use crate::index::segment_io;
 
         // Delta segments keep all trigrams: stop-grams are a global
         // (meta-level) judgement made at full build or compaction
         segment_io::write_trigram_index(segment_path, &self.trigram_postings, None)?;
-        segment_io::write_token_index(
-            segment_path,
-            &self.token_postings,
-            Some(&self.token_position_postings),
-        )?;
-        segment_io::write_line_maps(segment_path, &self.line_maps)?;
+        if profile == IndexProfile::Full {
+            segment_io::write_token_index(
+                segment_path,
+                &self.token_postings,
+                Some(&self.token_position_postings),
+            )?;
+            segment_io::write_line_maps(segment_path, &self.line_maps)?;
+        }
         segment_io::build_and_write_bloom(
             segment_path,
             self.trigram_postings.keys().copied(),

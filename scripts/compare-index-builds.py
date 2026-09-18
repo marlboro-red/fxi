@@ -34,6 +34,8 @@ def main():
     parser.add_argument('--corpus', type=Path, required=True)
     parser.add_argument('--baseline', type=Path, required=True)
     parser.add_argument('--candidate', type=Path, required=True)
+    parser.add_argument('--baseline-profile', choices=['full', 'lean'])
+    parser.add_argument('--candidate-profile', choices=['full', 'lean'])
     parser.add_argument('--source-pack', choices=['0', '1'], default='0')
     parser.add_argument('--repetitions', type=int, default=3)
     parser.add_argument('--output', type=Path, required=True)
@@ -66,6 +68,9 @@ def main():
             indexes.mkdir()
             env = {**base_env, 'FXI_INDEXES': str(indexes)}
             command = ['/usr/bin/time', '-l', str(binaries[name]), 'index', str(root), '--force']
+            profile = args.baseline_profile if name == 'before' else args.candidate_profile
+            if profile is not None:
+                command.extend(['--profile', profile])
             started = time.perf_counter_ns()
             result = sp.run(command, env=env, cwd=root, capture_output=True, timeout=600)
             elapsed = (time.perf_counter_ns() - started) / 1e9

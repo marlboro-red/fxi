@@ -17,7 +17,7 @@ struct Corpus {
     files: BTreeMap<PathBuf, Vec<String>>,
 }
 impl Corpus {
-    fn new(seed: u64) -> Self {
+    fn new(seed: u64, profile: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("repo");
         fs::create_dir_all(root.join(".git")).unwrap();
@@ -85,7 +85,12 @@ impl Corpus {
             files.insert(path, lines);
         }
         let corpus = Self { dir, root, files };
-        corpus.run(&["index".into(), "--force".into()]);
+        corpus.run(&[
+            "index".into(),
+            "--force".into(),
+            "--profile".into(),
+            profile.into(),
+        ]);
         corpus
     }
     fn run(&self, args: &[String]) -> Vec<u8> {
@@ -114,6 +119,15 @@ impl Corpus {
 
 #[test]
 fn generated_cli_modes_agree_with_exhaustive_source_scan() {
+    generated_modes("full");
+}
+
+#[test]
+fn lean_cli_modes_agree_with_exhaustive_source_scan() {
+    generated_modes("lean");
+}
+
+fn generated_modes(profile: &str) {
     let seed = std::env::var("FXI_CLI_SEED")
         .map(|s| s.parse().expect("FXI_CLI_SEED must be u64"))
         .unwrap_or(0x5eed_fa17);
@@ -121,7 +135,7 @@ fn generated_cli_modes_agree_with_exhaustive_source_scan() {
         .ok()
         .map(|s| s.parse::<usize>().expect("FXI_CLI_CASE must be 0..127"));
     assert!(replay.is_none_or(|n| n < 128));
-    let corpus = Corpus::new(seed);
+    let corpus = Corpus::new(seed, profile);
     for case in 0..128 {
         if replay.is_some_and(|n| n != case) {
             continue;

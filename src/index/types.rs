@@ -213,9 +213,20 @@ impl Document {
     }
 }
 
+/// Persisted evidence profile. Legacy indexes include full token evidence.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum IndexProfile {
+    #[default]
+    Full,
+    Lean,
+}
+
 /// Index metadata stored in meta.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexMeta {
+    #[serde(default)]
+    pub profile: IndexProfile,
     pub version: u32,
     pub root_path: PathBuf,
     pub doc_count: u32,
@@ -251,6 +262,7 @@ pub struct IndexMeta {
 impl Default for IndexMeta {
     fn default() -> Self {
         Self {
+            profile: IndexProfile::Full,
             version: 2,
             root_path: PathBuf::new(),
             doc_count: 0,
@@ -297,6 +309,8 @@ pub struct SearchMatch {
 /// Configuration for the indexer
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexConfig {
+    #[serde(default)]
+    pub profile: IndexProfile,
     pub max_file_size: u64,
     pub stop_gram_count: usize,
     pub delta_threshold: usize,
@@ -311,6 +325,7 @@ pub struct IndexConfig {
 impl Default for IndexConfig {
     fn default() -> Self {
         Self {
+            profile: IndexProfile::Full,
             max_file_size: 10 * 1024 * 1024, // 10MB
             // Frequent grams can still avoid substantial source I/O. Keep all
             // postings usable by default; old omitted-gram metadata is honored.

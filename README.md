@@ -148,7 +148,8 @@ use `file:` for filenames. For CLI limits use `-m`, not `top:`.
 
 ```sh
 fxi index                        # Reconcile source files with the stored index
-fxi index --force                # Full rebuild
+fxi index --force                # Full rebuild, preserving the stored profile
+fxi index --profile lean         # Rebuild without token and stored line-map data
 fxi daemon start                  # Keep loaded indexes warm
 fxi daemon start --watch          # Also watch saved changes
 fxi daemon status
@@ -277,6 +278,16 @@ clamped to 1–256); response queues are bounded and clients that flood a full q
 are disconnected. Slow/disconnected clients release permits after the transport
 write timeout or failure. These limits bound request concurrency, not total memory
 or the duration of an executing search; they do not cancel searches on disconnect.
+
+An opt-in lean index (`fxi index --profile lean PATH`) skips token dictionaries,
+postings, positions and stored line maps. All ordinary CLI search modes remain
+available: they use trigrams and verify source text. The default for new indexes
+is still `full`. Updates, compaction and ordinary forced rebuilds preserve the
+stored profile; `--profile full` explicitly rebuilds the omitted evidence.
+`fxi stats` displays the profile. Library token and positional APIs are fallible:
+a lean index reports unavailable evidence, rather than an empty match set.
+Stored line-map lookup returns no map for lean indexes. Neither profile changes
+search freshness guarantees or makes stale source verification unnecessary.
 
 Optional Unix source packs (`FXI_SOURCE_PACK=1 fxi index --force PATH`) trade extra
 disk/build work for faster broad one-shot files-only searches. They are not enabled

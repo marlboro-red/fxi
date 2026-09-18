@@ -173,7 +173,7 @@ fn replay(operations: &[Operation]) -> Result<()> {
     }
     build_index_with_options(root, true, true, Some(5))?;
     let pinned = IndexReader::open(root)?;
-    let original_postings = pinned.get_token_docs("needle");
+    let original_postings = pinned.get_token_docs("needle").unwrap();
     let original_lines = original_postings
         .iter()
         .map(|id| (id, pinned.get_line_map(id).unwrap()))
@@ -217,7 +217,7 @@ fn replay(operations: &[Operation]) -> Result<()> {
                     // Old reader promises pinned resources, not a snapshot of
                     // source files. Inspect stored postings/line maps only.
                     ensure!(
-                        pinned.get_token_docs("needle") == original_postings,
+                        pinned.get_token_docs("needle").unwrap() == original_postings,
                         "pinned postings changed"
                     );
                     for (id, lines) in &original_lines {

@@ -126,6 +126,10 @@ enum Commands {
         /// Files per chunk (0 = all in one chunk)
         #[arg(long)]
         chunk_size: Option<usize>,
+
+        /// Evidence to store; specifying a profile performs a full rebuild
+        #[arg(long, value_enum)]
+        profile: Option<index::types::IndexProfile>,
     },
     /// Interactive search TUI
     Search {
@@ -310,12 +314,17 @@ fn run() -> Result<()> {
             path,
             force,
             chunk_size,
+            profile,
         }) => {
             // Auto-detect codebase root. The write lock serializes against
             // a daemon flush or another fxi index on the same root.
             let root = utils::find_codebase_root(&path)?;
             let _lock = utils::IndexLock::acquire(&root)?;
-            index::build::build_index_auto(&path, force, chunk_size)?;
+            if let Some(profile) = profile {
+                index::build::build_index_with_profile(&root, true, false, chunk_size, profile)?;
+            } else {
+                index::build::build_index_auto(&path, force, chunk_size)?;
+            }
             drop(_lock);
             reload_running_daemon(&root)?;
         }

@@ -16,6 +16,13 @@ pub fn show_stats(root_path: &Path) -> Result<()> {
     println!("Root path:        {}", reader.root_path().display());
     println!("Index location:   {}", index_path.display());
     println!("Index version:    {}", reader.meta.version);
+    println!(
+        "Index profile:    {}",
+        match reader.meta.profile {
+            crate::index::types::IndexProfile::Full => "full",
+            crate::index::types::IndexProfile::Lean => "lean",
+        }
+    );
     let stats = document_stats(reader.documents());
     println!("Live files:       {}", stats.live);
     println!("Stored documents: {}", reader.documents().len());

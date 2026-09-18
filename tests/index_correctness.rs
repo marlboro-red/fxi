@@ -165,11 +165,11 @@ fn published_readers_remain_valid_across_compaction_and_rebuild() {
     build_index_with_options(fixture.0.path(), true, true, Some(1)).unwrap();
     let old_path = fixture.index();
     let reader = IndexReader::open(fixture.0.path()).unwrap();
-    let postings = reader.get_token_docs("vector");
+    let postings = reader.get_token_docs("vector").unwrap();
     let old_bytes = fs::read(old_path.join("segments/seg_0001/grams.postings")).unwrap();
     fxi::index::compact::merge_segments(fixture.0.path()).unwrap();
     assert_ne!(old_path, fixture.index());
-    assert_eq!(reader.get_token_docs("vector"), postings);
+    assert_eq!(reader.get_token_docs("vector").unwrap(), postings);
     assert_eq!(
         fs::read(old_path.join("segments/seg_0001/grams.postings")).unwrap(),
         old_bytes
@@ -178,7 +178,7 @@ fn published_readers_remain_valid_across_compaction_and_rebuild() {
         assert!(reader.get_line_map(id).unwrap().is_some());
     }
     build_index_with_options(fixture.0.path(), true, true, None).unwrap();
-    assert_eq!(reader.get_token_docs("vector"), postings);
+    assert_eq!(reader.get_token_docs("vector").unwrap(), postings);
     assert!(old_path.exists(), "active reader must pin its generation");
     drop(reader);
     build_index_with_options(fixture.0.path(), true, true, None).unwrap();
@@ -233,7 +233,7 @@ fn concurrent_opens_observe_complete_rebuild_generations() {
     for _ in 0..100 {
         let reader = IndexReader::open(fixture.0.path()).unwrap();
         assert_eq!(reader.meta.doc_count, 1);
-        let docs = reader.get_token_docs("vector");
+        let docs = reader.get_token_docs("vector").unwrap();
         assert_eq!(docs.len(), 1);
         for id in docs {
             assert_eq!(
@@ -276,7 +276,7 @@ fn incremental_scan_detects_subsecond_and_same_stamp_size_changes() {
             .unwrap();
         fxi::index::build::update_index(fixture.0.path()).unwrap();
         let reader = IndexReader::open(fixture.0.path()).unwrap();
-        let docs = reader.get_token_docs("changed") & reader.valid_doc_ids();
+        let docs = reader.get_token_docs("changed").unwrap() & reader.valid_doc_ids();
         assert_eq!(docs.len(), 1);
         let doc = reader.get_document(docs.min().unwrap()).unwrap();
         assert_eq!(doc.size, text.len() as u64);
@@ -449,7 +449,11 @@ fn legacy_token_dictionaries_without_positions_remain_readable() {
     fs::write(meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
     let reader = IndexReader::open(fixture.0.path()).unwrap();
     assert_eq!(
-        reader.get_token_docs("vector").iter().collect::<Vec<_>>(),
+        reader
+            .get_token_docs("vector")
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
         vec![1]
     );
 }
@@ -800,7 +804,7 @@ fn legacy_and_compact_token_segments_coexist_across_updates_and_compaction() {
         .unwrap();
     }
     let pinned = IndexReader::open(fixture.0.path()).unwrap();
-    let original = pinned.get_token_docs("vector");
+    let original = pinned.get_token_docs("vector").unwrap();
     fs::write(fixture.0.path().join("added.txt"), "vector::start\n").unwrap();
     {
         let _lock = fxi::utils::IndexLock::acquire(fixture.0.path()).unwrap();
@@ -820,7 +824,7 @@ fn legacy_and_compact_token_segments_coexist_across_updates_and_compaction() {
             merge_segments(fixture.0.path()).unwrap();
         }
         let reader = IndexReader::open(fixture.0.path()).unwrap();
-        assert_eq!(reader.get_token_docs("vector").len(), 2);
+        assert_eq!(reader.get_token_docs("vector").unwrap().len(), 2);
         for pattern in ["vector", "\"vector::start\"", "re:/vector::start/"] {
             assert_eq!(
                 QueryExecutor::new(&reader)
@@ -829,7 +833,7 @@ fn legacy_and_compact_token_segments_coexist_across_updates_and_compaction() {
                 vec![PathBuf::from("a.txt"), PathBuf::from("added.txt")]
             );
         }
-        assert_eq!(pinned.get_token_docs("vector"), original);
+        assert_eq!(pinned.get_token_docs("vector").unwrap(), original);
         for doc in &original {
             assert!(pinned.get_line_map(doc).unwrap().is_some());
         }

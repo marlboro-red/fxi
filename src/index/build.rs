@@ -1,5 +1,5 @@
 use crate::index::reader::IndexReader;
-use crate::index::types::{DocFlags, IndexConfig, IndexMeta, Language, SegmentId};
+use crate::index::types::{DocFlags, IndexConfig, IndexMeta, IndexProfile, Language, SegmentId};
 use crate::index::writer::ChunkedIndexWriter;
 use crate::utils::{
     extract_tokens_and_positions, extract_trigrams, find_codebase_root, get_index_dir, is_binary,
@@ -113,15 +113,22 @@ pub struct ProcessedFile<T = Vec<String>> {
     pub token_positions: Vec<(u32, u32)>,
 }
 
-/// Process a single file's content (can run in parallel)
+#[cfg(test)]
 fn process_file_content(rel_path: PathBuf, content: &[u8], mtime: u64) -> Option<ProcessedFile> {
-    process_file_content_with(rel_path, content, mtime, extract_tokens_and_positions)
+    process_file_content_with(
+        rel_path,
+        content,
+        mtime,
+        IndexProfile::Full,
+        extract_tokens_and_positions,
+    )
 }
 
 fn process_file_content_with<T>(
     rel_path: PathBuf,
     content: &[u8],
     mtime: u64,
+    profile: IndexProfile,
     tokenize: impl FnOnce(&str) -> (T, Vec<(u32, u32)>),
 ) -> Option<ProcessedFile<T>> {
     // Check if binary
@@ -148,7 +155,11 @@ fn process_file_content_with<T>(
     let (tokens, token_positions) = tokenize(text);
 
     // Build line map
-    let line_offsets = build_line_map(content);
+    let line_offsets = if profile == IndexProfile::Full {
+        build_line_map(content)
+    } else {
+        Vec::new()
+    };
 
     Some(ProcessedFile {
         rel_path,
@@ -207,9 +218,35 @@ pub fn build_index_with_options(
     chunk_size_override: Option<usize>,
 ) -> Result<()> {
     let root = root_path.canonicalize().context("Invalid path")?;
+    let meta_path = get_index_dir(&root)?.join("meta.json");
+    let profile = match File::open(meta_path) {
+        Ok(file) => match serde_json::from_reader::<_, IndexMeta>(file) {
+            Ok(meta) => meta.profile,
+            Err(error) => {
+                eprintln!("Cannot recover index profile ({error}); rebuilding with full evidence");
+                IndexProfile::Full
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => IndexProfile::Full,
+        Err(error) => return Err(error.into()),
+    };
+    build_index_with_profile(root_path, _force, silent, chunk_size_override, profile)
+}
+
+pub fn build_index_with_profile(
+    root_path: &Path,
+    _force: bool,
+    silent: bool,
+    chunk_size_override: Option<usize>,
+    profile: IndexProfile,
+) -> Result<()> {
+    let root = root_path.canonicalize().context("Invalid path")?;
     anyhow::ensure!(root.to_str().is_some(), "Index roots must be valid UTF-8");
 
-    let config = IndexConfig::default();
+    let config = IndexConfig {
+        profile,
+        ..IndexConfig::default()
+    };
     let max_file_size = config.max_file_size;
 
     if !silent {
@@ -522,12 +559,14 @@ pub fn build_index_with_options(
                     .unwrap_or(0);
 
                 // Process file content (trigrams, tokens, line map)
-                let result = process_file_content_with(
-                    rel_path.clone(),
-                    &content,
-                    mtime,
-                    crate::utils::extract_packed_tokens_and_positions,
-                );
+                let result =
+                    process_file_content_with(rel_path.clone(), &content, mtime, profile, |text| {
+                        if profile == IndexProfile::Full {
+                            crate::utils::extract_packed_tokens_and_positions(text)
+                        } else {
+                            (crate::utils::PackedTokens::default(), Vec::new())
+                        }
+                    });
 
                 if result.is_some() {
                     total_processed_clone.fetch_add(1, Ordering::Relaxed);
@@ -1236,6 +1275,7 @@ fn process_file_for_update(
     full_path: &Path,
     rel_path: &Path,
     max_file_size: u64,
+    profile: IndexProfile,
 ) -> Result<Option<ProcessedFile>> {
     anyhow::ensure!(
         rel_path.to_str().is_some(),
@@ -1262,7 +1302,15 @@ fn process_file_for_update(
         .as_nanos()
         .min(u64::MAX as u128) as u64;
     let content = read_index_source(file, metadata.len(), max_file_size).map_err(read_error)?;
-    Ok(content.and_then(|content| process_file_content(rel_path.to_path_buf(), &content, mtime)))
+    Ok(content.and_then(|content| {
+        process_file_content_with(rel_path.to_path_buf(), &content, mtime, profile, |text| {
+            if profile == IndexProfile::Full {
+                extract_tokens_and_positions(text)
+            } else {
+                (Vec::new(), Vec::new())
+            }
+        })
+    }))
 }
 
 /// Perform incremental update by writing the diff as a delta segment:
@@ -1313,7 +1361,7 @@ fn perform_incremental_update_visible(
         .par_iter()
         .map(|(full, rel)| {
             Ok(
-                match process_file_for_update(full, rel, config.max_file_size)? {
+                match process_file_for_update(full, rel, config.max_file_size, meta.profile)? {
                     Some(p) => Ok(p),
                     None => {
                         // Rejected (binary sniff etc.): remember it with its
@@ -1455,6 +1503,43 @@ pub fn build_index_auto(start_path: &Path, force: bool, chunk_size: Option<usize
 #[cfg(test)]
 mod encoding_tests {
     use super::*;
+
+    #[test]
+    fn lean_preview_preserves_capabilities_and_searches_new_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for id in 0..10 {
+            fs::write(root.join(format!("{id}.txt")), "original content\n").unwrap();
+        }
+        build_index_with_profile(&root, true, true, None, IndexProfile::Lean).unwrap();
+        let base = IndexReader::open(&root).unwrap();
+        fs::write(root.join("0.txt"), "new preview needle\n").unwrap();
+        let mut seen = false;
+        reconcile_index_paths_with_visibility(
+            &root,
+            Some(&base),
+            100,
+            &["0.txt".into()],
+            &mut |preview| {
+                seen = true;
+                assert_eq!(preview.meta.profile, IndexProfile::Lean);
+                assert!(preview.get_token_docs("needle").is_err());
+                assert_eq!(preview.get_line_map(1).unwrap(), None);
+                let files = crate::query::QueryExecutor::new(&preview)
+                    .execute_files_only(&crate::query::parse_query("needle"), 0)
+                    .unwrap();
+                assert_eq!(files, vec![PathBuf::from("0.txt")]);
+            },
+            true,
+        )
+        .unwrap();
+        assert!(seen);
+        assert_eq!(
+            IndexReader::open(&root).unwrap().generation_path(),
+            base.generation_path()
+        );
+        crate::utils::remove_index(&root).unwrap();
+    }
 
     #[test]
     fn segment_counts_cannot_wrap_the_disk_identifier() {

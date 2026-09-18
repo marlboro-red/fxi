@@ -21,9 +21,11 @@ fn main() {
             for repetition in 0..12 {
                 let start = Instant::now();
                 let docs = if contains {
-                    reader.get_token_docs_containing(token)
+                    reader
+                        .get_token_docs_containing(token)
+                        .expect("token evidence")
                 } else {
-                    reader.get_token_docs(token)
+                    reader.get_token_docs(token).expect("token evidence")
                 };
                 let milliseconds = start.elapsed().as_secs_f64() * 1000.0;
                 let mut paths: Vec<_> = docs

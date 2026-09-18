@@ -925,6 +925,10 @@ impl IndexReader {
     }
 
     pub(crate) fn ensure_tokens(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.meta.profile == IndexProfile::Full,
+            "Token evidence is unavailable in a lean index; rebuild with --profile full"
+        );
         if self.segments.len() <= 4 {
             self.segments
                 .iter()
@@ -948,6 +952,10 @@ impl IndexReader {
         let meta_path = index_path.join("meta.json");
         let meta_file = File::open(&meta_path).context("Failed to open meta.json")?;
         let meta: IndexMeta = serde_json::from_reader(meta_file)?;
+        anyhow::ensure!(
+            meta.profile != IndexProfile::Lean || !meta.has_positions,
+            "Lean index metadata cannot require token positions"
+        );
         anyhow::ensure!(
             matches!(meta.version, 1 | 2),
             "Unsupported index version {}; rebuild the index",
@@ -979,7 +987,7 @@ impl IndexReader {
                     &path,
                     seg_id,
                     meta.has_positions,
-                    load_tokens,
+                    load_tokens && meta.profile == IndexProfile::Full,
                     allowed.get(&seg_id).cloned().unwrap_or_default(),
                 )
                 .map(Arc::new)
@@ -1278,10 +1286,12 @@ impl IndexReader {
         }
     }
 
-    /// Get documents matching a token (queries all segments in parallel) as a RoaringBitmap
-    pub fn get_token_docs(&self, token: &str) -> RoaringBitmap {
+    /// Get documents matching a token. Returns an error if token evidence is
+    /// unavailable or invalid; lean indexes require rebuilding with the full profile.
+    pub fn get_token_docs(&self, token: &str) -> Result<RoaringBitmap> {
+        self.ensure_tokens()?;
         let token_lower = token.to_lowercase();
-        if self.segments.len() <= 1 {
+        Ok(if self.segments.len() <= 1 {
             self.segments
                 .first()
                 .map(|s| s.get_token_docs(&token_lower))
@@ -1294,15 +1304,16 @@ impl IndexReader {
                     a |= b;
                     a
                 })
-        }
+        })
     }
 
     /// Get documents whose token dictionary has any token containing `needle`
     /// as a substring (queries all segments in parallel). Used as a recall
     /// fallback when trigram narrowing is unavailable (stop-grams).
-    pub fn get_token_docs_containing(&self, needle: &str) -> RoaringBitmap {
+    pub fn get_token_docs_containing(&self, needle: &str) -> Result<RoaringBitmap> {
+        self.ensure_tokens()?;
         let needle_lower = needle.to_lowercase();
-        if self.segments.len() <= 1 {
+        Ok(if self.segments.len() <= 1 {
             self.segments
                 .first()
                 .map(|s| s.get_token_docs_containing(&needle_lower))
@@ -1315,13 +1326,16 @@ impl IndexReader {
                     a |= b;
                     a
                 })
-        }
+        })
     }
 
     /// Get stored line offsets. Missing maps return `None`; unreadable or
     /// malformed maps return an error instead of silently inventing line 1.
     #[allow(dead_code)]
     pub fn get_line_map(&self, doc_id: DocId) -> Result<Option<&Vec<u32>>> {
+        if self.meta.profile == IndexProfile::Lean {
+            return Ok(None);
+        }
         for segment in &self.segments {
             if let Some(line_map) = segment.get_line_map(doc_id)? {
                 return Ok(Some(line_map));
@@ -1425,20 +1439,22 @@ impl IndexReader {
     /// When `candidates` is provided (the trigram-narrowed set), only those
     /// docs' positions are decoded — a phrase containing a common token no
     /// longer decodes that token's entire position posting list.
-    /// Returns None if any segment lacks position data (graceful fallback).
+    /// Errors if token evidence is unavailable or invalid.
+    /// Returns None if any full-profile segment lacks position data (legacy fallback).
     /// Returns Some(bitmap) of doc_ids where the phrase appears.
     pub fn resolve_phrase_positional(
         &self,
         phrase_tokens: &[(String, u32)],
         candidates: Option<&RoaringBitmap>,
-    ) -> Option<RoaringBitmap> {
+    ) -> Result<Option<RoaringBitmap>> {
+        self.ensure_tokens()?;
         if phrase_tokens.len() < 2 {
-            return None;
+            return Ok(None);
         }
 
         // Check all segments have position data
         if self.segments.iter().any(|s| s.tokens().positions.is_none()) {
-            return None;
+            return Ok(None);
         }
 
         // Lowercase tokens once, not once per segment
@@ -1458,7 +1474,7 @@ impl IndexReader {
                 a
             });
 
-        Some(result)
+        Ok(Some(result))
     }
 
     /// Resolve a phrase within one segment (see resolve_phrase_positional).
@@ -2368,9 +2384,9 @@ mod tests {
     fn internal_search_readers_load_complete_token_data_on_demand() {
         let (_temp, root) = create_test_index();
         let full = IndexReader::open(&root).unwrap();
-        let expected_docs = full.get_token_docs("main");
+        let expected_docs = full.get_token_docs("main").unwrap();
         let phrase = vec![("fn".into(), 0), ("main".into(), 1)];
-        let expected_positions = full.resolve_phrase_positional(&phrase, None);
+        let expected_positions = full.resolve_phrase_positional(&phrase, None).unwrap();
         drop(full);
         let core = IndexReader::open_for_search_uncached(&root).unwrap();
         assert!(
@@ -2398,9 +2414,9 @@ mod tests {
                 .iter()
                 .all(|segment| segment.tokens.get().unwrap().is_ok())
         );
-        assert_eq!(core.get_token_docs("main"), expected_docs);
+        assert_eq!(core.get_token_docs("main").unwrap(), expected_docs);
         assert_eq!(
-            core.resolve_phrase_positional(&phrase, None),
+            core.resolve_phrase_positional(&phrase, None).unwrap(),
             expected_positions
         );
         drop(core);
@@ -2623,10 +2639,10 @@ mod tests {
         let reader = IndexReader::open(&root_path).expect("Failed to open index");
 
         // "main" and "println" should be tokens in our test file
-        let docs = reader.get_token_docs("main");
+        let docs = reader.get_token_docs("main").unwrap();
         assert!(!docs.is_empty(), "Should find documents with 'main' token");
 
-        let docs = reader.get_token_docs("println");
+        let docs = reader.get_token_docs("println").unwrap();
         assert!(
             !docs.is_empty(),
             "Should find documents with 'println' token"
@@ -2638,7 +2654,7 @@ mod tests {
         let (_temp_dir, root_path) = create_test_index();
         let reader = IndexReader::open(&root_path).expect("Failed to open index");
 
-        let docs = reader.get_token_docs("xyznonexistent123");
+        let docs = reader.get_token_docs("xyznonexistent123").unwrap();
         assert!(docs.is_empty(), "Should not find nonexistent token");
     }
 

@@ -112,11 +112,11 @@ fn main() -> Result<()> {
         let mut narrowed = baseline.clone();
         let mut token_frequencies = Vec::new();
         for (token, _) in &tokens {
-            let postings = reader.get_token_docs(token);
+            let postings = reader.get_token_docs(token)?;
             token_frequencies.push((token.clone(), postings.len()));
             narrowed &= postings;
         }
-        let positional = reader.resolve_phrase_positional(&tokens, Some(&narrowed));
+        let positional = reader.resolve_phrase_positional(&tokens, Some(&narrowed))?;
         let position_available = positional.is_some();
         let positional = positional.unwrap_or_else(|| narrowed.clone());
         let oracle = std::process::Command::new("rg")

@@ -123,7 +123,7 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
 
     // Step 2: Merge all segment postings
     let (trigram_postings, token_postings, line_maps, token_positions, has_positions) =
-        merge_all_segments(&index_path, &segment_ids, &remapping)?;
+        merge_all_segments(&index_path, &segment_ids, &remapping, meta.profile)?;
     eprintln!(
         "  Merged {} trigrams, {} tokens{}",
         trigram_postings.len(),
@@ -151,16 +151,18 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
     // Write segment files. The merged segment drops stop-grams entirely:
     // they can't narrow and the executor never looks them up.
     segment_io::write_trigram_index(&new_segment_path, &trigram_postings, Some(&stop_grams))?;
-    segment_io::write_token_index(
-        &new_segment_path,
-        &token_postings,
-        if has_positions {
-            Some(&token_positions)
-        } else {
-            None
-        },
-    )?;
-    segment_io::write_line_maps(&new_segment_path, &line_maps)?;
+    if meta.profile == IndexProfile::Full {
+        segment_io::write_token_index(
+            &new_segment_path,
+            &token_postings,
+            if has_positions {
+                Some(&token_positions)
+            } else {
+                None
+            },
+        )?;
+        segment_io::write_line_maps(&new_segment_path, &line_maps)?;
+    }
     segment_io::build_and_write_bloom(&new_segment_path, trigram_postings.keys().copied(), 10000)?;
     eprintln!("  Wrote merged segment to seg_{:04}", new_segment_id);
 
@@ -178,6 +180,7 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
         .as_secs();
 
     let new_meta = IndexMeta {
+        profile: meta.profile,
         version: 2,
         root_path: meta.root_path,
         doc_count: remapping.valid_docs.len() as u32,
@@ -293,12 +296,13 @@ fn merge_all_segments(
     index_path: &Path,
     segment_ids: &[SegmentId],
     remapping: &DocIdRemapping,
+    profile: IndexProfile,
 ) -> Result<MergedSegments> {
     let mut merged_trigrams: BTreeMap<Trigram, Vec<DocId>> = BTreeMap::new();
     let mut merged_tokens: BTreeMap<String, Vec<DocId>> = BTreeMap::new();
     let mut merged_line_maps: HashMap<DocId, Vec<u32>> = HashMap::new();
     let mut merged_positions: BTreeMap<String, BTreeMap<DocId, Vec<u32>>> = BTreeMap::new();
-    let mut all_have_positions = true;
+    let mut all_have_positions = profile == IndexProfile::Full;
 
     let segments_path = index_path.join("segments");
 
@@ -309,6 +313,9 @@ fn merge_all_segments(
         // Merge trigram postings
         merge_trigram_segment(&segment_path, &mut merged_trigrams, remapping)?;
 
+        if profile == IndexProfile::Lean {
+            continue;
+        }
         // Merge token postings
         merge_token_segment(&segment_path, &mut merged_tokens, remapping)?;
 

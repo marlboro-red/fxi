@@ -933,7 +933,7 @@ impl<'a> QueryExecutor<'a> {
 
                 PlanStep::TokenLookup(token) => {
                     self.reader.ensure_tokens()?;
-                    let docs = self.reader.get_token_docs(token);
+                    let docs = self.reader.get_token_docs(token)?;
 
                     candidates = Some(match candidates {
                         Some(existing) => existing & docs,
@@ -947,7 +947,7 @@ impl<'a> QueryExecutor<'a> {
                     trigrams,
                 } => {
                     self.reader.ensure_tokens()?;
-                    let mut docs = self.reader.get_token_docs(token);
+                    let mut docs = self.reader.get_token_docs(token)?;
 
                     // Trigram side is a best-effort substring-recall
                     // supplement: when all its trigrams are stop-grams it is
@@ -966,14 +966,14 @@ impl<'a> QueryExecutor<'a> {
                         // lies inside a single token ("println" in
                         // "eprintln"), so scan the dictionary for containing
                         // tokens...
-                        docs |= self.reader.get_token_docs_containing(token);
+                        docs |= self.reader.get_token_docs_containing(token)?;
 
                         // ...and compound identifiers (foo_bar) are indexed
                         // as their parts, so intersect the sub-token postings
                         if sub_tokens.len() >= 2 {
                             let mut sub_docs: Option<RoaringBitmap> = None;
                             for sub in sub_tokens {
-                                let d = self.reader.get_token_docs(sub);
+                                let d = self.reader.get_token_docs(sub)?;
                                 sub_docs = Some(match sub_docs {
                                     Some(existing) => existing & d,
                                     None => d,
@@ -1035,7 +1035,7 @@ impl<'a> QueryExecutor<'a> {
                     // decoding positions only for already-narrowed candidates
                     if let Some(positional_docs) = self
                         .reader
-                        .resolve_phrase_positional(phrase_tokens, candidates.as_ref())
+                        .resolve_phrase_positional(phrase_tokens, candidates.as_ref())?
                     {
                         candidates = Some(match candidates {
                             Some(existing) => existing & positional_docs,
