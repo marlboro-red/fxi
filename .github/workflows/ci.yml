@@ -25,6 +25,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
       # The integration tests compare fxi output against real ripgrep
       - name: Install ripgrep (Linux)
         if: runner.os == 'Linux'
@@ -44,10 +48,22 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Keep FXI_INDEXES unset here: a forgotten fixture initializer must be
+      # visible as a write to the real default app-data tree.
+      - name: Snapshot real app data
+        id: app-data-before
+        run: |
+          python -c "import os; assert 'FXI_INDEXES' not in os.environ, 'CI must exercise the default storage path'"
+          python scripts/check-test-storage.py snapshot "${{ runner.temp }}/fxi-app-data-before.json"
+
       - name: Test
         env:
           FXI_DIFF_FAILURE_DIR: ${{ github.workspace }}/target/differential-failures
         run: cargo test --all-targets
+
+      - name: Verify tests left real app data unchanged
+        if: always() && steps.app-data-before.outcome == 'success'
+        run: python scripts/check-test-storage.py verify "${{ runner.temp }}/fxi-app-data-before.json"
 
       - name: Retain minimized differential failures
         if: failure()
@@ -83,6 +99,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: python3 scripts/test_benchmarks.py
+      - run: python3 scripts/test_test_storage.py
 
   fuzz-targets:
     name: compile bounded fuzz targets

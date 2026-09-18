@@ -1,0 +1,9 @@
+{
+  "test_executions": 990,
+  "before_containers": 15324,
+  "after_containers": 15324,
+  "added": 0,
+  "removed": 0,
+  "changed_container_mtimes": 0,
+  "scope": "container names and mtimes; not a full content audit"
+}
