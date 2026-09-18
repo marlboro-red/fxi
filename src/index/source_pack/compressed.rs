@@ -237,7 +237,7 @@ impl CompressedPack {
         let length = file.metadata()?.len();
         let mut records = Vec::with_capacity(count as usize);
         let mut previous = None;
-        for bytes in payload.chunks_exact(RECORD) {
+        for bytes in payload.as_chunks::<RECORD>().0 {
             let r: [u64; WORDS] = std::array::from_fn(|i| word(&bytes[i * 8..]).unwrap());
             ensure!(
                 r[0] <= u64::from(u32::MAX) && previous.is_none_or(|id| id < r[0]),

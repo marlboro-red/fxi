@@ -672,6 +672,7 @@ dependencies = [
  "indicatif",
  "libc",
  "lru 0.16.4",
+ "lz4_flex",
  "memchr",
  "memmap2",
  "notify",
@@ -1032,6 +1033,12 @@ checksum = "ff9840bcc50b71349309900da0ce7279aa336ae71d73250b07998932c7d97c25"
 dependencies = [
  "hashbrown 0.17.1",
 ]
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
 
 [[package]]
 name = "mac_address"
