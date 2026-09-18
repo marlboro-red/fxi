@@ -1,0 +1,185 @@
+{
+  "harness_sha256": "c7669136798bebcab502ed57bfc5ec9244168b362256c459f9ac3c87f7365ac1",
+  "candidate_indexes": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-t_05qm7b/2-after",
+  "rayon_threads": {
+    "before": null,
+    "after": null
+  },
+  "search_parallelism": {
+    "before": null,
+    "after": null
+  },
+  "corpus": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "indexes": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-t_05qm7b/2-before",
+  "mode": "direct",
+  "output_mode": "files",
+  "query_syntax": "regex",
+  "binaries": {
+    "before": {
+      "path": "/private/tmp/fxi-size-baseline-70b7ef5",
+      "sha256": "3c83d598179acc7797f4dbfdfa910aadb2d3a41a916bbade8db23efb3ef6bb35"
+    },
+    "after": {
+      "path": "/private/tmp/fxi-size-candidate",
+      "sha256": "b50dbc28e45c71ab854a41d1a7dcf3f125ffedcee6832a830728b836f3f0da18"
+    }
+  },
+  "rows": [
+    {
+      "query": "auditNonexistentSymbol94283",
+      "pattern": "auditNonexistentSymbol94283",
+      "files": 0,
+      "tools": {
+        "before": {
+          "median_ms": 34.973416,
+          "samples_ms": [
+            35.187083,
+            36.680458,
+            34.785709,
+            34.080166,
+            34.973416,
+            35.350625,
+            34.977042,
+            34.700667,
+            34.629875,
+            35.985791,
+            34.5135
+          ]
+        },
+        "after": {
+          "median_ms": 35.310709,
+          "samples_ms": [
+            35.717833,
+            35.05,
+            35.177834,
+            35.80825,
+            35.026834,
+            35.420417,
+            34.779125,
+            34.811209,
+            36.264209,
+            35.310709,
+            35.878875
+          ]
+        }
+      }
+    },
+    {
+      "query": "folio_wait_bit_common",
+      "pattern": "folio_wait_bit_common",
+      "files": 1,
+      "tools": {
+        "before": {
+          "median_ms": 37.13025,
+          "samples_ms": [
+            37.13025,
+            36.845541,
+            36.757,
+            37.51725,
+            37.720334,
+            36.645959,
+            36.508208,
+            37.187584,
+            37.841458,
+            37.048792,
+            37.553083
+          ]
+        },
+        "after": {
+          "median_ms": 37.594625,
+          "samples_ms": [
+            37.594625,
+            36.765709,
+            38.204875,
+            36.610708,
+            37.938166,
+            38.116083,
+            39.16175,
+            36.853041,
+            37.114292,
+            38.080792,
+            37.53425
+          ]
+        }
+      }
+    },
+    {
+      "query": "struct file_operations",
+      "pattern": "struct file_operations",
+      "files": 1240,
+      "tools": {
+        "before": {
+          "median_ms": 47.664709,
+          "samples_ms": [
+            47.817042,
+            47.091625,
+            47.355583,
+            47.504083,
+            48.575584,
+            47.3635,
+            48.899459,
+            47.664709,
+            46.786125,
+            48.420291,
+            48.631792
+          ]
+        },
+        "after": {
+          "median_ms": 48.025875,
+          "samples_ms": [
+            47.861583,
+            48.025875,
+            48.128083,
+            47.839167,
+            47.723083,
+            48.369417,
+            47.886708,
+            48.82775,
+            47.759417,
+            48.408959,
+            48.475084
+          ]
+        }
+      }
+    },
+    {
+      "query": "return",
+      "pattern": "return",
+      "files": 44258,
+      "tools": {
+        "before": {
+          "median_ms": 113.123958,
+          "samples_ms": [
+            109.988542,
+            113.123958,
+            115.987292,
+            112.939625,
+            114.211459,
+            114.193291,
+            114.004375,
+            111.2165,
+            111.547333,
+            112.241333,
+            115.499541
+          ]
+        },
+        "after": {
+          "median_ms": 113.316041,
+          "samples_ms": [
+            117.0645,
+            113.316041,
+            113.065833,
+            112.800792,
+            114.233209,
+            112.377208,
+            114.430167,
+            110.630041,
+            115.598166,
+            112.195459,
+            114.298042
+          ]
+        }
+      }
+    }
+  ]
+}

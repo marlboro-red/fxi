@@ -1,0 +1,92 @@
+{
+  "corpus": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "indexes": {
+    "before": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-5nw5rbym/2-before",
+    "after": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-5nw5rbym/2-after"
+  },
+  "binaries": {
+    "before": {
+      "path": "/private/tmp/fxi-token-probe-baseline-70b7ef5",
+      "sha256": "f82b72bff453f24382c0fd8f071acf6d17d8d7da768bfac0446f2c2c80df2aab"
+    },
+    "after": {
+      "path": "/private/tmp/fxi-token-probe-candidate-v2",
+      "sha256": "40cffb177b815a698d0f8cb1683c2cfd93ad1ecc772fb8fbbdb61f0029f605c5"
+    }
+  },
+  "harness_sha256": "ddb9da6bd13670b8e9deb1f92dd8a18467439dcdd1b450caf1f9f0f974f78a03",
+  "mode": "warm-filesystem eager open only; probe terminated after first timing line, excluding later lookup batches; randomized pair order",
+  "samples_ms": {
+    "before": [
+      124.06858299999999,
+      174.308834,
+      137.52979200000001,
+      136.325042,
+      120.26391699999999,
+      173.48037499999998,
+      128.377833,
+      137.937417,
+      115.238041,
+      136.76962500000002,
+      137.87800000000001,
+      134.119042,
+      122.877875,
+      149.01187499999997,
+      150.635667,
+      138.64358399999998,
+      138.566208,
+      134.563459,
+      123.57041600000001,
+      143.14554199999998,
+      122.976666,
+      157.03187499999999,
+      140.165125,
+      121.250125,
+      166.031375,
+      118.671292,
+      132.816375,
+      163.44525,
+      123.024333,
+      116.96,
+      151.521458
+    ],
+    "after": [
+      143.710375,
+      145.102583,
+      123.35024999999999,
+      137.501959,
+      108.03183299999999,
+      160.526791,
+      124.29445799999999,
+      106.2655,
+      124.253917,
+      144.904958,
+      162.067167,
+      159.092,
+      127.55662500000001,
+      122.30308400000001,
+      145.546584,
+      160.95624999999998,
+      125.49354200000002,
+      147.18200000000002,
+      123.876375,
+      182.321208,
+      128.565833,
+      158.98262499999998,
+      162.861708,
+      121.476958,
+      125.4625,
+      124.748833,
+      139.811458,
+      137.10845899999998,
+      163.109875,
+      163.190458,
+      126.87358300000001
+    ]
+  },
+  "medians_ms": {
+    "before": 136.76962500000002,
+    "after": 137.501959
+  },
+  "median_paired_after_before_ratio": 1.0124226371238323
+}

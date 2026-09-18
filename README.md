@@ -247,6 +247,7 @@ Performance depends on query shape, output mode, corpus, cache state and platfor
 FXI is not the best tool on every measured workload. The reports retain losing
 cases as well as wins:
 
+- [Token dictionary compression](docs/performance-token-dictionary/NOTES.md): 50.4% smaller dictionaries, 8.3% smaller unpacked index and roughly 52 MiB less eager-reader memory on the common Linux fixture, with compatibility tests and measured timing tradeoffs.
 - [Core and usability follow-up](docs/performance-core-followup/NOTES.md): measured daemon startup/memory improvements, prepared phrase searches, CLI fixes and remaining structural costs.
 - [After-audit comparison](docs/performance-after-audit/NOTES.md): the preceding fixed FXI baseline versus tgrep, csearch, Zoekt and ripgrep, including default/packed reads and warm APIs.
 - [Update visibility](docs/performance-round7/NOTES.md): short saves, atomic replacement and bursts on macOS.

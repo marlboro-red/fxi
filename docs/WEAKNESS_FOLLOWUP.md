@@ -7,7 +7,7 @@ It separates completed changes from research results and work still needed.
 |---|---|---|
 | Concurrent updates | Added controlled overlap regressions for new edits during preview/durable publication and removal during publication. All pass without a production change. | Exercise sustained multi-root updates and failures with concurrent searches; measure visibility tails. The single publisher can still delay unrelated roots. |
 | Resource control | Process-wide daemon search admission; explicit overload; bounded Unix response queue; permits held through delivery; CLI respects overload. | Per-query allocation/result budgets, cancellation and deadlines. Admission does not bound total RSS or independently launched direct searches. |
-| Index size | Identified approximately 373 MiB of token data in the existing 33-segment fixture; no new format shipped. | Measure lossless dictionary compression and build/read costs. Removing tokens requires an explicit capability/API contract; silently breaking public token APIs is unacceptable. |
+| Index size | Lossless token metadata compression halves dictionary bytes and reduces the unpacked index 626.6 → 574.7 MiB, with about 52 MiB less eager-reader RSS. Legacy reads and mixed-format updates/compaction remain supported. | Position payloads and source packs remain large. Removing tokens requires an explicit capability/API contract; silently breaking public token APIs is unacceptable. |
 | One-shot startup | Existing strict batched validation remains in place; no new shortcut shipped. | Profile remaining startup work. Any reusable validation proof must bind the opened immutable generation, all relevant dependencies and the validation contract. Preserve corruption detection. |
 | Phrase search | Longer-gram lab: `struct file_operations` candidates fall from 3,787 to 1,240; an optimistic offline prototype reduces query time from 5.228 to 2.781 ms with identical verification. | Measure general-index storage/build overhead and native API performance. Production constraints must originate from the same content as primary indexing, and preserve memory previews, deltas and compaction. |
 | CLI/search usability | Help now explicitly describes global matching-line/file limits and matching-line counts; overload errors no longer silently launch another search. | Multiple spans per line, inversion and multiline need explicit semantics and differential tests before implementation. |
@@ -37,6 +37,8 @@ Selective persisted postings must distinguish a gram not stored from a gram abse
 in every document. Cached live-source bytes are not a safe substitute for extracting
 constraints during primary indexing.
 
-The index-size research agent was stopped by automatic review with a possible
-cybersecurity-risk flag before making format changes. No compression improvement
-or index-size reduction is claimed from this round.
+The initial index-size research interruption was followed by a focused local
+storage-format task. The resulting [compression report](performance-token-dictionary/NOTES.md)
+records measured disk, build, memory and search results, including the first
+apparent loading regression and the larger follow-up. Final loading/search times
+were roughly unchanged; this is a size/memory improvement, not a search speedup.

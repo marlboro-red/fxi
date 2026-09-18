@@ -1,0 +1,339 @@
+{
+  "corpus": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "indexes": {
+    "before": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-5nw5rbym/2-before",
+    "after": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-5nw5rbym/2-after"
+  },
+  "binaries": {
+    "before": {
+      "path": "/private/tmp/fxi-token-probe-baseline-70b7ef5",
+      "sha256": "f82b72bff453f24382c0fd8f071acf6d17d8d7da768bfac0446f2c2c80df2aab"
+    },
+    "after": {
+      "path": "/private/tmp/fxi-token-probe-candidate-v2",
+      "sha256": "40cffb177b815a698d0f8cb1683c2cfd93ad1ecc772fb8fbbdb61f0029f605c5"
+    }
+  },
+  "harness_sha256": "abefda4d314b258c386593f527b16ad28a29be683a6e8aa1c99a33b77f7f3dea",
+  "path_fingerprints": {
+    "false:operations": [
+      6435,
+      "17573056016754702055"
+    ],
+    "false:folio": [
+      675,
+      "6818012060835407838"
+    ],
+    "false:return": [
+      43921,
+      "15548012519623535834"
+    ],
+    "false:nonexistentmarker94283": [
+      0,
+      "13646096770106105413"
+    ],
+    "true:operations": [
+      6435,
+      "17573056016754702055"
+    ],
+    "true:folio": [
+      697,
+      "9185055549557587209"
+    ],
+    "true:return": [
+      44688,
+      "7414708258434308445"
+    ],
+    "true:nonexistentmarker94283": [
+      0,
+      "13646096770106105413"
+    ]
+  },
+  "limits": "Warm filesystem; sorted path counts + 64-bit fingerprints, not independent token oracle. Query samples are medians of11 warm API calls per process. Eager open and peak processRSS include token validation; excludes CLI/daemon transport.",
+  "tools": {
+    "before": {
+      "samples": [
+        {
+          "peak_rss_bytes": 656392192,
+          "queries": {
+            "false:operations": 0.16162500000000002,
+            "false:folio": 0.13799999999999998,
+            "false:return": 0.220791,
+            "false:nonexistentmarker94283": 0.07166600000000001,
+            "true:operations": 5.015000000000001,
+            "true:folio": 6.1775839999999995,
+            "true:return": 6.045292,
+            "true:nonexistentmarker94283": 4.4571250000000004
+          },
+          "open_ms": 125.101875
+        },
+        {
+          "peak_rss_bytes": 656408576,
+          "queries": {
+            "false:operations": 0.168125,
+            "false:folio": 0.117167,
+            "false:return": 0.199583,
+            "false:nonexistentmarker94283": 0.035959,
+            "true:operations": 5.0040830000000005,
+            "true:folio": 6.204459,
+            "true:return": 6.005125,
+            "true:nonexistentmarker94283": 4.353166000000001
+          },
+          "open_ms": 127.76695800000002
+        },
+        {
+          "peak_rss_bytes": 656392192,
+          "queries": {
+            "false:operations": 0.215916,
+            "false:folio": 0.12979100000000002,
+            "false:return": 0.199667,
+            "false:nonexistentmarker94283": 0.040834,
+            "true:operations": 4.826208,
+            "true:folio": 6.163292,
+            "true:return": 5.967209,
+            "true:nonexistentmarker94283": 4.301959
+          },
+          "open_ms": 136.85775
+        },
+        {
+          "peak_rss_bytes": 656375808,
+          "queries": {
+            "false:operations": 0.16070900000000002,
+            "false:folio": 0.12787500000000002,
+            "false:return": 0.233417,
+            "false:nonexistentmarker94283": 0.044166,
+            "true:operations": 4.971417,
+            "true:folio": 6.225416999999999,
+            "true:return": 6.1352079999999996,
+            "true:nonexistentmarker94283": 4.244584
+          },
+          "open_ms": 141.839375
+        },
+        {
+          "peak_rss_bytes": 656457728,
+          "queries": {
+            "false:operations": 0.150084,
+            "false:folio": 0.143709,
+            "false:return": 0.234167,
+            "false:nonexistentmarker94283": 0.036208000000000004,
+            "true:operations": 5.055834,
+            "true:folio": 6.116959,
+            "true:return": 5.995584,
+            "true:nonexistentmarker94283": 4.318958
+          },
+          "open_ms": 155.973417
+        },
+        {
+          "peak_rss_bytes": 656441344,
+          "queries": {
+            "false:operations": 0.15345899999999998,
+            "false:folio": 0.126416,
+            "false:return": 0.20658300000000002,
+            "false:nonexistentmarker94283": 0.049666999999999996,
+            "true:operations": 4.836834,
+            "true:folio": 6.030792,
+            "true:return": 5.940333,
+            "true:nonexistentmarker94283": 4.399959
+          },
+          "open_ms": 129.317167
+        },
+        {
+          "peak_rss_bytes": 656343040,
+          "queries": {
+            "false:operations": 0.179416,
+            "false:folio": 0.132459,
+            "false:return": 0.190541,
+            "false:nonexistentmarker94283": 0.037291,
+            "true:operations": 5.075792,
+            "true:folio": 6.176458,
+            "true:return": 5.803958,
+            "true:nonexistentmarker94283": 4.43175
+          },
+          "open_ms": 174.456792
+        },
+        {
+          "peak_rss_bytes": 656408576,
+          "queries": {
+            "false:operations": 0.15175,
+            "false:folio": 0.12079200000000001,
+            "false:return": 0.19891599999999998,
+            "false:nonexistentmarker94283": 0.040417,
+            "true:operations": 4.897167,
+            "true:folio": 6.166874999999999,
+            "true:return": 5.988958,
+            "true:nonexistentmarker94283": 4.44675
+          },
+          "open_ms": 219.27512499999997
+        },
+        {
+          "peak_rss_bytes": 656523264,
+          "queries": {
+            "false:operations": 0.149083,
+            "false:folio": 0.128667,
+            "false:return": 0.20350000000000001,
+            "false:nonexistentmarker94283": 0.04625,
+            "true:operations": 4.959625,
+            "true:folio": 6.214207999999999,
+            "true:return": 5.830416,
+            "true:nonexistentmarker94283": 4.428458
+          },
+          "open_ms": 158.169625
+        }
+      ],
+      "median_open_ms": 141.839375,
+      "median_peak_rss_bytes": 656408576,
+      "median_query_ms": {
+        "false:operations": 0.16070900000000002,
+        "false:folio": 0.128667,
+        "false:return": 0.20350000000000001,
+        "false:nonexistentmarker94283": 0.040834,
+        "true:operations": 4.971417,
+        "true:folio": 6.176458,
+        "true:return": 5.988958,
+        "true:nonexistentmarker94283": 4.399959
+      }
+    },
+    "after": {
+      "samples": [
+        {
+          "peak_rss_bytes": 602013696,
+          "queries": {
+            "false:operations": 0.160625,
+            "false:folio": 0.136458,
+            "false:return": 0.19824999999999998,
+            "false:nonexistentmarker94283": 0.046375,
+            "true:operations": 4.375584,
+            "true:folio": 5.816666,
+            "true:return": 5.563167,
+            "true:nonexistentmarker94283": 3.864208
+          },
+          "open_ms": 136.6405
+        },
+        {
+          "peak_rss_bytes": 601948160,
+          "queries": {
+            "false:operations": 0.162667,
+            "false:folio": 0.12912500000000002,
+            "false:return": 0.207958,
+            "false:nonexistentmarker94283": 0.043667,
+            "true:operations": 4.736458,
+            "true:folio": 5.7826249999999995,
+            "true:return": 5.700583,
+            "true:nonexistentmarker94283": 3.793417
+          },
+          "open_ms": 146.14775
+        },
+        {
+          "peak_rss_bytes": 601948160,
+          "queries": {
+            "false:operations": 0.16224999999999998,
+            "false:folio": 0.116791,
+            "false:return": 0.19924999999999998,
+            "false:nonexistentmarker94283": 0.046916,
+            "true:operations": 4.409792,
+            "true:folio": 5.704166,
+            "true:return": 5.791250000000001,
+            "true:nonexistentmarker94283": 3.748542
+          },
+          "open_ms": 162.805541
+        },
+        {
+          "peak_rss_bytes": 601964544,
+          "queries": {
+            "false:operations": 0.168583,
+            "false:folio": 0.124167,
+            "false:return": 0.211125,
+            "false:nonexistentmarker94283": 0.042375,
+            "true:operations": 4.54725,
+            "true:folio": 5.776958,
+            "true:return": 5.594416,
+            "true:nonexistentmarker94283": 3.901417
+          },
+          "open_ms": 142.480416
+        },
+        {
+          "peak_rss_bytes": 601964544,
+          "queries": {
+            "false:operations": 0.1485,
+            "false:folio": 0.137417,
+            "false:return": 0.20862499999999998,
+            "false:nonexistentmarker94283": 0.035207999999999996,
+            "true:operations": 4.586583,
+            "true:folio": 5.758542,
+            "true:return": 5.709167,
+            "true:nonexistentmarker94283": 3.7195829999999996
+          },
+          "open_ms": 167.091042
+        },
+        {
+          "peak_rss_bytes": 602013696,
+          "queries": {
+            "false:operations": 0.151542,
+            "false:folio": 0.161333,
+            "false:return": 0.22062500000000002,
+            "false:nonexistentmarker94283": 0.042083999999999996,
+            "true:operations": 4.687959,
+            "true:folio": 5.609083,
+            "true:return": 5.5991670000000004,
+            "true:nonexistentmarker94283": 3.803416
+          },
+          "open_ms": 189.50229099999999
+        },
+        {
+          "peak_rss_bytes": 602030080,
+          "queries": {
+            "false:operations": 0.158667,
+            "false:folio": 0.15937500000000002,
+            "false:return": 0.228833,
+            "false:nonexistentmarker94283": 0.039666,
+            "true:operations": 4.40925,
+            "true:folio": 5.637125,
+            "true:return": 5.578584,
+            "true:nonexistentmarker94283": 3.75925
+          },
+          "open_ms": 125.792875
+        },
+        {
+          "peak_rss_bytes": 601980928,
+          "queries": {
+            "false:operations": 0.161916,
+            "false:folio": 0.122583,
+            "false:return": 0.2265,
+            "false:nonexistentmarker94283": 0.043667,
+            "true:operations": 4.4285000000000005,
+            "true:folio": 5.807208,
+            "true:return": 5.553833,
+            "true:nonexistentmarker94283": 3.858125
+          },
+          "open_ms": 122.564459
+        },
+        {
+          "peak_rss_bytes": 601915392,
+          "queries": {
+            "false:operations": 0.156459,
+            "false:folio": 0.14550000000000002,
+            "false:return": 0.21920800000000001,
+            "false:nonexistentmarker94283": 0.061958000000000006,
+            "true:operations": 4.561875,
+            "true:folio": 5.714708,
+            "true:return": 5.651917,
+            "true:nonexistentmarker94283": 3.887
+          },
+          "open_ms": 133.836292
+        }
+      ],
+      "median_open_ms": 142.480416,
+      "median_peak_rss_bytes": 601964544,
+      "median_query_ms": {
+        "false:operations": 0.160625,
+        "false:folio": 0.136458,
+        "false:return": 0.211125,
+        "false:nonexistentmarker94283": 0.043667,
+        "true:operations": 4.54725,
+        "true:folio": 5.758542,
+        "true:return": 5.5991670000000004,
+        "true:nonexistentmarker94283": 3.803416
+      }
+    }
+  }
+}

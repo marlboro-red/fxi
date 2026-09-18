@@ -48,6 +48,32 @@ def load_harness(name):
 
 
 class IndexerHarnessTests(unittest.TestCase):
+    def test_focused_open_probe_uses_each_index_and_stops_after_measurement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / 'probe'
+            log = root / 'calls.jsonl'
+            binary.write_text('#!/usr/bin/env python3\nimport os, json, time\n'
+                              'with open(os.environ["BENCH_TEST_LOG"], "a") as out:\n'
+                              '    out.write(json.dumps(os.environ["FXI_INDEXES"]) + "\\n")\n'
+                              'print("open_ms\\t1.5", flush=True)\n'
+                              'time.sleep(30)\n')
+            binary.chmod(0o755)
+            indexes = {'before': str(root / 'before'), 'after': str(root / 'after')}
+            report = root / 'build.json'
+            report.write_text(json.dumps({'corpus': str(root), 'retained_indexes': indexes}))
+            output = root / 'result.json'
+            subprocess.run([sys.executable, str(Path(__file__).with_name('compare-eager-open.py')),
+                            '--build-report', str(report), '--baseline', str(binary),
+                            '--candidate', str(binary), '--repetitions', '2', '--output', str(output)],
+                           env={**os.environ, 'BENCH_TEST_LOG': str(log)}, check=True,
+                           capture_output=True, timeout=10)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(calls.count(indexes['before']), 2)
+            self.assertEqual(calls.count(indexes['after']), 2)
+            self.assertEqual(json.loads(output.read_text())['samples_ms'],
+                             {'before': [1.5, 1.5], 'after': [1.5, 1.5]})
+
     def test_build_manifest_detects_same_size_source_edits_and_newline_paths(self):
         harness = load_harness('compare-index-builds')
         with tempfile.TemporaryDirectory() as temporary:
