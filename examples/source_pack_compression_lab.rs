@@ -447,7 +447,10 @@ fn main() -> Result<()> {
         let ids = if force_scan || grams.is_empty() {
             reader.valid_doc_ids().clone()
         } else {
-            reader.get_trigram_docs_with_bloom(&grams) & reader.valid_doc_ids()
+            reader
+                .get_trigram_docs_with_bloom(&grams)
+                .expect("validated gram evidence")
+                & reader.valid_doc_ids()
         };
         let candidates: Vec<_> = entries
             .iter()

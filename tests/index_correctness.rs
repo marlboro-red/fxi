@@ -366,7 +366,8 @@ fn damaged_or_legacy_optional_blooms_cannot_hide_documents() {
         fs::write(path, bytes).unwrap();
         let reader = IndexReader::open(fixture.0.path()).unwrap();
         let docs = reader
-            .get_trigram_docs_with_bloom(&[fxi::index::types::bytes_to_trigram(b'v', b'e', b'c')]);
+            .get_trigram_docs_with_bloom(&[fxi::index::types::bytes_to_trigram(b'v', b'e', b'c')])
+            .unwrap();
         assert_eq!(docs.iter().collect::<Vec<_>>(), vec![1]);
     }
 }
@@ -382,7 +383,10 @@ fn common_grams_remain_selective_after_repeated_compaction() {
     for _ in 0..3 {
         let reader = IndexReader::open(fixture.0.path()).unwrap();
         assert!(!reader.is_stop_gram(gram));
-        assert_eq!(reader.get_trigram_docs_with_bloom(&[gram]).len(), 2);
+        assert_eq!(
+            reader.get_trigram_docs_with_bloom(&[gram]).unwrap().len(),
+            2
+        );
         drop(reader);
         merge_segments(fixture.0.path()).unwrap();
     }

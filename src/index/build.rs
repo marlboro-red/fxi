@@ -1660,11 +1660,13 @@ mod encoding_tests {
             assert!(
                 reader
                     .get_trigram_docs(crate::index::types::bytes_to_trigram(b'a', b'l', b'p'))
+                    .unwrap()
                     .contains(1)
             );
             assert!(
                 reader
                     .get_trigram_docs(crate::index::types::bytes_to_trigram(b'o', b'm', b'e'))
+                    .unwrap()
                     .is_empty()
             );
             drop((pack, reader, writer));

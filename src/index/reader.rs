@@ -41,6 +41,7 @@ impl std::ops::Deref for MappedBytes {
 /// Trigram dictionary entry
 struct TrigramDictEntry {
     trigram: Trigram,
+    index: usize,
     offset: u64,
     length: u32,
     #[allow(dead_code)]
@@ -71,6 +72,7 @@ impl TrigramDict {
         let bytes = &self.data[4 + index * 20..];
         TrigramDictEntry {
             trigram: le32(bytes),
+            index,
             offset: le64(&bytes[4..]),
             length: le32(&bytes[12..]),
             doc_freq: le32(&bytes[16..]),
@@ -188,31 +190,36 @@ impl GramQuery {
             _ => Self::Or(children),
         }
     }
-    fn in_segment(&self, segment: &SegmentReader, universe: &RoaringBitmap) -> RoaringBitmap {
+    fn in_segment(
+        &self,
+        segment: &SegmentReader,
+        universe: &RoaringBitmap,
+    ) -> Result<RoaringBitmap> {
         match self {
-            Self::All => universe.clone(),
-            Self::Empty => RoaringBitmap::new(),
+            Self::All => Ok(universe.clone()),
+            Self::Empty => Ok(RoaringBitmap::new()),
             Self::Terms(grams) => segment.intersect_trigrams(grams),
             Self::And(children) => {
                 let mut children = children.iter();
                 let mut result = children
                     .next()
                     .map(|q| q.in_segment(segment, universe))
+                    .transpose()?
                     .unwrap_or_else(|| universe.clone());
                 for child in children {
                     if result.is_empty() {
                         break;
                     }
-                    result &= child.in_segment(segment, universe);
+                    result &= child.in_segment(segment, universe)?;
                 }
-                result
+                Ok(result)
             }
             Self::Or(children) => {
                 children
                     .iter()
-                    .fold(RoaringBitmap::new(), |mut result, child| {
-                        result |= child.in_segment(segment, universe);
-                        result
+                    .try_fold(RoaringBitmap::new(), |mut result, child| {
+                        result |= child.in_segment(segment, universe)?;
+                        Ok(result)
                     })
             }
         }
@@ -260,6 +267,7 @@ struct SegmentReader {
     segment_id: SegmentId,
     trigram_dict: TrigramDict,
     trigram_postings: MappedBytes,
+    gram_checks: Option<crate::index::query_local::PostingChecks>,
     tokens: OnceLock<std::result::Result<TokenIndex, String>>,
     required_positions: bool,
     allowed_docs: Option<Arc<RoaringBitmap>>,
@@ -289,12 +297,37 @@ impl SegmentReader {
         load_tokens: bool,
         allowed_docs: Arc<RoaringBitmap>,
     ) -> Result<Self> {
+        Self::open_with_policy(
+            segment_path,
+            segment_id,
+            required_positions,
+            load_tokens,
+            allowed_docs,
+            false,
+        )
+    }
+
+    fn open_with_policy(
+        segment_path: &Path,
+        segment_id: SegmentId,
+        required_positions: bool,
+        load_tokens: bool,
+        allowed_docs: Arc<RoaringBitmap>,
+        query_local: bool,
+    ) -> Result<Self> {
         let started = std::time::Instant::now();
         // Read trigram dictionary (already sorted from BTreeMap write)
         let trigram_dict = read_trigram_dict(segment_path)?;
 
         let trigram_postings = MappedBytes::open(&segment_path.join("grams.postings"))?;
 
+        let gram_checks = crate::index::query_local::PostingChecks::open(
+            segment_path,
+            &trigram_dict.data,
+            trigram_postings.len(),
+            trigram_dict.count,
+        )?;
+        let lazy = query_local && gram_checks.is_some();
         let mapped = std::time::Instant::now();
         // Validate every payload before exposing the segment. Large segments
         // use the existing Rayon pool so a single base segment does not serialize
@@ -312,7 +345,13 @@ impl SegmentReader {
             );
             let bytes = &trigram_postings
                 [entry.offset as usize..entry.offset as usize + entry.length as usize];
-            validator.validate(bytes, entry.doc_freq)?;
+            if !lazy {
+                if let Some(checks) = &gram_checks {
+                    checks.validate(entry.index, bytes, entry.doc_freq, &validator)?;
+                } else {
+                    validator.validate(bytes, entry.doc_freq)?;
+                }
+            }
             Ok(())
         };
         if trigram_postings.len() >= 1024 * 1024 && trigram_dict.count >= 512 {
@@ -326,7 +365,13 @@ impl SegmentReader {
         // Line maps are NOT loaded here - loaded lazily on first access
 
         // Load bloom filter if it exists (optional for backwards compat)
-        let bloom_filter = read_bloom_filter(segment_path).ok();
+        // Experimental routing uses the checked complete dictionary. An optional
+        // Bloom must not bypass its fallible posting dependency checks.
+        let bloom_filter = if lazy {
+            None
+        } else {
+            read_bloom_filter(segment_path).ok()
+        };
 
         if std::env::var_os("FXI_DEBUG").is_some() {
             eprintln!(
@@ -343,6 +388,7 @@ impl SegmentReader {
             segment_id,
             trigram_dict,
             trigram_postings,
+            gram_checks: if lazy { gram_checks } else { None },
             tokens: OnceLock::new(),
             required_positions,
             allowed_docs: Some(allowed_docs),
@@ -454,6 +500,7 @@ impl SegmentReader {
                 count: gram_count as usize,
             },
             trigram_postings: MappedBytes::Owned(gram_postings),
+            gram_checks: None,
             tokens: OnceLock::from(Ok(TokenIndex {
                 dictionary: TokenDict {
                     data: MappedBytes::Owned(token_dictionary),
@@ -500,36 +547,37 @@ impl SegmentReader {
             .expect("token access requires successful validation")
     }
 
-    fn intersect_trigrams(&self, trigrams: &[Trigram]) -> RoaringBitmap {
+    fn intersect_trigrams(&self, trigrams: &[Trigram]) -> Result<RoaringBitmap> {
         if !self.might_contain_trigrams(trigrams) {
-            return RoaringBitmap::new();
+            return Ok(RoaringBitmap::new());
         }
         let mut sorted: Vec<_> = trigrams
             .iter()
             .map(|&g| (g, self.get_trigram_doc_freq(g)))
             .collect();
         sorted.sort_unstable_by_key(|&(_, frequency)| frequency);
-        let mut result = self.get_trigram_docs(sorted[0].0);
+        let mut result = self.get_trigram_docs(sorted[0].0)?;
         for &(gram, _) in &sorted[1..] {
             if result.is_empty() {
                 break;
             }
-            result = self.get_trigram_docs_intersect(gram, &result);
+            result = self.get_trigram_docs_intersect(gram, &result)?;
         }
-        result
+        Ok(result)
     }
 
     /// Get documents matching a trigram in this segment as a RoaringBitmap
-    fn get_trigram_docs(&self, trigram: Trigram) -> RoaringBitmap {
+    fn get_trigram_docs(&self, trigram: Trigram) -> Result<RoaringBitmap> {
         if let Some(entry) = self.trigram_dict.lookup(trigram) {
             let start = entry.offset as usize;
             let end = start + entry.length as usize;
 
             if end <= self.trigram_postings.len() {
-                return delta_decode_bitmap(&self.trigram_postings[start..end]);
+                self.validate_gram(&entry, &self.trigram_postings[start..end])?;
+                return Ok(delta_decode_bitmap(&self.trigram_postings[start..end]));
             }
         }
-        RoaringBitmap::new()
+        Ok(RoaringBitmap::new())
     }
 
     /// Get documents matching a trigram, intersected with `filter` during
@@ -540,16 +588,34 @@ impl SegmentReader {
         &self,
         trigram: Trigram,
         filter: &RoaringBitmap,
-    ) -> RoaringBitmap {
+    ) -> Result<RoaringBitmap> {
         if let Some(entry) = self.trigram_dict.lookup(trigram) {
             let start = entry.offset as usize;
             let end = start + entry.length as usize;
 
             if end <= self.trigram_postings.len() {
-                return delta_decode_intersect(&self.trigram_postings[start..end], filter);
+                self.validate_gram(&entry, &self.trigram_postings[start..end])?;
+                return Ok(delta_decode_intersect(
+                    &self.trigram_postings[start..end],
+                    filter,
+                ));
             }
         }
-        RoaringBitmap::new()
+        Ok(RoaringBitmap::new())
+    }
+
+    fn validate_gram(&self, entry: &TrigramDictEntry, bytes: &[u8]) -> Result<()> {
+        if let Some(checks) = &self.gram_checks {
+            checks.validate(
+                entry.index,
+                bytes,
+                entry.doc_freq,
+                &crate::utils::encoding::DocumentPostingsValidator::new(
+                    self.allowed_docs.as_deref().expect("disk membership"),
+                ),
+            )?;
+        }
+        Ok(())
     }
 
     /// Get documents matching a token in this segment as a RoaringBitmap
@@ -925,15 +991,17 @@ impl IndexReader {
     }
 
     pub fn open(root_path: &Path) -> Result<Self> {
-        Self::open_with_tokens(root_path, true)
+        Self::open_with_tokens(root_path, true, false)
     }
 
     /// Internal search constructor. Only QueryExecutor should perform
     /// token operations on this reader, using its fallible dependency barrier.
-    /// Gram and document data are validated immediately; token data are
-    /// validated once, before a dependent query can use them.
+    /// Documents and gram dictionaries are validated immediately. By default
+    /// all gram payloads are too; FXI_QUERY_LOCAL opts into checked on-demand
+    /// payloads when publication checksums exist. Token data are validated once,
+    /// before a dependent query can use them.
     pub(crate) fn open_for_search(root: &Path) -> Result<Self> {
-        Self::open_with_tokens(root, false)
+        Self::open_with_tokens(root, false, crate::index::query_local::requested())
     }
 
     /// A one-shot reader cannot reuse content admitted during its search.
@@ -960,7 +1028,7 @@ impl IndexReader {
         }
     }
 
-    fn open_with_tokens(root_path: &Path, load_tokens: bool) -> Result<Self> {
+    fn open_with_tokens(root_path: &Path, load_tokens: bool, query_local: bool) -> Result<Self> {
         let started = std::time::Instant::now();
         let root_path = root_path.canonicalize()?;
         let (index_path, generation_lease) = crate::index::generation::pin(&root_path)?;
@@ -999,12 +1067,13 @@ impl IndexReader {
             .par_iter()
             .map(|&seg_id| {
                 let path = index_path.join("segments").join(format!("seg_{seg_id:04}"));
-                SegmentReader::open(
+                SegmentReader::open_with_policy(
                     &path,
                     seg_id,
                     meta.has_positions,
                     load_tokens && meta.profile == IndexProfile::Full,
                     allowed.get(&seg_id).cloned().unwrap_or_default(),
+                    query_local,
                 )
                 .map(Arc::new)
                 .with_context(|| format!("Cannot open segment {seg_id}; rebuild the index"))
@@ -1295,21 +1364,21 @@ impl IndexReader {
 
     /// Get documents matching a trigram (queries all segments in parallel) as a RoaringBitmap
     #[allow(dead_code)]
-    pub fn get_trigram_docs(&self, trigram: Trigram) -> RoaringBitmap {
+    pub fn get_trigram_docs(&self, trigram: Trigram) -> Result<RoaringBitmap> {
         if self.segments.len() <= 1 {
             // Single segment - no parallelization overhead
             self.segments
                 .first()
                 .map(|s| s.get_trigram_docs(trigram))
-                .unwrap_or_default()
+                .unwrap_or_else(|| Ok(RoaringBitmap::new()))
         } else {
             // Multiple segments - parallel query with reduction
             self.segments
                 .par_iter()
                 .map(|segment| segment.get_trigram_docs(trigram))
-                .reduce(RoaringBitmap::new, |mut a, b| {
+                .try_reduce(RoaringBitmap::new, |mut a, b| {
                     a |= b;
-                    a
+                    Ok(a)
                 })
         }
     }
@@ -1410,36 +1479,36 @@ impl IndexReader {
     /// OPTIMIZATION: Trigrams are sorted by document frequency (selectivity) before
     /// intersection. Processing the rarest trigram first minimizes intermediate result
     /// set sizes and reduces overall work.
-    pub fn get_trigram_docs_with_bloom(&self, trigrams: &[Trigram]) -> RoaringBitmap {
+    pub fn get_trigram_docs_with_bloom(&self, trigrams: &[Trigram]) -> Result<RoaringBitmap> {
         if trigrams.is_empty() {
-            return self.valid_doc_ids().clone();
+            return Ok(self.valid_doc_ids().clone());
         }
         let search = |segment: &Arc<SegmentReader>| segment.intersect_trigrams(trigrams);
         if self.segments.len() <= 4 {
             self.segments
                 .iter()
                 .map(search)
-                .fold(RoaringBitmap::new(), |mut a, b| {
-                    a |= b;
-                    a
+                .try_fold(RoaringBitmap::new(), |mut a, b| {
+                    a |= b?;
+                    Ok(a)
                 })
         } else {
             self.segments
                 .par_iter()
                 .map(search)
-                .reduce(RoaringBitmap::new, |mut a, b| {
+                .try_reduce(RoaringBitmap::new, |mut a, b| {
                     a |= b;
-                    a
+                    Ok(a)
                 })
         }
     }
 
     /// Dispatch once for the entire positive plan, rather than once per
     /// case variant per gram window. Keep intermediate bitmaps segment-local.
-    pub(crate) fn get_gram_query_docs(&self, query: &GramQuery) -> RoaringBitmap {
+    pub(crate) fn get_gram_query_docs(&self, query: &GramQuery) -> Result<RoaringBitmap> {
         match query {
-            GramQuery::All => return self.valid_doc_ids().clone(),
-            GramQuery::Empty => return RoaringBitmap::new(),
+            GramQuery::All => return Ok(self.valid_doc_ids().clone()),
+            GramQuery::Empty => return Ok(RoaringBitmap::new()),
             _ => {}
         }
         let search = |segment: &Arc<SegmentReader>| query.in_segment(segment, self.valid_doc_ids());
@@ -1447,17 +1516,17 @@ impl IndexReader {
             self.segments
                 .iter()
                 .map(search)
-                .fold(RoaringBitmap::new(), |mut a, b| {
-                    a |= b;
-                    a
+                .try_fold(RoaringBitmap::new(), |mut a, b| {
+                    a |= b?;
+                    Ok(a)
                 })
         } else {
             self.segments
                 .par_iter()
                 .map(search)
-                .reduce(RoaringBitmap::new, |mut a, b| {
+                .try_reduce(RoaringBitmap::new, |mut a, b| {
                     a |= b;
-                    a
+                    Ok(a)
                 })
         }
     }
@@ -2194,6 +2263,36 @@ pub(crate) fn read_bloom_filter(segment_path: &Path) -> Result<BloomFilter> {
     Ok(filter)
 }
 
+/// Produce optional checksum evidence only after strict staging validation.
+pub(crate) fn write_query_local_checks(index_path: &Path) -> Result<()> {
+    let meta: IndexMeta = serde_json::from_reader(File::open(index_path.join("meta.json"))?)?;
+    meta.validate_format()?;
+    let documents = read_documents_version(index_path, meta.version)?;
+    let paths = read_paths(index_path)?;
+    validate_document_references(&meta, &documents, paths.len())?;
+    let allowed = segment_document_ids(&documents);
+    for id in meta
+        .base_segment
+        .into_iter()
+        .chain(meta.delta_segments.iter().copied())
+    {
+        let path = index_path.join("segments").join(format!("seg_{id:04}"));
+        let segment = SegmentReader::open(
+            &path,
+            id,
+            meta.has_positions,
+            false,
+            allowed.get(&id).cloned().unwrap_or_default(),
+        )?;
+        crate::index::query_local::write(
+            &path,
+            &segment.trigram_dict.data,
+            &segment.trigram_postings,
+        )?;
+    }
+    Ok(())
+}
+
 /// Establish exactly the core invariants required by a files-only gram query,
 /// including inherited segments. A routing certificate may reuse these checks
 /// only while strong file stamps remain unchanged. Unused token/line-map/source
@@ -2236,6 +2335,108 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    fn checked_segment_fixture() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        let mut dictionary = 3u32.to_le_bytes().to_vec();
+        let mut postings = Vec::new();
+        for (gram, docs) in [
+            (1u32, vec![1u32, 3]),
+            (2, vec![2, 4]),
+            (3, vec![1, 2, 3, 4]),
+        ] {
+            let offset = postings.len();
+            crate::utils::delta_encode(&docs, &mut postings);
+            dictionary.extend_from_slice(&gram.to_le_bytes());
+            dictionary.extend_from_slice(&(offset as u64).to_le_bytes());
+            dictionary.extend_from_slice(&((postings.len() - offset) as u32).to_le_bytes());
+            dictionary.extend_from_slice(&(docs.len() as u32).to_le_bytes());
+        }
+        fs::write(dir.path().join("grams.dict"), &dictionary).unwrap();
+        fs::write(dir.path().join("grams.postings"), &postings).unwrap();
+        crate::index::query_local::write(dir.path(), &dictionary, &postings).unwrap();
+        dir
+    }
+
+    fn open_checked_segment(path: &Path, lazy: bool) -> Result<SegmentReader> {
+        SegmentReader::open_with_policy(path, 1, false, false, Arc::new((1..=4).collect()), lazy)
+    }
+
+    #[test]
+    fn query_local_checks_validate_dependencies_and_full_open_checks_everything() {
+        let dir = checked_segment_fixture();
+        for lazy in [false, true] {
+            let segment = open_checked_segment(dir.path(), lazy).unwrap();
+            assert_eq!(
+                segment.get_trigram_docs(1).unwrap(),
+                [1, 3].into_iter().collect()
+            );
+            assert!(segment.get_trigram_docs(4).unwrap().is_empty());
+            assert_eq!(
+                segment.intersect_trigrams(&[1, 3]).unwrap(),
+                [1, 3].into_iter().collect()
+            );
+        }
+        // A structurally valid mutation changes a posting's membership. The
+        // checksum must catch it, not merely the varint validator.
+        let path = dir.path().join("grams.postings");
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[3] = 1; // gram 2: [2,4] becomes [2,3], both valid allowed IDs.
+        fs::write(&path, &bytes).unwrap();
+        let segment = open_checked_segment(dir.path(), true).unwrap();
+        assert!(segment.gram_checks.is_some());
+        assert_eq!(segment.get_trigram_docs(1).unwrap().len(), 2);
+        assert!(segment.get_trigram_docs(99).unwrap().is_empty());
+        for _ in 0..2 {
+            assert!(segment.get_trigram_docs(2).is_err());
+        }
+        assert!(open_checked_segment(dir.path(), false).is_err());
+        // Even an intersection that would stop before reaching the damage must
+        // validate the whole dependent payload first.
+        assert!(
+            segment
+                .get_trigram_docs_intersect(2, &[1].into_iter().collect())
+                .is_err()
+        );
+        // Missing evidence uses full structural validation, never unchecked data.
+        fs::remove_file(dir.path().join("grams.checks")).unwrap();
+        bytes[2] = 0x80;
+        bytes[3] = 0x80;
+        fs::write(path, bytes).unwrap();
+        assert!(open_checked_segment(dir.path(), true).is_err());
+    }
+
+    #[test]
+    fn query_local_dictionary_and_sidecar_damage_cannot_certify_absence() {
+        let dir = checked_segment_fixture();
+        for name in ["grams.dict", "grams.checks"] {
+            let path = dir.path().join(name);
+            let original = fs::read(&path).unwrap();
+            for at in 0..original.len() {
+                let mut changed = original.clone();
+                changed[at] ^= 1;
+                fs::write(&path, changed).unwrap();
+                assert!(
+                    open_checked_segment(dir.path(), true).is_err(),
+                    "{name} byte {at}"
+                );
+            }
+            for len in 0..original.len() {
+                fs::write(&path, &original[..len]).unwrap();
+                assert!(
+                    open_checked_segment(dir.path(), true).is_err(),
+                    "{name} len {len}"
+                );
+            }
+            fs::write(&path, original).unwrap();
+        }
+        let path = dir.path().join("grams.postings");
+        let original = fs::read(&path).unwrap();
+        for len in 0..original.len() {
+            fs::write(&path, &original[..len]).unwrap();
+            assert!(open_checked_segment(dir.path(), true).is_err());
+        }
+    }
 
     #[test]
     fn line_map_errors_are_cached_and_missing_maps_are_distinct() {
@@ -2340,7 +2541,7 @@ mod tests {
         let open = || SegmentReader::open(directory.path(), 1, false, false, allowed.clone());
         fs::write(directory.path().join("grams.dict"), &dictionary).unwrap();
         fs::write(directory.path().join("grams.postings"), &postings).unwrap();
-        assert_eq!(open().unwrap().get_trigram_docs(1023).len(), 1024);
+        assert_eq!(open().unwrap().get_trigram_docs(1023).unwrap().len(), 1024);
         let mut bad = postings.clone();
         *bad.last_mut().unwrap() = 0; // Duplicate document at the end of the final task.
         fs::write(directory.path().join("grams.postings"), bad).unwrap();
@@ -2652,7 +2853,7 @@ mod tests {
 
         // "fn " should produce trigrams that exist in our test file
         let trigram = crate::index::types::bytes_to_trigram(b'f', b'n', b' ');
-        let docs = reader.get_trigram_docs(trigram);
+        let docs = reader.get_trigram_docs(trigram).unwrap();
 
         // Should find documents containing "fn "
         assert!(!docs.is_empty(), "Should find documents with 'fn ' trigram");

@@ -17,7 +17,9 @@ fn candidates(reader: &IndexReader, plan: &QueryPlan) -> RoaringBitmap {
                     .copied()
                     .filter(|g| !reader.is_stop_gram(*g))
                     .collect();
-                reader.get_trigram_docs_with_bloom(&grams)
+                reader
+                    .get_trigram_docs_with_bloom(&grams)
+                    .expect("validated gram evidence")
             }
             PlanStep::Union(plans) => plans
                 .iter()

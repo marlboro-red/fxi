@@ -23,6 +23,7 @@ parser.add_argument('--candidate', required=True, type=P.Path)
 parser.add_argument('--tgrep', type=P.Path)
 parser.add_argument('--repetitions', type=int, default=31)
 parser.add_argument('--output', required=True, type=P.Path)
+parser.add_argument('--candidate-query-local', action='store_true', help='Enable checked query-local posting validation for candidate only')
 parser.add_argument('--count', action='store_true')
 parser.add_argument('--literal', action='store_true', help='Compare plain FXI identifier queries with case-insensitive fixed strings')
 parser.add_argument('--patterns', nargs='+')
@@ -46,9 +47,9 @@ binaries = {'before': args.baseline.resolve(), 'after': args.candidate.resolve()
 if args.tgrep:
     binaries['tgrep'] = args.tgrep.resolve()
 
-def run(command, thread_count=None, indexes=None, search_tasks=None):
+def run(command, thread_count=None, indexes=None, search_tasks=None, query_local=False):
     start = time.perf_counter_ns()
-    child_env = dict(env)
+    child_env = dict(env, FXI_QUERY_LOCAL='1' if query_local else '0')
     if thread_count is not None:
         child_env['RAYON_NUM_THREADS'] = str(thread_count)
     if indexes is not None:
@@ -80,14 +81,14 @@ for label, pattern in queries:
                 for name, binary in binaries.items()}
     for name, command in commands.items():
         assert run(command, threads.get(name), args.candidate_indexes if name == 'after' else None,
-                   search_parallelism.get(name))[1] == expected
+                   search_parallelism.get(name), args.candidate_query_local and name == 'after')[1] == expected
     samples = {name: [] for name in commands}
     for rep in range(args.repetitions):
         order = list(commands)
         random.Random(1729 + rep).shuffle(order)
         for name in order:
             elapsed, paths = run(commands[name], threads.get(name), args.candidate_indexes if name == 'after' else None,
-                                 search_parallelism.get(name))
+                                 search_parallelism.get(name), args.candidate_query_local and name == 'after')
             assert paths == expected, (label, name, paths ^ expected)
             samples[name].append(elapsed)
     row = {'query': label, 'pattern': pattern, 'files': len(expected),
@@ -95,7 +96,7 @@ for label, pattern in queries:
                      for name, values in samples.items()}}
     rows.append(row)
     print(label, {name: data['median_ms'] for name, data in row['tools'].items()}, flush=True)
-result = {'harness_sha256': hashlib.sha256(P.Path(__file__).read_bytes()).hexdigest(), 'candidate_indexes': str(args.candidate_indexes.resolve()) if args.candidate_indexes else None, 'rayon_threads': threads, 'search_parallelism': search_parallelism, 'corpus': str(root), 'indexes': str(args.indexes.resolve()), 'mode': 'direct', 'output_mode': 'count' if args.count else 'files', 'query_syntax': 'plain' if args.literal else 'regex',
+result = {'harness_sha256': hashlib.sha256(P.Path(__file__).read_bytes()).hexdigest(), 'candidate_indexes': str(args.candidate_indexes.resolve()) if args.candidate_indexes else None, 'rayon_threads': threads, 'search_parallelism': search_parallelism, 'corpus': str(root), 'indexes': str(args.indexes.resolve()), 'mode': 'direct', 'output_mode': 'count' if args.count else 'files', 'query_syntax': 'plain' if args.literal else 'regex', 'candidate_query_local': args.candidate_query_local,
           'binaries': {name: {'path': str(binary), 'sha256': hashlib.sha256(binary.read_bytes()).hexdigest()}
                        for name, binary in binaries.items()}, 'rows': rows}
 args.output.write_text(json.dumps(result, indent=2))

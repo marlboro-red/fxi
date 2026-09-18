@@ -172,7 +172,7 @@ fn exact_literal(query: &Query) -> Option<Vec<u8>> {
 /// fallback; this function never converts index or query errors to emptiness.
 #[allow(dead_code)] // Used by the CLI crate, not the public library API.
 pub(crate) fn preflight(root: &Path, query: &Query) -> Option<IndexMeta> {
-    if !requested() {
+    if !requested() || crate::index::query_local::requested() {
         return None;
     }
     let literal = exact_literal(query)?;
@@ -339,7 +339,7 @@ mod tests {
         assert!(!proven(&fixture.index(), b"abc"));
         let reader = IndexReader::open(fixture.0.path()).unwrap();
         for gram in crate::utils::query_trigrams("abcd") {
-            assert!(!reader.get_trigram_docs(gram).is_empty());
+            assert!(!reader.get_trigram_docs(gram).unwrap().is_empty());
         }
         assert!(
             QueryExecutor::new(&reader)

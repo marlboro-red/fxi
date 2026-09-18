@@ -36,6 +36,7 @@ def main():
     parser.add_argument('--candidate', type=Path, required=True)
     parser.add_argument('--baseline-profile', choices=['full', 'lean'])
     parser.add_argument('--candidate-profile', choices=['full', 'lean'])
+    parser.add_argument('--candidate-query-local', action='store_true', help='Build candidate checked gram evidence and enable query-local validation')
     parser.add_argument('--source-pack', choices=['0', '1'], default='0')
     parser.add_argument('--repetitions', type=int, default=3)
     parser.add_argument('--output', type=Path, required=True)
@@ -66,7 +67,7 @@ def main():
         for name in (['before', 'after'] if repetition % 2 == 0 else ['after', 'before']):
             indexes = runtime / f'{repetition}-{name}'
             indexes.mkdir()
-            env = {**base_env, 'FXI_INDEXES': str(indexes)}
+            env = {**base_env, 'FXI_INDEXES': str(indexes), 'FXI_QUERY_LOCAL': '1' if name == 'after' and args.candidate_query_local else '0'}
             command = ['/usr/bin/time', '-l', str(binaries[name]), 'index', str(root), '--force']
             profile = args.baseline_profile if name == 'before' else args.candidate_profile
             if profile is not None:
@@ -105,6 +106,7 @@ def main():
     assert corpus_manifest(root) == manifest, 'Corpus changed during comparison'
     result = {'corpus': str(root), 'corpus_manifest': manifest,
               'runtime': str(runtime), 'source_pack': args.source_pack,
+              'candidate_query_local': args.candidate_query_local,
               'mode': 'full builds, warm filesystem; oracle checks outside timing',
               'harness_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'retained_indexes': {name: str(path) for name, path in retained.items()},

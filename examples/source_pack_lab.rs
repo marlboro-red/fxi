@@ -116,7 +116,7 @@ fn main() -> Result<()> {
         let ids = if grams.is_empty() {
             reader.valid_doc_ids().clone()
         } else {
-            reader.get_trigram_docs_with_bloom(&grams) & reader.valid_doc_ids()
+            reader.get_trigram_docs_with_bloom(&grams)? & reader.valid_doc_ids()
         };
         let candidates: Vec<_> = entries.iter().filter(|e| ids.contains(e.id)).collect();
         let oracle = std::process::Command::new("rg")

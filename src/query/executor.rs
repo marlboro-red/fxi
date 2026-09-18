@@ -953,7 +953,7 @@ impl<'a> QueryExecutor<'a> {
                 .any(|s| matches!(s, PlanStep::Union(_) | PlanStep::Intersect(_))))
             && let Some(query) = self.pure_gram_query(plan)
         {
-            return Ok(self.reader.get_gram_query_docs(&query));
+            return self.reader.get_gram_query_docs(&query);
         }
         let mut candidates: Option<RoaringBitmap> = None;
         let mut exclude_plans: Vec<&QueryPlan> = Vec::new();
@@ -973,7 +973,9 @@ impl<'a> QueryExecutor<'a> {
                     if !filtered_trigrams.is_empty() {
                         // Use bloom filter optimized path for multi-trigram queries
                         // This skips segments that definitely don't contain all trigrams
-                        let result = self.reader.get_trigram_docs_with_bloom(&filtered_trigrams);
+                        let result = self
+                            .reader
+                            .get_trigram_docs_with_bloom(&filtered_trigrams)?;
 
                         candidates = Some(match candidates {
                             Some(existing) => existing & result,
@@ -1010,7 +1012,7 @@ impl<'a> QueryExecutor<'a> {
                         .copied()
                         .collect();
                     if !filtered.is_empty() {
-                        docs |= self.reader.get_trigram_docs_with_bloom(&filtered);
+                        docs |= self.reader.get_trigram_docs_with_bloom(&filtered)?;
                     } else {
                         // No usable trigrams. Substring recall comes from the
                         // token dictionary instead: any alphanumeric substring

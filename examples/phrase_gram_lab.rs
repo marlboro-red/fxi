@@ -36,7 +36,10 @@ fn main() -> Result<()> {
         let baseline = if query_grams.is_empty() {
             reader.valid_doc_ids().clone()
         } else {
-            reader.get_trigram_docs_with_bloom(&query_grams) & reader.valid_doc_ids()
+            reader
+                .get_trigram_docs_with_bloom(&query_grams)
+                .expect("validated gram evidence")
+                & reader.valid_doc_ids()
         };
         let oracle = std::process::Command::new("rg")
             .args(["-l", "-F", "--null", "--color=never", "--", &literal, "."])

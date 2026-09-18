@@ -426,9 +426,12 @@ fn main() -> Result<()> {
     let mut frequencies = AHashMap::new();
     for literal in &literals {
         for gram in fxi::utils::query_trigrams(literal) {
-            frequencies
-                .entry(gram)
-                .or_insert_with(|| reader.get_trigram_docs(gram).len());
+            frequencies.entry(gram).or_insert_with(|| {
+                reader
+                    .get_trigram_docs(gram)
+                    .expect("validated gram evidence")
+                    .len()
+            });
         }
     }
     let queries: Vec<_> = literals
@@ -441,7 +444,10 @@ fn main() -> Result<()> {
             let candidates = if grams.is_empty() {
                 reader.valid_doc_ids().clone()
             } else {
-                reader.get_trigram_docs_with_bloom(&grams) & reader.valid_doc_ids()
+                reader
+                    .get_trigram_docs_with_bloom(&grams)
+                    .expect("validated gram evidence")
+                    & reader.valid_doc_ids()
             };
             let anchors = query_anchors(literal.as_bytes(), |gram| frequencies[&gram]);
             Query {

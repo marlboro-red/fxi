@@ -97,6 +97,9 @@ impl Generation {
     }
 
     pub fn publish(&mut self) -> Result<()> {
+        if crate::index::query_local::requested() {
+            crate::index::reader::write_query_local_checks(&self.path)?;
+        }
         crate::index::negative_routing::write_if_requested(&self.path)?;
         // Publish only after every referenced byte and directory entry is durable.
         // Inherited hard links reuse already-durable bytes. Their new directory

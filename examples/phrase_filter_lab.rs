@@ -27,7 +27,7 @@ fn main() -> Result<()> {
             .filter(|g| !reader.is_stop_gram(*g))
             .collect();
         ensure!(!grams.is_empty(), "need trigram candidates");
-        let baseline = reader.get_trigram_docs_with_bloom(&grams) & reader.valid_doc_ids();
+        let baseline = reader.get_trigram_docs_with_bloom(&grams)? & reader.valid_doc_ids();
         let lowered = literal.to_ascii_lowercase();
         let keys: BTreeSet<Vec<u8>> = lowered
             .as_bytes()
@@ -85,7 +85,7 @@ fn main() -> Result<()> {
         for rep in 0..23 {
             for which in if rep % 2 == 0 { [0, 1] } else { [1, 0] } {
                 let start = Instant::now();
-                let mut ids = reader.get_trigram_docs_with_bloom(&grams) & reader.valid_doc_ids();
+                let mut ids = reader.get_trigram_docs_with_bloom(&grams)? & reader.valid_doc_ids();
                 if which == 1 {
                     for postings in &posting_lists {
                         ids &= *postings;
