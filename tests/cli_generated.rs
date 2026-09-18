@@ -69,7 +69,11 @@ impl Corpus {
                 ]
                 .map(str::to_owned),
             );
-            let path = PathBuf::from(name);
+            // PathBuf::from preserves '/' in its backing string on Windows,
+            // whereas filesystem discovery produces native '\\' separators.
+            // Build native paths so JSON/text/NUL expectations test the actual
+            // platform representation without normalizing the observed output.
+            let path: PathBuf = Path::new(name).components().collect();
             fs::create_dir_all(root.join(&path).parent().unwrap()).unwrap();
             let separator = if name == "z.txt" { "\r\n" } else { "\n" };
             // Include a source without a final newline.
