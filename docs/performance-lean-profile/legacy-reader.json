@@ -1,0 +1,13 @@
+{
+  "old_binary": "/tmp/fxi-source-pack-final",
+  "old_binary_sha256": "27258c989b85726af9940f6240cc2770fb55c3fab4d16d5cf03edce026a5b618",
+  "command": [
+    "/tmp/fxi-source-pack-final",
+    "stats",
+    "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex"
+  ],
+  "indexes": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-pernzedl/2-after",
+  "returncode": 1,
+  "stderr": "Error: Unsupported index version 3; rebuild the index\n",
+  "current_unchanged": true
+}

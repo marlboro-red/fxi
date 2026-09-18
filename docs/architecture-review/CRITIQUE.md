@@ -5,6 +5,11 @@ by the repository's measured experiments. It is not a new benchmark, complete
 correctness proof, or a claim that old audit defects remain unfixed. Findings
 below distinguish code observations, measured costs and proposed designs.
 
+Subsequent changes: [implementation progress](IMPLEMENTATION.md) covers the
+line-map correctness fix and opt-in lean profile. The new
+[lean-profile measurements](../performance-lean-profile/NOTES.md) replace the
+estimated savings below with measured results for that implementation.
+
 ## Assessment
 
 FXI has strong foundations: conservative candidate generation, owned source

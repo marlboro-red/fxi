@@ -1,0 +1,206 @@
+{
+  "harness_sha256": "c7669136798bebcab502ed57bfc5ec9244168b362256c459f9ac3c87f7365ac1",
+  "candidate_indexes": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-pernzedl/2-after",
+  "rayon_threads": {
+    "before": null,
+    "after": null
+  },
+  "search_parallelism": {
+    "before": null,
+    "after": null
+  },
+  "corpus": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "indexes": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-pernzedl/2-before",
+  "mode": "direct",
+  "output_mode": "files",
+  "query_syntax": "regex",
+  "binaries": {
+    "before": {
+      "path": "/Users/cjpark/Desktop/Projects/fxi/target/release/fxi",
+      "sha256": "5922e3fb0df2ceda8a559f68c4aff4b3995a4ee51a5b4b3e314af785b016d463"
+    },
+    "after": {
+      "path": "/Users/cjpark/Desktop/Projects/fxi/target/release/fxi",
+      "sha256": "5922e3fb0df2ceda8a559f68c4aff4b3995a4ee51a5b4b3e314af785b016d463"
+    }
+  },
+  "rows": [
+    {
+      "query": "auditNonexistentSymbol94283",
+      "pattern": "auditNonexistentSymbol94283",
+      "files": 0,
+      "tools": {
+        "before": {
+          "median_ms": 33.946875,
+          "samples_ms": [
+            35.720042,
+            33.735291,
+            33.843625,
+            33.72675,
+            33.234334,
+            34.110792,
+            33.8955,
+            34.198084,
+            33.827709,
+            34.024208,
+            34.828833,
+            34.52875,
+            34.035,
+            35.060917,
+            33.543,
+            34.718625,
+            34.265958,
+            33.560834,
+            33.408083,
+            33.946875,
+            32.954875
+          ]
+        },
+        "after": {
+          "median_ms": 33.67775,
+          "samples_ms": [
+            35.258959,
+            33.926875,
+            34.050833,
+            33.8435,
+            33.465334,
+            33.67775,
+            33.639625,
+            34.195417,
+            33.889708,
+            33.883916,
+            34.343625,
+            33.638792,
+            34.666208,
+            33.3405,
+            33.538167,
+            33.843292,
+            33.286,
+            33.42575,
+            33.107667,
+            33.083667,
+            33.352959
+          ]
+        }
+      }
+    },
+    {
+      "query": "folio_wait_bit_common",
+      "pattern": "folio_wait_bit_common",
+      "files": 1,
+      "tools": {
+        "before": {
+          "median_ms": 38.047583,
+          "samples_ms": [
+            37.505583,
+            38.578959,
+            36.914292,
+            37.554167,
+            37.532375,
+            38.53075,
+            37.478416,
+            37.391083,
+            37.85075,
+            38.104417,
+            38.184584,
+            38.47825,
+            37.648083,
+            38.391625,
+            37.962791,
+            38.304167,
+            38.991667,
+            37.366542,
+            38.45325,
+            38.047583,
+            39.579958
+          ]
+        },
+        "after": {
+          "median_ms": 37.691458,
+          "samples_ms": [
+            37.957,
+            38.134,
+            37.687833,
+            38.611375,
+            38.172875,
+            37.603834,
+            38.769834,
+            37.867875,
+            38.24,
+            38.200083,
+            37.70525,
+            37.561125,
+            37.624375,
+            37.266459,
+            38.67525,
+            37.259041,
+            37.100542,
+            36.685333,
+            37.691458,
+            37.595708,
+            37.40725
+          ]
+        }
+      }
+    },
+    {
+      "query": "struct file_operations",
+      "pattern": "struct file_operations",
+      "files": 1240,
+      "tools": {
+        "before": {
+          "median_ms": 68.068667,
+          "samples_ms": [
+            67.577958,
+            70.785709,
+            64.877791,
+            69.645125,
+            73.047583,
+            69.218958,
+            71.178875,
+            67.75675,
+            67.79275,
+            68.475416,
+            67.250209,
+            67.813167,
+            68.718084,
+            93.559833,
+            67.61525,
+            71.326792,
+            66.809792,
+            66.855833,
+            72.822625,
+            64.481042,
+            68.068667
+          ]
+        },
+        "after": {
+          "median_ms": 68.280916,
+          "samples_ms": [
+            65.3535,
+            72.607708,
+            67.03225,
+            69.142459,
+            70.11075,
+            68.280916,
+            64.485542,
+            67.296167,
+            74.0625,
+            67.267834,
+            67.476625,
+            73.240541,
+            66.991916,
+            71.859458,
+            67.346291,
+            68.702667,
+            72.267083,
+            63.963958,
+            67.822791,
+            69.525083,
+            71.978084
+          ]
+        }
+      }
+    }
+  ]
+}
