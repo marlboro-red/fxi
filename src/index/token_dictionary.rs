@@ -1,6 +1,6 @@
 //! Lossless token dictionary records. Token strings remain borrowed from mmap.
 //! Legacy fixed-width records and compact varint metadata share this decoder.
-use crate::utils::{decode_varint, decode_varint_u64};
+
 use anyhow::{Context, Result, ensure};
 use std::io::Write;
 const MAGIC: &[u8; 8] = b"\xff\xff\xff\xffFXT1";
@@ -54,6 +54,7 @@ pub(crate) fn header(bytes: &[u8], positions: bool) -> Result<Header> {
         compact,
     })
 }
+#[inline]
 pub(crate) fn token(bytes: &[u8]) -> Result<(&str, usize)> {
     ensure!(bytes.len() >= 2, "Truncated token length");
     let length = u16::from_le_bytes(bytes[..2].try_into().unwrap()) as usize;
@@ -64,14 +65,33 @@ pub(crate) fn token(bytes: &[u8]) -> Result<(&str, usize)> {
         end,
     ))
 }
+// Posting deltas optimize the single-byte case and mark their longer decoder
+// cold. Dictionary offsets routinely need several bytes, so keep this bounded
+// metadata decoder inline without changing the posting hot path.
+#[inline]
+fn metadata_varint<const BITS: usize>(bytes: &[u8]) -> Option<(u64, usize)> {
+    let mut value = 0u64;
+    for index in 0..BITS.div_ceil(7) {
+        let byte = *bytes.get(index)?;
+        if index == BITS / 7 && byte >> (BITS % 7) != 0 {
+            return None;
+        }
+        value |= u64::from(byte & 127) << (index * 7);
+        if byte < 128 {
+            return Some((value, index + 1));
+        }
+    }
+    None
+}
+#[inline]
 pub(crate) fn entry(bytes: &[u8], compact: bool, positions: bool) -> Result<(Entry<'_>, usize)> {
     let (token, mut cursor) = token(bytes)?;
     let mut next = |wide: bool| -> Result<u64> {
         let (value, size) = if compact {
             if wide {
-                decode_varint_u64(&bytes[cursor..])
+                metadata_varint::<64>(&bytes[cursor..])
             } else {
-                decode_varint(&bytes[cursor..]).map(|(v, n)| (u64::from(v), n))
+                metadata_varint::<32>(&bytes[cursor..])
             }
             .context("Malformed token dictionary metadata")?
         } else {
@@ -156,6 +176,42 @@ pub(crate) fn write_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn metadata_decoder_matches_strict_general_decoders() {
+        let mut random = 0x194920260919u64;
+        for _ in 0..20000 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            let mut bytes = random.to_le_bytes().to_vec();
+            bytes.extend_from_slice(&[random as u8, (random >> 8) as u8, 0]);
+            for length in 0..=bytes.len() {
+                let bytes = &bytes[..length];
+                assert_eq!(
+                    metadata_varint::<64>(bytes),
+                    crate::utils::decode_varint_u64(bytes)
+                );
+                assert_eq!(
+                    metadata_varint::<32>(bytes),
+                    crate::utils::decode_varint(bytes).map(|(v, n)| (u64::from(v), n))
+                );
+            }
+        }
+        for length in 1..=11 {
+            for last in 0..=255 {
+                let mut bytes = vec![128; length];
+                bytes[length - 1] = last;
+                assert_eq!(
+                    metadata_varint::<64>(&bytes),
+                    crate::utils::decode_varint_u64(&bytes)
+                );
+                assert_eq!(
+                    metadata_varint::<32>(&bytes),
+                    crate::utils::decode_varint(&bytes).map(|(v, n)| (u64::from(v), n))
+                );
+            }
+        }
+    }
     #[test]
     fn compact_and_legacy_entries_preserve_every_field() {
         for positions in [false, true] {
