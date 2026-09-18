@@ -67,7 +67,7 @@ pub fn decode_varint_u64(buf: &[u8]) -> Option<(u64, usize)> {
     let mut shift = 0;
 
     for (i, &byte) in buf.iter().enumerate() {
-        if shift >= 64 {
+        if shift >= 64 || (shift == 63 && byte & 0xfe != 0) {
             return None;
         }
 
@@ -508,6 +508,47 @@ pub(crate) fn validate_position_stream_with_documents(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u64_varints_agree_with_wide_arithmetic_reference() {
+        fn reference(bytes: &[u8]) -> Option<(u64, usize)> {
+            let mut value = 0u128;
+            for (index, byte) in bytes.iter().take(10).enumerate() {
+                value += u128::from(byte % 128) * 128u128.pow(index as u32);
+                if byte < &128 {
+                    return u64::try_from(value).ok().map(|value| (value, index + 1));
+                }
+            }
+            None
+        }
+
+        // Only payloads zero and one fit in the tenth byte. Both canonical
+        // and historically accepted overlong encodings retain their values.
+        for prefix in [0x80, 0xff] {
+            for last in 0..=255 {
+                let mut bytes = vec![prefix; 9];
+                bytes.push(last);
+                bytes.push(0);
+                assert_eq!(decode_varint_u64(&bytes), reference(&bytes), "{bytes:?}");
+            }
+        }
+        let mut random = 0x243f6a8885a308d3u64;
+        for _ in 0..20_000 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            let mut encoded = Vec::new();
+            encode_varint_u64(random, &mut encoded);
+            assert_eq!(reference(&encoded), Some((random, encoded.len())));
+            assert_eq!(decode_varint_u64(&encoded), reference(&encoded));
+            for end in 0..encoded.len() {
+                assert_eq!(decode_varint_u64(&encoded[..end]), None);
+            }
+        }
+        let mut maximum = vec![0xff; 9];
+        maximum.push(1);
+        assert_eq!(decode_varint_u64(&maximum), Some((u64::MAX, 10)));
+    }
 
     #[test]
     fn test_varint_roundtrip() {
