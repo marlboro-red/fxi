@@ -289,11 +289,13 @@ impl SegmentReader {
         load_tokens: bool,
         allowed_docs: Arc<RoaringBitmap>,
     ) -> Result<Self> {
+        let started = std::time::Instant::now();
         // Read trigram dictionary (already sorted from BTreeMap write)
         let trigram_dict = read_trigram_dict(segment_path)?;
 
         let trigram_postings = MappedBytes::open(&segment_path.join("grams.postings"))?;
 
+        let mapped = std::time::Instant::now();
         // Validate every payload before exposing the segment. Large segments
         // use the existing Rayon pool so a single base segment does not serialize
         // validation; small segments avoid scheduling overhead.
@@ -320,11 +322,22 @@ impl SegmentReader {
         } else {
             (0..trigram_dict.count).try_for_each(validate_entry)?;
         }
+        let validated = std::time::Instant::now();
         // Line maps are NOT loaded here - loaded lazily on first access
 
         // Load bloom filter if it exists (optional for backwards compat)
         let bloom_filter = read_bloom_filter(segment_path).ok();
 
+        if std::env::var_os("FXI_DEBUG").is_some() {
+            eprintln!(
+                "[open-segment {segment_id}] map={:?} validate={:?} bloom={:?} posting_bytes={} entries={}",
+                mapped - started,
+                validated - mapped,
+                validated.elapsed(),
+                trigram_postings.len(),
+                trigram_dict.count
+            );
+        }
         let reader = Self {
             source_pack: OnceLock::new(),
             segment_id,
@@ -948,6 +961,7 @@ impl IndexReader {
     }
 
     fn open_with_tokens(root_path: &Path, load_tokens: bool) -> Result<Self> {
+        let started = std::time::Instant::now();
         let root_path = root_path.canonicalize()?;
         let (index_path, generation_lease) = crate::index::generation::pin(&root_path)?;
 
@@ -968,6 +982,7 @@ impl IndexReader {
         }
         segment_ids.extend(&meta.delta_segments);
 
+        let metadata_loaded = std::time::Instant::now();
         // Document membership is required to validate segment payloads. Read
         // metadata in parallel, then validate independent segments in parallel.
         let (documents, paths) = rayon::join(
@@ -976,8 +991,10 @@ impl IndexReader {
         );
         let documents = documents?;
         let paths = PathTable::new(paths?);
+        let tables_loaded = std::time::Instant::now();
         validate_document_references(&meta, &documents, paths.len())?;
         let allowed = segment_document_ids(&documents);
+        let membership_ready = std::time::Instant::now();
         let segments = segment_ids
             .par_iter()
             .map(|&seg_id| {
@@ -994,6 +1011,7 @@ impl IndexReader {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        let segments_loaded = std::time::Instant::now();
         let doc_id_to_index = DocumentLookup::new(&documents);
 
         // Convert stop-grams Vec to HashSet for O(1) lookup (was O(512) per check)
@@ -1002,6 +1020,17 @@ impl IndexReader {
         // Initialize file content cache
         let file_cache = SharedContentCache::acquire();
 
+        if std::env::var_os("FXI_DEBUG").is_some() {
+            eprintln!(
+                "[open-index] metadata={:?} tables={:?} membership={:?} segments={:?} setup={:?} total={:?}",
+                metadata_loaded - started,
+                tables_loaded - metadata_loaded,
+                membership_ready - tables_loaded,
+                segments_loaded - membership_ready,
+                segments_loaded.elapsed(),
+                started.elapsed()
+            );
+        }
         Ok(Self {
             _generation_lease: generation_lease.map(Arc::new),
             root_path,
