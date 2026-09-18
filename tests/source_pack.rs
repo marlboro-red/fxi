@@ -301,6 +301,10 @@ fn mixed_raw_and_compressed_generations_match_live_cli_modes() {
     for args in [
         vec!["-l", "-F", "needle", "."],
         vec!["-l", "re:/need.e/", "-p", "."],
+        vec!["-l", "re:/^needle suffix$/", "-p", "."],
+        vec!["-l", "re:/^$/", "-p", "."],
+        vec!["-l", "re:/\\Aneedle/", "-p", "."],
+        vec!["-l", "re:/(?i)NEEDLE/", "-p", "."],
         vec!["-l", "-i", "-F", "NEEDLE", "."],
         vec!["-c", "-F", "needle", "."],
         vec!["-F", "-C", "1", "needle", "."],

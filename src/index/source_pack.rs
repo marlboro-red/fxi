@@ -36,6 +36,18 @@ impl SourcePack {
             Self::Compressed(p) => p.read(id, relative, path).map(std::borrow::Cow::Owned),
         }
     }
+    pub(crate) fn matches_lines(
+        &self,
+        id: DocId,
+        relative: &Path,
+        path: &Path,
+        matches: impl Fn(&str) -> bool,
+    ) -> Option<bool> {
+        match self {
+            Self::Raw(_) => None,
+            Self::Compressed(pack) => pack.matches_lines(id, relative, path, matches),
+        }
+    }
     pub(crate) fn contains_literal(
         &self,
         id: DocId,

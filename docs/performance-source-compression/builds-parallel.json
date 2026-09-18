@@ -5,13 +5,13 @@
     "source_bytes": 1311592608,
     "sha256": "adb3052a8f1cd3f0d7b49c7dff2cc5ad36b831da7a4c238c2f899db85ae57854"
   },
-  "runtime": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-e2ltqh2u",
+  "runtime": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-nngo6250",
   "source_pack": "1",
   "mode": "full builds, warm filesystem; oracle checks outside timing",
   "harness_sha256": "0271a4a29aa4f5526cdfff572a958ef6dbc4b0aa514c746c8ca2e55bec75a484",
   "retained_indexes": {
-    "before": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-e2ltqh2u/2-before",
-    "after": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-e2ltqh2u/2-after"
+    "before": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-nngo6250/2-before",
+    "after": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-nngo6250/2-after"
   },
   "oracle_file_counts": {
     "auditNonexistentSymbol94283": 0,
@@ -21,21 +21,21 @@
   },
   "binaries": {
     "before": {
-      "path": "/private/tmp/fxi-source-pack-baseline",
-      "sha256": "2bb240ea424e5ad1acecf68a29c97dcc00cb910267e69419c32f60ac2ebd2a2a"
-    },
-    "after": {
       "path": "/private/tmp/fxi-source-pack-compressed",
       "sha256": "8732ae7ebc42c2c913d93da02cda32da56fefc14af7a5287065f212f23d6d8e2"
+    },
+    "after": {
+      "path": "/private/tmp/fxi-source-pack-parallel",
+      "sha256": "9ffb062e4404dcb4cea884ab99a19eb39e44a1eb173f9b0143915e7c5bac5e34"
     }
   },
   "tools": {
     "before": {
       "samples": [
         {
-          "seconds": 6.916123417,
-          "peak_rss_bytes": 379305984,
-          "index_bytes": 1923871871,
+          "seconds": 10.628881417,
+          "peak_rss_bytes": 493420544,
+          "index_bytes": 1315278800,
           "components": {
             "fxi-common-index-56d5aabee3b5b70d.lock": 0,
             "CURRENT": 32,
@@ -44,10 +44,10 @@
             "meta.json": 669,
             "docs.bin": 1958524,
             "grams.postings": 134770424,
-            "source.table": 9641704,
+            "source.table": 7312600,
             "grams.dict": 84343552,
             "linemap.bin": 37307976,
-            "source.data": 1311592608,
+            "source.data": 705328641,
             "tokens.positions": 258514066,
             "tokens.dict": 53595984,
             "bloom.bin": 5053475,
@@ -56,16 +56,16 @@
           "command": [
             "/usr/bin/time",
             "-l",
-            "/private/tmp/fxi-source-pack-baseline",
+            "/private/tmp/fxi-source-pack-compressed",
             "index",
             "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
             "--force"
           ]
         },
         {
-          "seconds": 6.990209916,
-          "peak_rss_bytes": 484327424,
-          "index_bytes": 1923871871,
+          "seconds": 10.729254708,
+          "peak_rss_bytes": 365641728,
+          "index_bytes": 1315278800,
           "components": {
             "fxi-common-index-56d5aabee3b5b70d.lock": 0,
             "CURRENT": 32,
@@ -74,10 +74,10 @@
             "meta.json": 669,
             "docs.bin": 1958524,
             "grams.postings": 134770424,
-            "source.table": 9641704,
+            "source.table": 7312600,
             "grams.dict": 84343552,
             "linemap.bin": 37307976,
-            "source.data": 1311592608,
+            "source.data": 705328641,
             "tokens.positions": 258514066,
             "tokens.dict": 53595984,
             "bloom.bin": 5053475,
@@ -86,16 +86,16 @@
           "command": [
             "/usr/bin/time",
             "-l",
-            "/private/tmp/fxi-source-pack-baseline",
+            "/private/tmp/fxi-source-pack-compressed",
             "index",
             "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
             "--force"
           ]
         },
         {
-          "seconds": 7.107874792,
-          "peak_rss_bytes": 362659840,
-          "index_bytes": 1923871871,
+          "seconds": 10.633399417,
+          "peak_rss_bytes": 355155968,
+          "index_bytes": 1315278800,
           "components": {
             "fxi-common-index-56d5aabee3b5b70d.lock": 0,
             "CURRENT": 32,
@@ -104,10 +104,10 @@
             "meta.json": 669,
             "docs.bin": 1958524,
             "grams.postings": 134770424,
-            "source.table": 9641704,
+            "source.table": 7312600,
             "grams.dict": 84343552,
             "linemap.bin": 37307976,
-            "source.data": 1311592608,
+            "source.data": 705328641,
             "tokens.positions": 258514066,
             "tokens.dict": 53595984,
             "bloom.bin": 5053475,
@@ -116,21 +116,21 @@
           "command": [
             "/usr/bin/time",
             "-l",
-            "/private/tmp/fxi-source-pack-baseline",
+            "/private/tmp/fxi-source-pack-compressed",
             "index",
             "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
             "--force"
           ]
         }
       ],
-      "median_seconds": 6.990209916,
-      "median_peak_rss_bytes": 379305984
+      "median_seconds": 10.633399417,
+      "median_peak_rss_bytes": 365641728
     },
     "after": {
       "samples": [
         {
-          "seconds": 10.487981084,
-          "peak_rss_bytes": 356335616,
+          "seconds": 8.331061708,
+          "peak_rss_bytes": 372473856,
           "index_bytes": 1315278800,
           "components": {
             "fxi-common-index-56d5aabee3b5b70d.lock": 0,
@@ -152,15 +152,15 @@
           "command": [
             "/usr/bin/time",
             "-l",
-            "/private/tmp/fxi-source-pack-compressed",
+            "/private/tmp/fxi-source-pack-parallel",
             "index",
             "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
             "--force"
           ]
         },
         {
-          "seconds": 10.487395208,
-          "peak_rss_bytes": 366886912,
+          "seconds": 8.251451291,
+          "peak_rss_bytes": 366460928,
           "index_bytes": 1315278800,
           "components": {
             "fxi-common-index-56d5aabee3b5b70d.lock": 0,
@@ -182,15 +182,15 @@
           "command": [
             "/usr/bin/time",
             "-l",
-            "/private/tmp/fxi-source-pack-compressed",
+            "/private/tmp/fxi-source-pack-parallel",
             "index",
             "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
             "--force"
           ]
         },
         {
-          "seconds": 10.548726666,
-          "peak_rss_bytes": 372768768,
+          "seconds": 8.333094833,
+          "peak_rss_bytes": 374374400,
           "index_bytes": 1315278800,
           "components": {
             "fxi-common-index-56d5aabee3b5b70d.lock": 0,
@@ -212,15 +212,15 @@
           "command": [
             "/usr/bin/time",
             "-l",
-            "/private/tmp/fxi-source-pack-compressed",
+            "/private/tmp/fxi-source-pack-parallel",
             "index",
             "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
             "--force"
           ]
         }
       ],
-      "median_seconds": 10.487981084,
-      "median_peak_rss_bytes": 366886912
+      "median_seconds": 8.331061708,
+      "median_peak_rss_bytes": 372473856
     }
   },
   "source_pack_compression_environment": "1",

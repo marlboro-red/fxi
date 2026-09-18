@@ -340,8 +340,13 @@ of 3–256 bytes, a filter can rule out match starts in that block. Every occurr
 of such a literal has all its trigrams within this extended interval, so a filter
 cannot reject a real occurrence. Possible blocks and any required next-block
 boundary bytes are decoded and checksummed before returning a positive result.
-Other lengths and other verification use complete decoding, a whole-file
-checksum and UTF-8 validation. Compression can make that full-read path slower.
+Other literal lengths use complete decoding, a whole-file checksum and UTF-8
+validation. Prepared regexes without line-number restrictions decode complete
+lines incrementally and stop at the first match. Partial lines and UTF-8 scalars
+are carried across blocks; CRLF handling remains in the existing matcher. Each
+decoded block is checksummed, so an early positive witness need not decode the
+remaining tail. Boolean predicates spanning lines and line-number restrictions
+retain the complete-read path, which can be slower with compression.
 
 File records have the same source identity/timestamp evidence as raw packs.
 Per-file descriptors and filters live in the immutable mapped data file, with a

@@ -1648,6 +1648,25 @@ impl IndexReader {
             .contains_literal(doc.doc_id, self.get_path(doc)?, full_path, finder)
     }
 
+    pub(crate) fn packed_line_match(
+        &self,
+        doc: &Document,
+        full_path: &Path,
+        matches: impl Fn(&str) -> bool,
+    ) -> Option<bool> {
+        if !self.source_pack_enabled {
+            return None;
+        }
+        let segment = self
+            .segments
+            .iter()
+            .find(|segment| segment.segment_id == doc.segment_id)?;
+        segment
+            .source_pack
+            .get_or_init(|| crate::index::source_pack::SourcePack::open(&segment.segment_path).ok())
+            .as_ref()?
+            .matches_lines(doc.doc_id, self.get_path(doc)?, full_path, matches)
+    }
     pub(crate) fn packed_source(
         &self,
         doc: &Document,

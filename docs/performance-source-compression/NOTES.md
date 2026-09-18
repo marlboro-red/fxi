@@ -2,8 +2,9 @@
 
 These are offline verification-stage experiments on the existing 65,284-file,
 1,311,592,608-byte Linux fixture, Apple M2 Max/64 GiB/macOS 26.1. They are not
-end-to-end CLI measurements or a shipped source-pack format. Source-pack runtime
-behavior is unchanged. The codecs are development dependencies only.
+end-to-end CLI measurements by themselves. An opt-in implementation and separate
+CLI/build measurements follow below; the default raw writer is unchanged. LZ4 is
+a runtime dependency for the optional format; Zstandard remains lab-only.
 
 ## First experiment
 
@@ -139,3 +140,49 @@ bytes, generated literal boundaries/lengths, empty and Unicode files, stale
 sources with restored mtime, malformed lengths and offsets, filter/payload/table
 corruption, deletion, mixed formats, incremental updates, compaction, pinned
 readers, and agreement with live CLI literal/regex/case/count/context output.
+
+## Retained follow-up: bounded builds and incremental line verification
+
+The writer now encodes independent files in parallel batches capped at 128 files
+and 8 MiB of source input (a larger single file is processed alone). Ordered
+collection preserves byte-identical output. A one/four-worker test checks this,
+including oversized files and invalid/missing captures. Three new alternating
+[compressed build pairs](builds-parallel.json) measure **10.633 → 8.331 seconds**
+with unchanged index bytes. Median peak build RSS rises **348.70 → 355.22 MiB**.
+This recovers 21.7% of the serial compressed writer's build time, but remains
+slower than the earlier raw build; those raw and parallel measurements are from
+separate runs.
+
+Prepared regexes without line-number restrictions now verify complete lines
+incrementally, stopping at the first match. They use the existing matcher and
+retain partial lines/scalars across decompression blocks. This avoids decoding
+an entire positive file. Boolean predicates spanning lines and line-number
+filters retain complete reads. Tests cover CRLF, empty lines/files, UTF-8 splits,
+anchors, case handling and damaged tails, plus CLI parity against live reads.
+
+Twenty-one fresh [final CLI pairs](startup-final.json):
+
+| Files-only query | Raw ms | Final compressed ms |
+| --- | ---: | ---: |
+| Absent symbol | 34.46 | 33.92 |
+| `folio_wait_bit_common` | 35.96 | 35.50 |
+| `struct file_operations` | 46.58 | 43.24 |
+| `return` | 109.47 | 109.44 |
+| `unlikely\(` | 46.46 | 45.60 |
+| `Copyright` | 117.70 | 117.36 |
+| `return.*0` | 287.14 | 288.18 |
+| `return.*[0-9]{12}` | 534.20 | 562.01 |
+
+The earlier 21% regex loss is eliminated for the tested positive-heavy regex.
+The harder low-hit regex still loses 5.2%; successful early exits cannot remove
+the cost of decoding negative candidates. Other Boolean/full-read workloads,
+small-file-heavy corpora, cold storage and operating systems need additional
+measurements. This remains a storage/performance option, not a universal win or
+a new default. No claim is made that either design beats every search tool.
+
+Final local validation: **936 all-target Rust test executions, two passing
+doctests, five Python harness tests, strict all-target Clippy, formatting and
+Rust 1.88 all-target compilation**. All timed CLI outputs match ripgrep. Final
+reader timing uses the earlier serial-built compressed index: the parallel
+writer emits the identical format and bytes. The final reader changes do not
+affect build code, so the parallel build measurements remain applicable.

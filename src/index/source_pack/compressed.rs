@@ -4,6 +4,7 @@ use super::{BLOCK_BYTES, DATA, TABLE, path_hash, stamp};
 use crate::index::types::{DocId, Document};
 use anyhow::{Result, ensure};
 use memmap2::Mmap;
+use rayon::prelude::*;
 use std::{
     fs::{self, File},
     io::{BufWriter, Read, Write},
@@ -36,6 +37,80 @@ fn push_word(out: &mut Vec<u8>, n: u64) {
     out.extend_from_slice(&n.to_le_bytes());
 }
 
+struct Encoded {
+    record: [u64; WORDS],
+    descriptors: Vec<u8>,
+    payload: Vec<u8>,
+}
+fn encode_document(root: &Path, doc: &Document, paths: &[PathBuf]) -> Option<Encoded> {
+    let relative = paths.get(doc.path_id as usize)?;
+    let Ok(mut file) = File::open(root.join(relative)) else {
+        return None;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return None;
+    };
+    let before = stamp(&metadata)?;
+    if !metadata.is_file() || metadata.len() != doc.size {
+        return None;
+    }
+    let mut text = String::new();
+    if (&mut file)
+        .take(doc.size.saturating_add(1))
+        .read_to_string(&mut text)
+        .is_err()
+        || text.len() as u64 != doc.size
+        || file.metadata().ok().and_then(|m| stamp(&m)) != Some(before)
+    {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut descriptors = Vec::new();
+    let mut payload = Vec::new();
+    for (number, block) in bytes.chunks(BLOCK_BYTES).enumerate() {
+        let compressed = if number == 0 {
+            Vec::new()
+        } else {
+            lz4_flex::block::compress(block)
+        };
+        let raw = number == 0 || compressed.len() >= block.len();
+        let stored = if raw { block } else { &compressed };
+        push_word(&mut descriptors, payload.len() as u64);
+        // Equal stored/raw lengths encode the uncompressed case. A compressed
+        // representation is retained only if strictly smaller.
+        push_word(&mut descriptors, stored.len() as u64);
+        push_word(&mut descriptors, block.len() as u64);
+        push_word(&mut descriptors, xxh3_64(block));
+        let start = number * BLOCK_BYTES;
+        for value in filter(&bytes[start..(start + block.len() + MAX_LITERAL - 1).min(bytes.len())])
+        {
+            push_word(&mut descriptors, value);
+        }
+        payload.extend_from_slice(stored);
+    }
+    let length = (descriptors.len() + payload.len()) as u64;
+    let record = [
+        u64::from(doc.doc_id),
+        path_hash(relative),
+        0,
+        text.len() as u64,
+        xxh3_64(bytes),
+        before[0],
+        before[1],
+        before[2],
+        before[3],
+        before[4],
+        before[5],
+        before[6],
+        length,
+        xxh3_64(&descriptors),
+    ];
+    Some(Encoded {
+        record,
+        descriptors,
+        payload,
+    })
+}
 pub(super) fn write_segment(
     directory: &Path,
     root: &Path,
@@ -45,81 +120,36 @@ pub(super) fn write_segment(
     let mut output = BufWriter::new(File::create_new(directory.join(DATA))?);
     let mut records = Vec::new();
     let mut offset = 0u64;
-    for doc in documents {
-        let Some(relative) = paths.get(doc.path_id as usize) else {
-            continue;
-        };
-        let Ok(mut file) = File::open(root.join(relative)) else {
-            continue;
-        };
-        let Ok(metadata) = file.metadata() else {
-            continue;
-        };
-        let Some(before) = stamp(&metadata) else {
-            continue;
-        };
-        if !metadata.is_file() || metadata.len() != doc.size {
-            continue;
-        }
-        let mut text = String::new();
-        if (&mut file)
-            .take(doc.size.saturating_add(1))
-            .read_to_string(&mut text)
-            .is_err()
-            || text.len() as u64 != doc.size
-            || file.metadata().ok().and_then(|m| stamp(&m)) != Some(before)
-        {
-            continue;
-        }
-        let bytes = text.as_bytes();
-        let mut descriptors = Vec::new();
-        let mut payload = Vec::new();
-        for (number, block) in bytes.chunks(BLOCK_BYTES).enumerate() {
-            let compressed = if number == 0 {
-                Vec::new()
-            } else {
-                lz4_flex::block::compress(block)
-            };
-            let raw = number == 0 || compressed.len() >= block.len();
-            let stored = if raw { block } else { &compressed };
-            push_word(&mut descriptors, payload.len() as u64);
-            // Equal stored/raw lengths encode the uncompressed case. A compressed
-            // representation is retained only if strictly smaller.
-            push_word(&mut descriptors, stored.len() as u64);
-            push_word(&mut descriptors, block.len() as u64);
-            push_word(&mut descriptors, xxh3_64(block));
-            let start = number * BLOCK_BYTES;
-            for value in
-                filter(&bytes[start..(start + block.len() + MAX_LITERAL - 1).min(bytes.len())])
-            {
-                push_word(&mut descriptors, value);
+    let mut remaining = documents;
+    while !remaining.is_empty() {
+        // Bound retained source input per batch as well as file count. A single
+        // oversized document is processed alone, as in the serial writer.
+        let mut count = 0;
+        let mut bytes = 0u64;
+        while count < remaining.len().min(128) {
+            let next = bytes.saturating_add(remaining[count].size);
+            if count > 0 && next > 8 * 1024 * 1024 {
+                break;
             }
-            payload.extend_from_slice(stored);
+            bytes = next;
+            count += 1;
         }
-        let length = (descriptors.len() + payload.len()) as u64;
-        for value in [
-            u64::from(doc.doc_id),
-            path_hash(relative),
-            offset,
-            text.len() as u64,
-            xxh3_64(bytes),
-            before[0],
-            before[1],
-            before[2],
-            before[3],
-            before[4],
-            before[5],
-            before[6],
-            length,
-            xxh3_64(&descriptors),
-        ] {
-            push_word(&mut records, value);
+        let encoded: Vec<_> = remaining[..count]
+            .par_iter()
+            .map(|doc| encode_document(root, doc, paths))
+            .collect();
+        for mut entry in encoded.into_iter().flatten() {
+            entry.record[2] = offset;
+            for value in entry.record {
+                push_word(&mut records, value);
+            }
+            output.write_all(&entry.descriptors)?;
+            output.write_all(&entry.payload)?;
+            offset = offset
+                .checked_add(entry.record[12])
+                .ok_or_else(|| anyhow::anyhow!("source pack overflow"))?;
         }
-        output.write_all(&descriptors)?;
-        output.write_all(&payload)?;
-        offset = offset
-            .checked_add(length)
-            .ok_or_else(|| anyhow::anyhow!("source pack overflow"))?;
+        remaining = &remaining[count..];
     }
     output.flush()?;
     let mut table = BufWriter::new(File::create(directory.join(TABLE))?);
@@ -278,6 +308,35 @@ impl CompressedPack {
         }
         String::from_utf8(result).ok()
     }
+    /// Evaluate complete lines only. The caller must supply a line-local
+    /// predicate; Boolean predicates spanning separate lines cannot use this.
+    pub(super) fn matches_lines(
+        &self,
+        id: DocId,
+        relative: &Path,
+        path: &Path,
+        matches: impl Fn(&str) -> bool,
+    ) -> Option<bool> {
+        let source = self.source(id, relative, path)?;
+        let mut scratch = Vec::new();
+        let mut pending = Vec::new();
+        for n in 0..source.blocks() {
+            pending.extend_from_slice(source.decode(n, &mut scratch)?);
+            if let Some(end) = memchr::memrchr(b'\n', &pending) {
+                // A complete line boundary also bounds complete UTF-8 scalars.
+                // Keep CRLF intact so the existing predicate retains its semantics.
+                if matches(std::str::from_utf8(&pending[..=end]).ok()?) {
+                    return Some(true);
+                }
+                pending.drain(..=end);
+            }
+        }
+        if pending.is_empty() {
+            Some(false)
+        } else {
+            Some(matches(std::str::from_utf8(&pending).ok()?))
+        }
+    }
     pub(super) fn contains_literal(
         &self,
         id: DocId,
@@ -338,6 +397,116 @@ mod tests {
         };
         write_segment(&directory, temp.path(), &[&doc], &[PathBuf::from("a.txt")]).unwrap();
         (temp, directory, path)
+    }
+    #[test]
+    fn streaming_regex_keeps_line_utf8_crlf_and_anchor_semantics() {
+        let patterns = [
+            "^$",
+            "^needle$",
+            r"\Aneedle",
+            r"needle\z",
+            "(?i)NEEDLE",
+            "(?s:a.*needle)",
+            "é.clair",
+            r"\bneedle\b",
+            r"a\r",
+            "absent123",
+        ];
+        let regexes: Vec<_> = patterns
+            .iter()
+            .map(|p| regex::Regex::new(p).unwrap())
+            .collect();
+        for prefix in [0, 4093, 4094, 4095, 4096, 8191] {
+            for text in [
+                String::new(),
+                "\n".into(),
+                "\r".into(),
+                format!(
+                    "{}éclair\r\nneedle\n\n{}\na\r",
+                    "x".repeat(prefix),
+                    "z".repeat(9000)
+                ),
+            ] {
+                let (_temp, dir, path) = fixture(&text);
+                let p = CompressedPack::open(&dir).unwrap();
+                for re in &regexes {
+                    let expected = text.lines().any(|line| re.is_match(line));
+                    assert_eq!(
+                        p.matches_lines(1, Path::new("a.txt"), &path, |s| s
+                            .lines()
+                            .any(|line| re.is_match(line))),
+                        Some(expected),
+                        "prefix {prefix}, regex {re}"
+                    );
+                }
+            }
+        }
+        let text = format!("needle\n{}", "tail\n".repeat(4000));
+        let (_temp, dir, path) = fixture(&text);
+        let mut bytes = fs::read(dir.join(DATA)).unwrap();
+        *bytes.last_mut().unwrap() ^= 0xff;
+        fs::write(dir.join(DATA), bytes).unwrap();
+        let p = CompressedPack::open(&dir).unwrap();
+        assert_eq!(
+            p.matches_lines(1, Path::new("a.txt"), &path, |s| s
+                .lines()
+                .any(|line| line == "needle")),
+            Some(true)
+        );
+        assert_eq!(
+            p.matches_lines(1, Path::new("a.txt"), &path, |s| s.contains("absent")),
+            None
+        );
+    }
+    #[test]
+    fn parallel_batches_are_byte_identical_and_skip_unreadable_captures() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        let mut docs = Vec::new();
+        for id in 0..180 {
+            let path = PathBuf::from(format!("{id}.txt"));
+            let text = if id == 65 {
+                "z".repeat(9 * 1024 * 1024)
+            } else {
+                format!("{id} needle {}", "a".repeat(id * 13))
+            };
+            fs::write(temp.path().join(&path), &text).unwrap();
+            paths.push(path);
+            docs.push(Document {
+                doc_id: id as u32,
+                path_id: id as u32,
+                size: text.len() as u64,
+                mtime: 0,
+                language: Language::Unknown,
+                flags: DocFlags::new(),
+                segment_id: 1,
+            });
+        }
+        fs::remove_file(temp.path().join(&paths[70])).unwrap();
+        fs::write(
+            temp.path().join(&paths[71]),
+            vec![0xff; docs[71].size as usize],
+        )
+        .unwrap();
+        let refs: Vec<_> = docs.iter().collect();
+        for workers in [1, 4] {
+            let dir = temp.path().join(format!("pack-{workers}"));
+            fs::create_dir(&dir).unwrap();
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap()
+                .install(|| write_segment(&dir, temp.path(), &refs, &paths))
+                .unwrap();
+            let pack = CompressedPack::open(&dir).unwrap();
+            assert_eq!(pack.records.len(), 178);
+        }
+        for name in [TABLE, DATA] {
+            assert_eq!(
+                fs::read(temp.path().join("pack-1").join(name)).unwrap(),
+                fs::read(temp.path().join("pack-4").join(name)).unwrap()
+            );
+        }
     }
     #[test]
     fn roundtrip_boundaries_empty_long_literals_and_changed_sources() {

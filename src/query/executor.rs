@@ -651,6 +651,16 @@ impl<'a> QueryExecutor<'a> {
                 {
                     return found.then_some(*id);
                 }
+                if line_start.is_none()
+                    && line_end.is_none()
+                    && literal_finder.is_none()
+                    && let Some(regex) = &prepared_regex
+                    && let Some(found) = self
+                        .reader
+                        .packed_line_match(doc, &full_path, |lines| regex.is_match_in_lines(lines))
+                {
+                    return found.then_some(*id);
+                }
                 if let Some(content) = self.reader.packed_source(doc, &full_path) {
                     return has_match(&content).then_some(*id);
                 }
