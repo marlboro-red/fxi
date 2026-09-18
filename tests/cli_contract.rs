@@ -183,11 +183,17 @@ fn daemon_mutations_are_visible_and_graceful_stop_persists_last_save() {
                 daemon.0.try_wait().unwrap().is_none(),
                 "daemon exited during startup"
             );
-            let out = f.ok(&["daemon", "status"]);
-            if String::from_utf8_lossy(&out.stdout).contains("Uptime:") {
+            // The endpoint can exist before the foreground daemon serves
+            // status requests. Readiness polling must tolerate that interval.
+            let out = f.run(&["daemon", "status"]);
+            if out.status.success() && String::from_utf8_lossy(&out.stdout).contains("Uptime:") {
                 break;
             }
-            assert!(Instant::now() < deadline, "daemon startup timed out");
+            assert!(
+                Instant::now() < deadline,
+                "daemon startup timed out: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
         daemon
