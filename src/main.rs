@@ -5,8 +5,8 @@ mod server;
 mod tui;
 mod utils;
 
-use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use anyhow::{Context, Result};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
@@ -24,21 +24,22 @@ pub enum ColorChoice {
 #[command(
     name = "fxi",
     version,
-    after_help = "Examples:\n  fxi error                 Case-insensitive substring\n  fxi 'foo bar'             Both terms in the same file\n  fxi '\"foo bar\"'         Exact phrase\n  fxi --regex 'foo.*bar'    Regular expression\n  fxi -F 'foo-bar'          Literal text\n  fxi -l error src           Restrict results to src\n  fxi -F -- -excluded        Search literal leading punctuation\n\nNo matches exits successfully (0); invalid input and operation failures are errors."
+    after_help = "Examples:\n  fxi error                 Case-insensitive substring\n  fxi 'foo bar'             Both terms in the same file\n  fxi '\"foo bar\"'         Exact phrase\n  fxi --regex 'foo.*bar'    Regular expression\n  fxi -F 'foo-bar'          Literal text\n  fxi -l error src           Restrict results to src\n  fxi -F -- -excluded        Search literal leading punctuation\n  fxi -e error -e warn src   Alternatives restricted to src\n\n-e/--pattern adds an alternative in the selected mode; --regexp is a legacy alias, not a regex-mode switch.\nNo matches exits successfully (0); invalid input and operation failures are errors."
 )]
 #[command(about = "Terminal-first, ultra-fast code search engine")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Search pattern (when no subcommand is given)
+    /// Search pattern; with -e and no other path, this positional is the search path
     pattern: Option<String>,
 
     /// Alternative patterns in the selected mode (-e, repeat for OR)
-    #[arg(short = 'e', long = "regexp", action = clap::ArgAction::Append)]
+    #[arg(short = 'e', long = "pattern", alias = "regexp", value_name = "PATTERN", action = clap::ArgAction::Append)]
     patterns: Vec<String>,
 
     /// Optional file or directory to restrict the search to
+    #[arg(value_name = "PATH")]
     search_path: Option<PathBuf>,
 
     /// Treat patterns as literal text (case-sensitive unless -i)
@@ -66,8 +67,8 @@ struct Cli {
     no_heading: bool,
 
     /// File or directory to restrict the search to (index root is detected separately)
-    #[arg(short, long, default_value = ".", conflicts_with = "search_path")]
-    path: PathBuf,
+    #[arg(short, long, conflicts_with = "search_path")]
+    path: Option<PathBuf>,
 
     /// Lines of context after match (-A)
     #[arg(short = 'A', long, default_value = "0")]
@@ -215,13 +216,23 @@ struct GrepOptions {
 impl GrepOptions {
     fn from_cli(cli: &Cli) -> Self {
         let mut patterns = cli.patterns.clone();
-        if let Some(ref p) = cli.pattern {
-            patterns.insert(0, p.clone());
+        // With explicit alternatives, a lone positional has grep's PATH role.
+        // Keep unambiguous legacy PATTERN PATH and PATTERN -p PATH forms.
+        let positional_is_path =
+            !patterns.is_empty() && cli.search_path.is_none() && cli.path.is_none();
+        let path = if positional_is_path {
+            cli.pattern.as_ref().map(PathBuf::from)
+        } else {
+            if let Some(ref pattern) = cli.pattern {
+                patterns.insert(0, pattern.clone());
+            }
+            cli.search_path.clone().or_else(|| cli.path.clone())
         }
+        .unwrap_or_else(|| PathBuf::from("."));
 
         Self {
             patterns,
-            path: cli.search_path.clone().unwrap_or_else(|| cli.path.clone()),
+            path,
             after_context: cli.after_context,
             before_context: cli.before_context,
             context: cli.context,
@@ -263,7 +274,36 @@ fn is_broken_pipe(error: &anyhow::Error) -> bool {
 }
 
 fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches)?;
+    let explicit_search_options = [
+        "fixed_strings",
+        "regex",
+        "json",
+        "null",
+        "heading",
+        "no_heading",
+        "after_context",
+        "before_context",
+        "context",
+        "ignore_case",
+        "invert_match",
+        "word_regexp",
+        "max_count",
+        "files_with_matches",
+        "count",
+        "color",
+    ]
+    .iter()
+    .any(|id| matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine));
+
+    let explicit_search_arguments = ["pattern", "patterns", "search_path", "path"]
+        .iter()
+        .any(|id| matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine));
+    anyhow::ensure!(
+        cli.command.is_none() || !(explicit_search_options || explicit_search_arguments),
+        "Search options cannot be combined with a subcommand. To search a command name, use `--` before the pattern (for example, `fxi --json -- stats`)"
+    );
 
     match cli.command {
         Some(Commands::Index {
@@ -280,7 +320,7 @@ fn run() -> Result<()> {
             reload_running_daemon(&root)?;
         }
         Some(Commands::Search { path }) => {
-            tui::run(path, None)?;
+            run_interactive(path)?;
         }
         Some(Commands::Stats { path }) => {
             index::stats::show_stats(&path)?;
@@ -315,17 +355,25 @@ fn run() -> Result<()> {
                 // Direct content search (ripgrep-like)
                 handle_grep_command(opts)?;
             } else {
-                use std::io::IsTerminal;
                 anyhow::ensure!(
-                    std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
-                    "Interactive search needs a terminal. Supply a pattern, or run `fxi --help`; stdin search is not supported"
+                    !explicit_search_options,
+                    "Missing search pattern. Supply PATTERN or -e PATTERN; use `fxi search` for interactive search"
                 );
-                tui::run(cli.path, None)?;
+                run_interactive(cli.path.unwrap_or_else(|| PathBuf::from(".")))?;
             }
         }
     }
 
     Ok(())
+}
+
+fn run_interactive(path: PathBuf) -> Result<()> {
+    use std::io::IsTerminal;
+    anyhow::ensure!(
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        "Interactive search needs a terminal. Supply a pattern, or run `fxi --help`; stdin search is not supported"
+    );
+    tui::run(path, None)
 }
 
 fn reload_running_daemon(root: &std::path::Path) -> Result<()> {
@@ -457,7 +505,10 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
         !opts.invert_match,
         "--invert-match (-v) is not supported: indexed search only returns matching lines"
     );
-    let requested = opts.path.canonicalize()?;
+    let requested = opts
+        .path
+        .canonicalize()
+        .with_context(|| format!("Cannot access search path {}", opts.path.display()))?;
     let root = utils::find_codebase_root(&requested)?;
     let scope = requested.strip_prefix(&root)?.to_path_buf();
     let combined_pattern = build_pattern(&opts.patterns, opts.fixed_strings, opts.regex)?;
@@ -514,7 +565,8 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
             warn_if_stale_metadata(&meta, &root);
             response.file_paths = Some(Vec::new());
         } else {
-            let reader = index::reader::IndexReader::open_for_search_uncached(&root)?;
+            let reader = index::reader::IndexReader::open_for_search_uncached(&root)
+                .map_err(|error| explain_missing_index(error, &root))?;
             warn_if_stale(&reader, &root);
             let executor = query::QueryExecutor::new(&reader);
             if opts.files_with_matches {
@@ -605,6 +657,22 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
         output::print_content_matches(&response.matches, color, heading)?;
     }
     Ok(())
+}
+
+/// Add setup guidance only on an actual missing-index error path. Successful
+/// searches pay no additional metadata lookup, and corruption keeps its error.
+fn explain_missing_index(error: anyhow::Error, root: &Path) -> anyhow::Error {
+    if let Ok(directory) = utils::get_index_dir(root)
+        && let Err(metadata_error) = std::fs::metadata(directory.join("meta.json"))
+        && metadata_error.kind() == std::io::ErrorKind::NotFound
+    {
+        error.context(format!(
+            "No index is available for {}. Run `fxi index` from that project directory (or `fxi index PATH`) before searching",
+            root.display()
+        ))
+    } else {
+        error
+    }
 }
 
 /// Searching without a daemon means results reflect the index as of its

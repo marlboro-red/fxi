@@ -146,6 +146,8 @@ fn bad_input_and_operational_errors_fail_without_launching_a_tui() {
     assert!(
         help.contains("--fixed-strings") && help.contains("--regex") && help.contains("--json")
     );
+    assert!(help.contains("--pattern <PATTERN>"));
+    assert!(help.contains("--regexp is a legacy alias, not a regex-mode switch"));
 }
 
 #[cfg(unix)]
@@ -282,4 +284,119 @@ fn closed_output_pipe_is_quiet_success_in_text_and_json_modes() {
         );
         assert!(output.stderr.is_empty());
     }
+}
+
+#[test]
+fn explicit_patterns_use_a_lone_positional_as_scope() {
+    let f = Fixture::new();
+    for args in [
+        vec!["-e", "alpha", "src", "-l"],
+        vec!["-e", "alpha", "-e", "missing", "src", "-l"],
+        vec!["--pattern", "alpha", "src", "-l"],
+        vec!["--regexp", "alpha", "src", "-l"],
+        vec!["-e", "alpha", "src/a.txt", "-l"],
+    ] {
+        let rows = f.json(&args);
+        let paths = rows["file_paths"].as_array().unwrap();
+        assert_eq!(paths.len(), 1, "{args:?}: {rows}");
+        assert!(
+            std::path::Path::new(paths[0].as_str().unwrap())
+                .ends_with(std::path::Path::new("src").join("a.txt"))
+        );
+    }
+    assert_eq!(
+        f.json(&["--regexp", "^Alpha", "src"])["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "legacy --regexp alias retains query mode unless --regex is selected"
+    );
+    assert_eq!(
+        f.json(&["--regex", "--pattern", "^Alpha", "src"])["matches"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let missing = f.run(&["-e", "alpha", "nonexistent-directory"]);
+    assert!(
+        !missing.status.success(),
+        "must not silently search a nonexistent scope as an OR term"
+    );
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("nonexistent-directory"));
+    // Unambiguous mixed legacy forms keep accepting a positional alternative.
+    assert_eq!(
+        f.json(&["missing", "-e", "alpha", "-p", "src", "-l"])["file_paths"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        f.json(&["missing", "-e", "alpha", "src", "-l"])["file_paths"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn search_flags_without_a_pattern_are_not_interactive_requests() {
+    let f = Fixture::new();
+    for args in [
+        vec!["--json"],
+        vec!["-l"],
+        vec!["-c"],
+        vec!["--regex"],
+        vec!["-F"],
+        vec!["-m", "0"],
+        vec!["-C", "0"],
+        vec!["--color", "auto"],
+        vec!["--heading"],
+    ] {
+        let output = f.run(&args);
+        assert!(!output.status.success(), "{args:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("pattern"), "{args:?}: {error}");
+        assert!(
+            !error.contains("Interactive search needs a terminal"),
+            "{args:?}: {error}"
+        );
+        assert!(output.stdout.is_empty());
+    }
+    let output = f.run(&["search"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("Interactive search needs a terminal"),
+        "{error}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "must not emit terminal control sequences"
+    );
+    let escaped = f.ok(&["--json", "--", "stats"]);
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&escaped.stdout).unwrap()["matches"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !f.run(&["--json", "stats"]).status.success(),
+        "search flags must not be silently ignored by subcommands"
+    );
+}
+
+#[test]
+fn missing_index_error_explains_how_to_create_it() {
+    let f = Fixture::new();
+    f.ok(&["remove", "."]);
+    let output = f.run(&["alpha", "-l"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("fxi index"), "{error}");
+    assert!(error.contains(f.root.to_str().unwrap()), "{error}");
 }

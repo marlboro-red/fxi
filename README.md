@@ -61,13 +61,24 @@ fxi -l 'ext:rs error'             # Matching filenames only
 fxi -c 'error'                    # Count matching lines per file
 fxi -C 2 'panic'                  # Two lines of surrounding context
 fxi -w -F 'main'                  # Whole-word literal
-fxi -e 'TODO' -e 'FIXME'         # Either query
+fxi -e 'TODO' -e 'FIXME' src     # Either query, restricted to src
 fxi --regex -e 'warn.*' -e 'error.*'
 fxi -F -- '-excluded'             # Literal beginning with a minus
 fxi -- stats                     # Search the word "stats", not the subcommand
 fxi --json 'error'               # Structured output
 fxi -l -0 'error'                # NUL-terminated paths for scripts
 ```
+
+When `-e`/`--pattern` supplies the alternatives, a lone positional argument is
+**the search path**, including when that path does not exist. FXI does not guess
+based on whether a file happens to exist. For example, `fxi -e foo -e bar src`
+searches `src`, rather than adding `src` as another search term.
+
+To migrate `fxi foo -e bar`, write `fxi -e foo -e bar`. The unambiguous legacy
+forms `fxi foo -e bar src` and `fxi foo -e bar -p src` still accept `foo` as an
+additional alternative. New scripts should put every alternative after `-e`.
+`--regexp` keeps its old selected-mode behavior; use `--regex` when the patterns
+are regular expressions.
 
 A search path restricts returned files; the index root is detected separately.
 Searching from a subdirectory defaults to that subdirectory's scope. Indexing,
@@ -77,7 +88,7 @@ statistics, compaction, and the TUI operate on the detected codebase root.
 |---|---|
 | `-F`, `--fixed-strings` | Literal-text mode. |
 | `--regex` | Regular-expression mode. |
-| `-e PATTERN` | Repeatable alternatives in the selected mode; does not itself switch to regex. |
+| `-e PATTERN`, `--pattern PATTERN` | Repeatable alternatives in the selected mode; does not itself switch to regex. `--regexp` remains a compatibility alias. |
 | `-i`, `--ignore-case` | Ignore case, including phrases and regexes. Bare terms already ignore case. |
 | `-w`, `--word-regexp` | Require word boundaries for search terms. |
 | `-l`, `--files-with-matches` | Print matching paths once each. |
@@ -89,6 +100,12 @@ statistics, compaction, and the TUI operate on the detected codebase root.
 | `--json` | Structured output for the selected output mode. |
 | `-0`, `--null` | NUL-terminate filenames; requires `-l`. |
 | `--color auto\|always\|never` | Control terminal coloring. |
+
+Search flags such as `--json`, `-l`, or `--regex` require a pattern; they do not
+launch the interactive UI on their own. Use `fxi` or `fxi search` from a terminal
+for interactive search. `fxi search` with redirected input/output reports an
+error instead of emitting terminal-control sequences. Search flags cannot be
+mixed with subcommands: use `fxi --json -- stats` to search the word `stats`.
 
 Terminal output uses file headings by default; redirected output uses
 `path:line:text`. No matches is a successful exit (`0`). Invalid queries and
