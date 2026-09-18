@@ -440,3 +440,83 @@ Synthetic publication medians (five paired samples, 4,096 files):
 
 [Publication samples](publication-generation.json). This small, repetitive corpus
 does not establish publication cost on the 1.3 GB Linux corpus.
+
+
+## macOS daemon-helper experiment
+
+The CLI now keeps daemon implementation and native FSEvents frameworks in a
+sibling `fxid` executable. `fxi daemon` remains the public interface; foreground
+execution uses `exec` to preserve PID/signals, background execution retains the
+existing double-fork and readiness handshake. Helper resolution uses the sibling
+of the actual CLI executable, never arbitrary PATH fallback. Linux/Windows CLI
+daemon execution remains monolithic in this iteration.
+
+The integrated CLI links libiconv/libSystem; the helper retains
+CoreFoundation/CoreServices. Both executables must be installed together for
+macOS daemon commands. Cargo build/install includes both; clean `cargo run --
+daemon ...` needs `cargo build --bins` first. Missing/mismatched helpers fail with
+an actionable error. The combined package is larger than the prior single binary
+(about 8 MB in the initial split build, versus about 4.3 MB).
+
+The integrated full suite passed 964 executions, plus Clippy and MSRV 1.88. The
+count falls because macOS CLI compilation no longer duplicates daemon unit tests;
+the library retains its daemon tests. New process tests cover relocation, spaces
+in paths, missing helper/no PATH fallback, foreground PID/signals and exit codes,
+native watching, final-save persistence and background startup. CI also installs
+both binaries and exercises an installed watched daemon. All eight CI jobs passed
+for `0683a00`.
+
+For this campaign, the pre-existing watch daemon was paused and resumed in a
+`finally` block. No compilation or source edits ran during timed measurements.
+Both binaries use identical index bytes and policy flags in each paired test.
+[31-pair startup calibration](startup-helper.json):
+
+| Case | Monolithic CLI (ms) | Split CLI (ms) |
+| --- | ---: | ---: |
+| version | 3.477 | 2.564 |
+| empty_checked_absence | 3.780 | 2.837 |
+
+The split saves about a millisecond, not the whole startup floor. On the checked
+generation-routing index, [31 query pairs](queries-helper.json) show:
+
+| Pattern | Monolithic CLI (ms) | Split CLI (ms) |
+| --- | ---: | ---: |
+| `auditNonexistentSymbol94283` | 4.286 | 3.297 |
+| `folio_wait_bit_common` | 13.092 | 11.815 |
+| `struct file_operations` | 21.627 | 20.236 |
+| `return.*0` | 97.045 | 95.469 |
+
+[Default strict-mode control](default-helper.json) and the
+[held-out Redis control](redis-helper.json) use legacy indexes with experimental
+validation/routing disabled. Redis absence improved 5.240 → 4.187 ms and `raxFind`
+5.669 → 4.630 ms; the roughly one-millisecond gain therefore extends beyond the
+experimental format and Linux corpus.
+
+Full process comparison, 11 randomized samples and exact result-set checks:
+
+| Pattern | FXI experimental packed | tgrep | csearch | Zoekt | ripgrep |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `auditNonexistentSymbol94283` | 4.01 | 17.82 | 4.30 | 57.05 | 2657.91 |
+| `folio_wait_bit_common` | 12.53 | 19.37 | 16.24 | 57.55 | 2671.87 |
+| `return.*0` | 101.21 | 2169.29 | 1813.54 | 291.49 | 2904.60 |
+
+[Full seven-mode samples](competitors-helper.json). Absence is a near tie with
+csearch, not a decisive win. The selective and packed broad workloads show larger
+leads. These are pinned tools on one warm corpus/platform, not universal rankings.
+
+## Full-corpus publication cost
+
+The extended publication harness copies source bytes into a private corpus (never
+hardlinks them, which would change the original source ctimes), adds one probe file,
+and verifies the original manifest after removing it. Each timed variant receives
+a private copy of the same prepared index; build/copy/oracle work is outside timing.
+A 32-file smoke run checked this harness path before the full experiment.
+
+The copied Linux corpus retains the exact 65,284-file, 1,311,592,608-byte manifest.
+With lean indexes, source packs disabled and 32 inherited segments, three paired
+one-file durable updates measured **568.81 → 649.51 ms** from the checked mapped
+baseline to the current helper + generation router: **+14.2%**.
+[All samples and traces](publication-linux-generation.json) retain the complete
+commands and publication breakdown. This update regression is real; the router
+currently rebuilds its whole summary for one added file. Reusing an unchanged
+summary safely is a remaining architecture task, not an achieved optimization.
