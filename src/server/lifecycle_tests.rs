@@ -374,3 +374,112 @@ fn reload_reports_unapplied_visibility_without_discarding_the_previous_preview()
     );
     assert!(!fixture.server.pending_changes.lock().unwrap()[&fixture.root].needs_visibility);
 }
+
+#[test]
+fn edits_arriving_during_publication_remain_pending_until_reconciled() {
+    for persist in [false, true] {
+        let fixture = Fixture::new();
+        fixture.change("0.rs", "firstPublicationMarker\n");
+        let cached = fixture.server.indexes.read().unwrap()[&fixture.root].clone();
+        // Block the live-reader swap, so the publisher cannot finish after
+        // capturing its batch and before we deliver the next notification.
+        let held_reader = cached.reader.lock().unwrap();
+        let server = fixture.server.clone();
+        let root = fixture.root.clone();
+        let worker = thread::spawn(move || server.flush_pending_changes_mode(&root, persist));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fixture
+            .server
+            .pending_changes
+            .lock()
+            .unwrap()
+            .contains_key(&fixture.root)
+        {
+            assert!(Instant::now() < deadline, "publisher did not capture batch");
+            thread::yield_now();
+        }
+        // Include both a repeated path and a previously unseen path. The first
+        // snapshot may have read either version; the final result must be latest.
+        fixture.change("0.rs", "latestPublicationMarker\n");
+        fixture.change("late.rs", "latestPublicationMarker\n");
+        drop(held_reader);
+        worker.join().unwrap();
+        {
+            let pending = fixture.server.pending_changes.lock().unwrap();
+            let pending = &pending[&fixture.root];
+            assert!(pending.needs_visibility);
+            assert!(pending.batch.modified.contains(&PathBuf::from("0.rs")));
+            assert!(pending.batch.modified.contains(&PathBuf::from("late.rs")));
+        }
+        fixture.server.flush_pending_changes(&fixture.root);
+        assert!(fixture.server.pending_changes.lock().unwrap().is_empty());
+        let expected = vec![PathBuf::from("0.rs"), PathBuf::from("late.rs")];
+        assert_eq!(fixture.disk_paths("latestPublicationMarker"), expected);
+        let live = cached.get_reader();
+        assert_eq!(
+            QueryExecutor::new(&live)
+                .execute_files_only(&crate::query::parse_query("latestPublicationMarker"), 0)
+                .unwrap(),
+            expected
+        );
+        assert!(fixture.disk_paths("firstPublicationMarker").is_empty());
+    }
+}
+
+#[test]
+fn removal_waits_for_inflight_publication_and_discards_late_notifications() {
+    let fixture = Fixture::new();
+    fixture.change("0.rs", "removedPublicationMarker\n");
+    let cached = fixture.server.indexes.read().unwrap()[&fixture.root].clone();
+    let held_reader = cached.reader.lock().unwrap();
+    let server = fixture.server.clone();
+    let root = fixture.root.clone();
+    let publisher = thread::spawn(move || server.flush_pending_changes(&root));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fixture
+        .server
+        .pending_changes
+        .lock()
+        .unwrap()
+        .contains_key(&fixture.root)
+    {
+        assert!(Instant::now() < deadline, "publisher did not capture batch");
+        thread::yield_now();
+    }
+    let server = fixture.server.clone();
+    let root = fixture.root.clone();
+    let (done, completion) = mpsc::channel();
+    let remover = thread::spawn(move || done.send(server.handle_remove(root)).unwrap());
+    // Publication owns the writer lock: removal cannot acknowledge success
+    // while its live-reader swap is blocked, even if the remover starts late.
+    assert!(completion.recv_timeout(Duration::from_millis(50)).is_err());
+    fixture.change("late.rs", "removedPublicationMarker\n");
+    drop(held_reader);
+    publisher.join().unwrap();
+    assert!(matches!(
+        completion.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Response::Reloaded { success: true, .. }
+    ));
+    remover.join().unwrap();
+    fixture
+        .server
+        .accumulate_changes(fixture.root.clone(), changed("late.rs"));
+    fixture.server.flush_pending_changes(&fixture.root);
+    assert!(!crate::utils::is_indexed(&fixture.root).unwrap());
+    assert!(
+        !fixture
+            .server
+            .indexes
+            .read()
+            .unwrap()
+            .contains_key(&fixture.root)
+    );
+    assert!(
+        !fixture
+            .server
+            .pending_changes
+            .lock()
+            .unwrap()
+            .contains_key(&fixture.root)
+    );
+}
