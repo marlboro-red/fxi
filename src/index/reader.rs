@@ -1648,7 +1648,11 @@ impl IndexReader {
             .contains_literal(doc.doc_id, self.get_path(doc)?, full_path, finder)
     }
 
-    pub(crate) fn packed_source(&self, doc: &Document, full_path: &Path) -> Option<&str> {
+    pub(crate) fn packed_source(
+        &self,
+        doc: &Document,
+        full_path: &Path,
+    ) -> Option<std::borrow::Cow<'_, str>> {
         if !self.source_pack_enabled {
             return None;
         }

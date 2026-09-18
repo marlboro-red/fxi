@@ -98,3 +98,44 @@ this workload. More compact static filters, such as
 [binary fuse filters](https://arxiv.org/abs/2201.01174), remain a separate possible
 experiment; their construction cost and per-block size must be measured here,
 not assumed to beat this small fixed Bloom filter.
+
+## Opt-in CLI prototype
+
+`FXI_SOURCE_PACK=1 FXI_SOURCE_PACK_COMPRESSION=1 fxi index --force PATH`
+selects the experimental hybrid writer. The default raw writer is unchanged.
+Mixed raw/compressed segments are supported. The compressed reader maps its
+per-file filters and descriptors, validating only the candidate file's metadata
+on demand; it does not eagerly read the entire filter region. This matters for
+startup latency. The serialized format adds block descriptors and file records,
+so its actual size is larger than the lab's payload-plus-filter estimate.
+
+Three alternating-order [full build pairs](builds.json) measure 1,834.75 →
+1,254.35 MiB total index size, a 31.6% reduction (580.40 MiB). Source table+data
+falls from 1,321,234,312 to 712,641,241 bytes, a 46.1% reduction. Median build time
+is 6.990 → 10.488 seconds; median peak build RSS is 361.73 → 349.89 MiB. These
+builds use a serial compressed writer. Both before/after source manifests match
+`adb3052a8f1cd3f0d7b49c7dff2cc5ad36b831da7a4c238c2f899db85ae57854`.
+
+Twenty-one interleaved [CLI query pairs](startup.json), checked against ripgrep:
+
+| Files-only query | Raw ms | Compressed ms |
+| --- | ---: | ---: |
+| Absent symbol | 33.75 | 34.24 |
+| `folio_wait_bit_common` | 35.45 | 35.89 |
+| `struct file_operations` | 46.32 | 43.57 |
+| `return` | 109.11 | 109.12 |
+| `unlikely\(` | 46.38 | 45.77 |
+| `Copyright` | 116.98 | 117.07 |
+| `return.*0` | 290.48 | 352.76 |
+
+The broad regex needs full decoding and regresses 21.4%. This is why the format
+remains experimental and is not a replacement default. Literal results are
+encouraging, but neither cold-storage behavior nor cross-platform performance is
+established. We have not rerun competitor comparisons in this storage experiment.
+
+Local prototype validation: 932 all-target Rust test executions, strict Clippy,
+formatting, and Rust 1.88 all-target compilation pass. Tests cover exact decoded
+bytes, generated literal boundaries/lengths, empty and Unicode files, stale
+sources with restored mtime, malformed lengths and offsets, filter/payload/table
+corruption, deletion, mixed formats, incremental updates, compaction, pinned
+readers, and agreement with live CLI literal/regex/case/count/context output.

@@ -323,6 +323,41 @@ tail cannot invalidate an already verified positive witness in the live source.
 Other verification uses a whole-file checksum and UTF-8 validation. Existing
 point-in-time limitations during concurrent source writes remain unchanged.
 
+#### Experimental compressed source packs
+
+On Unix, setting both `FXI_SOURCE_PACK=1` and
+`FXI_SOURCE_PACK_COMPRESSION=1` during indexing writes `FXISRC03` packs for new
+segments. Existing inherited packs retain their format; rebuild or compact with
+both settings to convert them. Readers automatically recognize both formats.
+The compression setting affects writing, while `FXI_SOURCE_PACK=0` still disables
+all packed reads. Compression remains opt-in because its speed tradeoffs depend
+on the query. Windows behavior is unchanged.
+
+Each file retains its first 4 KiB uncompressed. Later independent 4 KiB blocks
+use LZ4 only when smaller than the original. A 2,048-bit trigram filter describes
+each block plus at most 255 following bytes. For exact case-sensitive literals
+of 3–256 bytes, a filter can rule out match starts in that block. Every occurrence
+of such a literal has all its trigrams within this extended interval, so a filter
+cannot reject a real occurrence. Possible blocks and any required next-block
+boundary bytes are decoded and checksummed before returning a positive result.
+Other lengths and other verification use complete decoding, a whole-file
+checksum and UTF-8 validation. Compression can make that full-read path slower.
+
+File records have the same source identity/timestamp evidence as raw packs.
+Per-file descriptors and filters live in the immutable mapped data file, with a
+checksum referenced by the checksummed source table. Readers validate a file's
+metadata before trusting its filters, without eagerly loading every filter in
+the segment. Negative filters describe the captured source, so rejecting a block
+does not require reading its compressed payload. Corrupt metadata or any invalid
+payload that is needed for verification triggers the ordinary live fallback.
+These are accidental-corruption checks, not authentication. Filters must never
+be constructed from the earlier tokenization snapshot.
+
+Legacy readers that do not understand `FXISRC03` ignore the optional accelerator
+and read live sources. No primary-posting format changes are involved. The
+[compression experiments](performance-source-compression/NOTES.md) record the
+measured tradeoffs and remaining limits.
+
 ### Experimental certified negative routing
 
 `FXI_NEGATIVE_ROUTING=1` enables certificate creation during index publication and

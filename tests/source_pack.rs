@@ -5,12 +5,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn run(root: &Path, indexes: &Path, args: &[&str]) -> String {
+fn run_codec(root: &Path, indexes: &Path, args: &[&str], compression: bool) -> String {
     let result = Command::new(env!("CARGO_BIN_EXE_fxi"))
         .args(args)
         .current_dir(root)
         .env("FXI_INDEXES", indexes)
         .env("FXI_SOURCE_PACK", "1")
+        .env(
+            "FXI_SOURCE_PACK_COMPRESSION",
+            if compression { "1" } else { "0" },
+        )
         .env("FXI_SOCKET", indexes.join("absent.sock"))
         .env("XDG_RUNTIME_DIR", indexes)
         .output()
@@ -37,6 +41,17 @@ fn files(directory: &Path, name: &str) -> Vec<PathBuf> {
 
 #[test]
 fn packed_cli_matches_live_files_after_edits_corruption_compaction_and_rebuild() {
+    packed_cli_matches_live_files_after_edits_corruption_compaction_and_rebuild_case(false);
+}
+#[test]
+fn compressed_packed_cli_matches_live_files_after_edits_corruption_compaction_and_rebuild() {
+    packed_cli_matches_live_files_after_edits_corruption_compaction_and_rebuild_case(true);
+}
+fn packed_cli_matches_live_files_after_edits_corruption_compaction_and_rebuild_case(
+    compression: bool,
+) {
+    let run =
+        |root: &Path, indexes: &Path, args: &[&str]| run_codec(root, indexes, args, compression);
     let root = tempfile::tempdir().unwrap();
     let indexes = tempfile::tempdir().unwrap();
     let a = root.path().join("a.txt");
@@ -127,6 +142,15 @@ fn packed_cli_matches_live_files_after_edits_corruption_compaction_and_rebuild()
 
 #[test]
 fn delta_and_compaction_preserve_pinned_pack_bytes_and_repair_orphan_links() {
+    delta_and_compaction_preserve_pinned_pack_bytes_and_repair_orphan_links_case(false);
+}
+#[test]
+fn compressed_delta_and_compaction_preserve_pinned_pack_bytes_and_repair_orphan_links() {
+    delta_and_compaction_preserve_pinned_pack_bytes_and_repair_orphan_links_case(true);
+}
+fn delta_and_compaction_preserve_pinned_pack_bytes_and_repair_orphan_links_case(compression: bool) {
+    let run =
+        |root: &Path, indexes: &Path, args: &[&str]| run_codec(root, indexes, args, compression);
     use std::os::unix::fs::MetadataExt;
 
     let root = tempfile::tempdir().unwrap();
@@ -239,4 +263,71 @@ fn delta_and_compaction_preserve_pinned_pack_bytes_and_repair_orphan_links() {
     run(root.path(), indexes.path(), &["index", "--force", "."]);
     assert!(!original.exists(), "unleased packs should be collected");
     assert_eq!(search(), ["a.txt", "c.txt"]);
+}
+
+#[test]
+fn mixed_raw_and_compressed_generations_match_live_cli_modes() {
+    let root = tempfile::tempdir().unwrap();
+    let indexes = tempfile::tempdir().unwrap();
+    for n in 0..130 {
+        fs::write(
+            root.path().join(format!("file-{n:03}.txt")),
+            format!(
+                "{}\nneedle suffix\n{}\n",
+                "x".repeat(4094),
+                "y".repeat(9000)
+            ),
+        )
+        .unwrap();
+    }
+    run_codec(
+        root.path(),
+        indexes.path(),
+        &["index", "--force", "."],
+        false,
+    );
+    fs::write(
+        root.path().join("new.txt"),
+        format!("{}\nneedle suffix\n{}", "z".repeat(8190), "q".repeat(9000)),
+    )
+    .unwrap();
+    run_codec(root.path(), indexes.path(), &["index", "."], true);
+    let headers: Vec<_> = files(indexes.path(), "source.table")
+        .iter()
+        .map(|p| fs::read(p).unwrap()[..8].to_vec())
+        .collect();
+    assert!(headers.iter().any(|h| h == b"FXISRC02"));
+    assert!(headers.iter().any(|h| h == b"FXISRC03"));
+    for args in [
+        vec!["-l", "-F", "needle", "."],
+        vec!["-l", "re:/need.e/", "-p", "."],
+        vec!["-l", "-i", "-F", "NEEDLE", "."],
+        vec!["-c", "-F", "needle", "."],
+        vec!["-F", "-C", "1", "needle", "."],
+    ] {
+        let packed = run_codec(root.path(), indexes.path(), &args, true);
+        let live = Command::new(env!("CARGO_BIN_EXE_fxi"))
+            .args(&args)
+            .current_dir(root.path())
+            .env("FXI_INDEXES", indexes.path())
+            .env("FXI_SOURCE_PACK", "0")
+            .env("FXI_SOCKET", indexes.path().join("absent.sock"))
+            .env("XDG_RUNTIME_DIR", indexes.path())
+            .output()
+            .unwrap();
+        assert!(
+            live.status.success(),
+            "{}",
+            String::from_utf8_lossy(&live.stderr)
+        );
+        assert_eq!(packed, String::from_utf8(live.stdout).unwrap(), "{args:?}");
+    }
+    run_codec(root.path(), indexes.path(), &["compact", "."], true);
+    let output = run_codec(
+        root.path(),
+        indexes.path(),
+        &["-l", "-F", "needle", "."],
+        true,
+    );
+    assert_eq!(output.lines().count(), 131);
 }

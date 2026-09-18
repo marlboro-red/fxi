@@ -282,6 +282,9 @@ Optional Unix source packs (`FXI_SOURCE_PACK=1 fxi index --force PATH`) trade ex
 disk/build work for faster broad one-shot files-only searches. They are not enabled
 by default. [Round six](docs/performance-round6/NOTES.md) describes this tradeoff
 and the separate experimental negative-routing option.
+Experimental compressed packs add `FXI_SOURCE_PACK_COMPRESSION=1` during building.
+They trade decompression work for less disk usage; see the
+[measurements and limitations](docs/performance-source-compression/NOTES.md).
 
 ## Development
 

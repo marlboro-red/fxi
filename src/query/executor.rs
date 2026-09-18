@@ -652,7 +652,7 @@ impl<'a> QueryExecutor<'a> {
                     return found.then_some(*id);
                 }
                 if let Some(content) = self.reader.packed_source(doc, &full_path) {
-                    return has_match(content).then_some(*id);
+                    return has_match(&content).then_some(*id);
                 }
             }
             let content = self.reader.read_file_for_scan(&full_path, cache_scan)?;

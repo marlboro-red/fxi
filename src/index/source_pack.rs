@@ -9,6 +9,47 @@ use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use xxhash_rust::xxh3::xxh3_64;
 
+mod compressed;
+
+pub(crate) enum SourcePack {
+    Raw(RawSourcePack),
+    Compressed(compressed::CompressedPack),
+}
+impl SourcePack {
+    pub(crate) fn open(directory: &Path) -> Result<Self> {
+        let mut header = [0; 8];
+        File::open(directory.join(TABLE))?.read_exact(&mut header)?;
+        if &header == compressed::MAGIC {
+            compressed::CompressedPack::open(directory).map(Self::Compressed)
+        } else {
+            RawSourcePack::open(directory).map(Self::Raw)
+        }
+    }
+    pub(crate) fn read(
+        &self,
+        id: DocId,
+        relative: &Path,
+        path: &Path,
+    ) -> Option<std::borrow::Cow<'_, str>> {
+        match self {
+            Self::Raw(p) => p.read(id, relative, path).map(std::borrow::Cow::Borrowed),
+            Self::Compressed(p) => p.read(id, relative, path).map(std::borrow::Cow::Owned),
+        }
+    }
+    pub(crate) fn contains_literal(
+        &self,
+        id: DocId,
+        relative: &Path,
+        path: &Path,
+        finder: &memchr::memmem::Finder<'_>,
+    ) -> Option<bool> {
+        match self {
+            Self::Raw(p) => p.contains_literal(id, relative, path, finder),
+            Self::Compressed(p) => p.contains_literal(id, relative, path, finder),
+        }
+    }
+}
+
 const MAGIC: &[u8; 8] = b"FXISRC02";
 const WORDS: usize = 13;
 const BLOCK_BYTES: usize = 4096;
@@ -79,6 +120,10 @@ pub(crate) fn write_missing(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+        if std::env::var_os("FXI_SOURCE_PACK_COMPRESSION").is_some_and(|v| v == "1") {
+            compressed::write_segment(&directory, root, &documents, paths)?;
+            continue;
+        }
         let mut output = BufWriter::new(File::create_new(directory.join(DATA))?);
         let mut block_hashes = Vec::new();
         let mut records = Vec::new();
@@ -145,12 +190,12 @@ pub(crate) fn write_missing(
     Ok(())
 }
 
-pub(crate) struct SourcePack {
+pub(crate) struct RawSourcePack {
     records: Vec<[u64; WORDS]>,
     block_hashes: Vec<u64>,
     data: Option<Mmap>,
 }
-impl SourcePack {
+impl RawSourcePack {
     pub(crate) fn open(directory: &Path) -> Result<Self> {
         ensure!(cfg!(unix), "source pack metadata validation requires Unix");
         let table = fs::read(directory.join(TABLE))?;
@@ -428,7 +473,7 @@ mod tests {
         let (_temp, segment, path) = fixture();
         let pack = SourcePack::open(&segment).unwrap();
         let relative = Path::new("a.txt");
-        assert_eq!(pack.read(1, relative, &path), Some("needle\n"));
+        assert_eq!(pack.read(1, relative, &path).as_deref(), Some("needle\n"));
         assert_eq!(pack.read(2, relative, &path), None);
         assert_eq!(pack.read(1, Path::new("b.txt"), &path), None);
         let modified = fs::metadata(&path).unwrap().modified().unwrap();
