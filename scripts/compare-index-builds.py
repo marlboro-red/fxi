@@ -37,6 +37,8 @@ def main():
     parser.add_argument('--baseline-profile', choices=['full', 'lean'])
     parser.add_argument('--candidate-profile', choices=['full', 'lean'])
     parser.add_argument('--candidate-query-local', action='store_true', help='Build candidate checked gram evidence and enable query-local validation')
+    parser.add_argument('--baseline-query-local', action='store_true')
+    parser.add_argument('--candidate-generation-routing', action='store_true')
     parser.add_argument('--source-pack', choices=['0', '1'], default='0')
     parser.add_argument('--repetitions', type=int, default=3)
     parser.add_argument('--output', type=Path, required=True)
@@ -67,7 +69,7 @@ def main():
         for name in (['before', 'after'] if repetition % 2 == 0 else ['after', 'before']):
             indexes = runtime / f'{repetition}-{name}'
             indexes.mkdir()
-            env = {**base_env, 'FXI_INDEXES': str(indexes), 'FXI_QUERY_LOCAL': '1' if name == 'after' and args.candidate_query_local else '0'}
+            env = {**base_env, 'FXI_INDEXES': str(indexes), 'FXI_QUERY_LOCAL': '1' if (args.candidate_query_local if name == 'after' else args.baseline_query_local) else '0', 'FXI_GENERATION_ROUTING': '1' if name == 'after' and args.candidate_generation_routing else '0'}
             command = ['/usr/bin/time', '-l', str(binaries[name]), 'index', str(root), '--force']
             profile = args.baseline_profile if name == 'before' else args.candidate_profile
             if profile is not None:
@@ -106,7 +108,7 @@ def main():
     assert corpus_manifest(root) == manifest, 'Corpus changed during comparison'
     result = {'corpus': str(root), 'corpus_manifest': manifest,
               'runtime': str(runtime), 'source_pack': args.source_pack,
-              'candidate_query_local': args.candidate_query_local,
+              'candidate_query_local': args.candidate_query_local, 'baseline_query_local': args.baseline_query_local, 'candidate_generation_routing': args.candidate_generation_routing,
               'mode': 'full builds, warm filesystem; oracle checks outside timing',
               'harness_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'retained_indexes': {name: str(path) for name, path in retained.items()},

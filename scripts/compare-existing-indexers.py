@@ -41,7 +41,7 @@ def run(tool, pattern):
     return ms,set(paths)
 result={'source_snapshot': str(a.snapshot), 'corpus': str(root), 'manifest_sha256': old['manifest_sha256'],
         'mode':'direct CLI; warm filesystem; case-sensitive regex; complete files-only output',
-        'query_local': env.get('FXI_QUERY_LOCAL', '0'),
+        'query_local': env.get('FXI_QUERY_LOCAL', '0'), 'generation_routing': env.get('FXI_GENERATION_ROUTING', '0'),
         'note':'fxi: full index, packs off; fxi-lean: lean index, packs off; fxi-packed: lean index, compressed packs on. Existing indexes; no new build/size ranking.',
         'fxi_indexes': {'full': str(base/'fxi'), 'lean': str(a.fxi_indexes.resolve())},
         'harness_sha256':hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),

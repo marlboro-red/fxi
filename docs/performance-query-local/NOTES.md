@@ -309,3 +309,134 @@ These are direct paired results, not subtraction from an earlier campaign.
 The gain is confined to the intended negative preflight. No format rebuild or
 additional storage is required. This still reads all segment routing dependencies;
 it does not eliminate the structural startup cost.
+
+
+## Generation-wide routing experiment
+
+`FXI_GENERATION_ROUTING=1` additionally opts into a checked, authoritative
+`generation-routing.bin`; it requires `FXI_QUERY_LOCAL=1` both when publishing
+and searching:
+
+```sh
+FXI_QUERY_LOCAL=1 FXI_GENERATION_ROUTING=1 fxi index --force --profile lean PATH
+FXI_QUERY_LOCAL=1 FXI_GENERATION_ROUTING=1 fxi -l 're:/literal_symbol/' -p PATH
+```
+
+A publisher derives a complete sorted trigram-to-segment-mask
+table from strictly validated segment dictionaries. Masks support more than 64
+segments. The root binds actual metadata/document/path bytes, ordered complete
+segment IDs, and fixed 512-record pages. Each accessed page is checked for hash,
+key order/endpoints, nonzero masks and unused high bits before lookup or pruning.
+
+An exact literal can match only in a segment containing every non-stop trigram.
+Intersecting the masks can therefore prove absence without opening individual
+segments. This remains a necessary condition: nonempty intersection does not
+prove a match and falls back to normal search. Stop-gram-only, case-insensitive,
+filtered, compound and nonliteral expressions also fall back. Tombstones and
+empty postings can only make this summary more conservative.
+
+This mode explicitly changes the query's corruption dependency set. A successful
+proof depends on the authoritative router and actual core tables; it does not
+inspect original segment dictionaries, gram checks, Bloom filters or postings.
+Damage there may coexist with a correct empty answer. Missing/invalid router
+proof never establishes absence: normal checked search remains the fallback.
+Strict reader opening additionally validates every routing page and the original
+segment evidence. Published mappings must remain immutable; hashes do not
+provide authentication or detect unindexed source changes.
+
+The new router is rebuilt from independently validated inputs every enabled
+publication, rather than trusting an older router. Generation creation inherits
+only segment files, so disabling the option for a later publication cannot leave
+a stale generation-wide router attached to that new generation.
+
+The controlled corpus has 4,217,171 gram entries across 33 segments, but 323,183
+unique grams: a 13.05× overlap. Its router occupies 3,888,454 bytes. A global
+presence bitmap alone would not reject `auditNonexistentSymbol94283`: every one
+of its trigrams exists somewhere. Segment-mask intersection is empty. Conversely,
+every gram of `folio_wait_bit_common` and `struct file_operations` occurs in all
+33 segments; segment routing alone cannot improve those positive workloads.
+
+Publication performs a hash-table update per gram entry, sorts unique keys, and
+rewrites/fsyncs the summary. One flat mask arena avoids one allocation per key.
+This is a measurable build/update/storage tradeoff, not a free accelerator.
+
+## Reusing certified path validation
+
+Query-local readers can reuse publication's UTF-8 and relative-path validation
+when the actual path-table bytes match the checked generation manifest. They
+still check table lengths/bounds while building path ranges; individual paths
+remain lazily materialized. Missing, damaged or mismatched evidence falls back
+to complete ordinary validation. Default strict readers retain all checks.
+
+Epoch 1 does not encode the publisher's platform-specific path semantics.
+Windows therefore declines this reuse and retains its own component checks:
+Unix can accept a filename that Windows interprets as a drive-prefixed path.
+Certificate tests mutate every path byte and cover damaged/missing/unsupported
+proof, and both policies reject unsafe paths without usable evidence.
+
+The integrated implementation passed 1,017 local test executions, Clippy and
+MSRV 1.88 checking before measurement. CLI regressions compare both profiles,
+positive/absent and unsupported queries, updates/deletion, compaction and damaged
+or missing optional routing files. Unit routing tests cover mask boundaries,
+empty generations, checked-page boundaries, malformed counts, metadata/core
+changes and independence from damaged unused segment evidence.
+
+## Process startup calibration
+
+[31-sample calibration](startup-floor.json) measured `fxi --version` at 3.629 ms
+and empty-index checked absence at 4.054 ms, including process launch/reaping.
+These are observed floors for this binary/environment, not physical lower bounds.
+They motivated inspecting macOS executable linkage: the native FSEvents watcher
+pulls CoreFoundation/CoreServices into the same executable used for one-shot
+search. A separate helper experiment will test whether moving daemon execution
+out of the CLI improves that cost while retaining native watching.
+
+
+## Generation/path measurements before the helper experiment
+
+31 paired standalone samples, both binaries using checked query-local validation:
+
+| Pattern | Mapped-routing baseline (ms) | Certified paths only (ms) |
+| --- | ---: | ---: |
+| `auditNonexistentSymbol94283` | 6.479 | 6.600 |
+| `folio_wait_bit_common` | 16.479 | 12.631 |
+| `struct file_operations` | 25.023 | 21.245 |
+| `return.*0` | 101.711 | 98.927 |
+
+[Raw path-isolation comparison](queries-certified-paths.json). Both use the same
+existing index with generation routing disabled. The absence difference is small;
+this optimization targets ordinary reader initialization.
+
+On fresh paired indexes, additionally enabling generation routing:
+
+| Pattern | Mapped-routing baseline (ms) | Router + certified paths (ms) |
+| --- | ---: | ---: |
+| `auditNonexistentSymbol94283` | 6.390 | 4.215 |
+| `folio_wait_bit_common` | 16.331 | 12.773 |
+| `struct file_operations` | 24.728 | 20.958 |
+| `return.*0` | 98.355 | 95.287 |
+
+[Raw generation comparison](queries-generation.json). The analogous mixed-tool
+[11-sample campaign](competitors-generation.json) still leaves csearch ahead on
+absence (4.10 versus FXI packed 5.38 ms), while FXI wins the selective symbol
+(13.56 versus 15.85 ms) and packed broad query (99.40 versus 286.07 ms for Zoekt).
+Do not infer the reason for the difference in absolute latency between campaigns.
+A pre-existing watch daemon remained active during these intermediate campaigns;
+the final helper comparison will pause it and avoid repository mutations during
+timing. These are retained intermediate evidence, not the final controlled result.
+
+Three paired builds: 3.740 → 3.956 s; median peak RSS 154.3 → 170.9 MiB. Index bytes increase by 3,888,454 (about 0.4% of the existing checked packed index).
+[All build samples](builds-generation.json) retain the slower third pair for both
+binaries. These costs are incremental over the checked format, not over the original
+strict format.
+
+Synthetic publication medians (five paired samples, 4,096 files):
+
+| Inherited segments | Checked baseline (ms) | + generation routing (ms) |
+| --- | ---: | ---: |
+| 1 | 41.493 | 47.457 |
+| 64 | 249.013 | 250.983 |
+| 256 | 900.446 | 897.749 |
+
+[Publication samples](publication-generation.json). This small, repetitive corpus
+does not establish publication cost on the 1.3 GB Linux corpus.
