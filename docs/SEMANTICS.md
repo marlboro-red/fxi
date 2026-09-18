@@ -281,12 +281,16 @@ becomes resident. Filling the cache can increase first-query latency and RSS.
 Public `IndexReader::open` and `open_uncached` validate gram and token dictionary
 structure, posting ranges and complete gram payloads when opening an index.
 Malformed varints, unknown/out-of-order document IDs and frequency mismatches
-fail closed. Token postings and position streams are validated when loaded. One-shot CLI searches load
+fail closed. Token postings and position streams are validated when loaded. CLI and daemon searches load
 token dictionaries, token postings and positions only if their query plan needs
 them. Loading then performs the same validation and propagates errors through
 the query, including nested plans. A gram-only query can therefore succeed when
 unused token data is damaged; this is not a complete index integrity check.
 Immutable generation leases keep deferred files available for the reader's lifetime.
+Daemon reloads and watched updates use the same dependency-aware loading. Public
+reader constructors and compaction retain eager token validation. Deferral reduces
+initial query latency and resident memory; a future token-dependent query pays
+the loading cost and receives any validation error before using that data.
 
 ## File result ordering
 

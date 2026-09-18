@@ -567,10 +567,10 @@ impl IndexServer {
             }
         }
         let reconciled = Instant::now();
-        let refreshed = IndexReader::open(root_path).and_then(|reader| {
+        let refreshed = IndexReader::open_for_search(root_path).and_then(|reader| {
             if should_compact(&reader.meta, self.watcher_config.merge_segment_threshold) {
                 crate::index::compact::merge_segments(root_path)?;
-                IndexReader::open(root_path)
+                IndexReader::open_for_search(root_path)
             } else {
                 Ok(reader)
             }
@@ -625,7 +625,7 @@ impl IndexServer {
         }
 
         // Reload and ensure a watcher exists
-        match IndexReader::open(root_path) {
+        match IndexReader::open_for_search(root_path) {
             Ok(reader) => {
                 let doc_count = reader.meta.doc_count;
                 {
@@ -1198,7 +1198,7 @@ impl IndexServer {
         let result = if let Some(cached) = cached {
             (|| -> Result<()> {
                 let writer = crate::utils::IndexLock::acquire(&root)?;
-                let reader = IndexReader::open(&root)?;
+                let reader = IndexReader::open_for_search(&root)?;
                 let previous_live = cached.get_reader();
                 let pending = {
                     let mut pending = self.pending_changes.lock().unwrap();
@@ -1329,7 +1329,7 @@ impl IndexServer {
             // every search on already-loaded codebases. If two threads race
             // to load the same index, the loser's reader is simply dropped.
             eprintln!("fxid: loading index for {}", root_path.display());
-            let reader = IndexReader::open(root_path)?;
+            let reader = IndexReader::open_for_search(root_path)?;
             let doc_count = reader.meta.doc_count;
 
             let mut indexes = self.indexes.write().unwrap();
@@ -1375,7 +1375,7 @@ impl IndexServer {
                     Ok(_) => {
                         // Swap in a fresh reader in case the scan changed it
                         {
-                            let reader = IndexReader::open(root_path)?;
+                            let reader = IndexReader::open_for_search(root_path)?;
                             let indexes = self.indexes.read().unwrap();
                             if let Some(cached) = indexes.get(root_path) {
                                 cached.set_pending_reader(reader);
@@ -1566,6 +1566,52 @@ mod tests {
             .collect();
         paths.sort();
         paths
+    }
+
+    #[test]
+    fn query_readers_defer_auxiliary_corruption_but_reject_core_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("file.rs"), "fn unique_marker() {}\n").unwrap();
+        build_index_with_progress(&root, true, true).unwrap();
+        let generation = crate::utils::get_index_dir(&root).unwrap();
+        let segment = generation.join("segments/seg_0001");
+        let tokens = segment.join("tokens.postings");
+        let mut bytes = std::fs::read(&tokens).unwrap();
+        bytes.fill(0x80);
+        std::fs::write(tokens, bytes).unwrap();
+        assert!(IndexReader::open(&root).is_err());
+
+        let server = IndexServer::new(false);
+        for reload in [false, true] {
+            if reload {
+                assert!(matches!(
+                    server.handle_reload(Some(root.clone())),
+                    Response::Reloaded { success: true, .. }
+                ));
+            }
+            assert!(matches!(
+                server.handle_content_search(
+                    "re:/unique_marker/".into(),
+                    Some(root.clone()),
+                    0,
+                    ContentSearchOptions::default(),
+                ),
+                Response::ContentSearch(response) if response.files_with_matches == 1
+            ));
+            let reader = server.indexes.read().unwrap()[&root].get_reader();
+            // If a future plan needs tokens, the shared reader must propagate
+            // the validation error, including on repeated attempts.
+            assert!(reader.ensure_tokens().is_err());
+            assert!(reader.ensure_tokens().is_err());
+        }
+        drop(server);
+        // Required gram data still fail at load, before a result is returned.
+        std::fs::write(segment.join("grams.postings"), []).unwrap();
+        let server = IndexServer::new(false);
+        assert!(server.ensure_index_loaded(&root).is_err());
+        drop(server);
+        crate::utils::remove_index(&root).unwrap();
     }
 
     #[test]

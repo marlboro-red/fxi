@@ -905,12 +905,18 @@ impl IndexReader {
         Self::open_with_tokens(root_path, true)
     }
 
-    /// Internal one-shot search constructor. Only QueryExecutor should perform
+    /// Internal search constructor. Only QueryExecutor should perform
     /// token operations on this reader, using its fallible dependency barrier.
-    /// The public constructors retain eager validation of the complete index.
+    /// Gram and document data are validated immediately; token data are
+    /// validated once, before a dependent query can use them.
+    pub(crate) fn open_for_search(root: &Path) -> Result<Self> {
+        Self::open_with_tokens(root, false)
+    }
+
+    /// A one-shot reader cannot reuse content admitted during its search.
     #[allow(dead_code)] // Used by the CLI crate; intentionally not a public library API.
     pub(crate) fn open_for_search_uncached(root: &Path) -> Result<Self> {
-        let mut reader = Self::open_with_tokens(root, false)?;
+        let mut reader = Self::open_for_search(root)?;
         reader.content_cache_enabled = false;
         Ok(reader)
     }
