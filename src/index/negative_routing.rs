@@ -19,6 +19,10 @@ use xxhash_rust::xxh3::xxh3_64;
 
 const NAME: &str = "negative-routing.bin";
 const MAGIC: &[u8; 8] = b"FXINEG01";
+// This is a validation epoch, not merely the certificate serialization format.
+// Epoch 1 established dictionary/range checks only. Epoch 2 also validates
+// complete gram payloads and document membership. Never reuse weaker evidence.
+const VALIDATION_EPOCH: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct Certificate {
@@ -123,7 +127,7 @@ fn write_certificate(index: &Path) -> Result<()> {
         "core files changed during validation"
     );
     let certificate = Certificate {
-        version: 1,
+        version: VALIDATION_EPOCH,
         generation: generation_name(index)?.to_owned(),
         metadata_hash: xxh3_64(&metadata),
         stamps: before,
@@ -186,7 +190,10 @@ fn prove_absent(index: &Path, literal: &[u8]) -> Result<Option<IndexMeta>> {
     let expected = u64::from_le_bytes(encoded[8..16].try_into().unwrap());
     ensure!(xxh3_64(payload) == expected, "routing checksum mismatch");
     let certificate: Certificate = serde_json::from_slice(payload)?;
-    ensure!(certificate.version == 1, "unsupported routing version");
+    ensure!(
+        certificate.version == VALIDATION_EPOCH,
+        "unsupported routing validation epoch"
+    );
     ensure!(
         certificate.generation == generation_name(index)?,
         "routing generation mismatch"
@@ -277,6 +284,52 @@ mod tests {
     }
     fn proven(index: &Path, literal: &[u8]) -> bool {
         prove_absent(index, literal).ok().flatten().is_some()
+    }
+
+    #[test]
+    fn obsolete_validation_evidence_falls_back_even_when_its_stamps_match() {
+        let fixture = Fixture::new(0);
+        let index = fixture.index();
+        let encoded = fs::read(index.join(NAME)).unwrap();
+        let mut certificate: Certificate = serde_json::from_slice(&encoded[16..]).unwrap();
+        assert_eq!(certificate.version, VALIDATION_EPOCH);
+        certificate.version = 1;
+        let write_old = |certificate: &Certificate| {
+            let payload = serde_json::to_vec(certificate).unwrap();
+            let mut bytes = MAGIC.to_vec();
+            bytes.extend_from_slice(&xxh3_64(&payload).to_le_bytes());
+            bytes.extend_from_slice(&payload);
+            fs::write(index.join(NAME), bytes).unwrap();
+        };
+        write_old(&certificate);
+        assert!(
+            prove_absent(&index, b"abcd")
+                .unwrap_err()
+                .to_string()
+                .contains("validation epoch")
+        );
+        assert!(!proven(&index, b"abcd"));
+        assert!(IndexReader::open_for_search_uncached(fixture.0.path()).is_ok());
+
+        // Simulate evidence emitted by the former structural-only validator:
+        // dictionaries/ranges and stamps agree, but an inherited payload is
+        // malformed. New readers must not bypass their stronger checks.
+        let posting_path = index.join("segments/seg_0001/grams.postings");
+        let mut postings = fs::read(&posting_path).unwrap();
+        postings.fill(0x80);
+        fs::write(posting_path, postings).unwrap();
+        let meta: IndexMeta =
+            serde_json::from_slice(&fs::read(index.join("meta.json")).unwrap()).unwrap();
+        certificate.stamps = stamps(&dependencies(&index, &meta)).unwrap();
+        write_old(&certificate);
+        assert!(
+            prove_absent(&index, b"abcd")
+                .unwrap_err()
+                .to_string()
+                .contains("validation epoch")
+        );
+        assert!(!proven(&index, b"abcd"));
+        assert!(IndexReader::open_for_search_uncached(fixture.0.path()).is_err());
     }
 
     #[test]
