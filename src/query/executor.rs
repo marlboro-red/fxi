@@ -102,7 +102,26 @@ struct CachedRegex {
     regex: Regex,
     line_local: bool,
     existence_literal: Option<Vec<u8>>,
-    required_literal: Option<memchr::memmem::Finder<'static>>,
+    required_literal: Option<LineAnchor>,
+}
+
+enum LineAnchor {
+    Exact(memchr::memmem::Finder<'static>),
+    AsciiFold(Vec<u8>),
+}
+impl LineAnchor {
+    fn find(&self, bytes: &[u8]) -> Option<usize> {
+        match self {
+            Self::Exact(finder) => finder.find(bytes),
+            Self::AsciiFold(needle) => {
+                memchr::memchr2_iter(needle[0], needle[0].to_ascii_uppercase(), bytes).find(|&at| {
+                    bytes
+                        .get(at..at.saturating_add(needle.len()))
+                        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(needle))
+                })
+            }
+        }
+    }
 }
 
 impl std::ops::Deref for CachedRegex {
@@ -216,7 +235,12 @@ impl RegexCache {
             line_local: super::regex_plan::is_line_local(pattern),
             existence_literal: super::regex_plan::existence_literal(pattern),
             required_literal: super::regex_plan::required_literal(pattern)
-                .map(|literal| memchr::memmem::Finder::new(&literal).into_owned()),
+                .map(|literal| {
+                    LineAnchor::Exact(memchr::memmem::Finder::new(&literal).into_owned())
+                })
+                .or_else(|| {
+                    super::regex_plan::required_ascii_literal(pattern).map(LineAnchor::AsciiFold)
+                }),
         });
 
         // Slow path: insert with write lock
@@ -2432,7 +2456,8 @@ def format_warning(msg: str) -> str:
             level = level
                 .iter()
                 .flat_map(|prefix| {
-                    ["needle", "0", "\n", "\r", "K"].map(|suffix| format!("{prefix}{suffix}"))
+                    ["needle", "NEEDLE", "0", "\n", "\r", "K", "ſ"]
+                        .map(|suffix| format!("{prefix}{suffix}"))
                 })
                 .collect();
             contents.extend(level.iter().cloned());
@@ -2448,6 +2473,10 @@ def format_warning(msg: str) -> str:
             "needle.*0|0.*needle",
             "needle|0",
             "(?i)needle.*0",
+            "(?i)Kneedle.*0",
+            "(?i)ſneedle.*0",
+            "(?i)^needle$",
+            "(?i)needle|0",
             "(?s)needle.*0",
             "needle\\r?$",
             "(?:K)?needle.*0",

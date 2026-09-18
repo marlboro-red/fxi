@@ -36,6 +36,82 @@ pub(super) fn required_literal(pattern: &str) -> Option<Vec<u8>> {
         .then(|| literal.to_vec())
 }
 
+/// Necessary ASCII-folded substring for line routing. Unicode classes with
+/// extra folds (such as K/kelvin and S/long-s) cannot become ASCII anchors.
+pub(super) fn required_ascii_literal(pattern: &str) -> Option<Vec<u8>> {
+    fn atom(hir: &Hir) -> Option<Vec<u8>> {
+        match hir.kind() {
+            HirKind::Literal(lit) if lit.0.is_ascii() => Some(lit.0.to_ascii_lowercase()),
+            HirKind::Class(Class::Unicode(class)) => {
+                let mut chars = Vec::new();
+                for range in class.iter() {
+                    if !range.end().is_ascii() || range.end() as u32 - range.start() as u32 > 1 {
+                        return None;
+                    }
+                    chars.extend(range.start() as u8..=range.end() as u8);
+                }
+                (chars.len() == 2
+                    && chars[0].is_ascii_alphabetic()
+                    && chars[0].eq_ignore_ascii_case(&chars[1]))
+                .then(|| vec![chars[0].to_ascii_lowercase()])
+            }
+            HirKind::Capture(cap) => atom(&cap.sub),
+            HirKind::Concat(parts) => {
+                let mut bytes = Vec::new();
+                for part in parts {
+                    bytes.extend(atom(part)?);
+                }
+                Some(bytes)
+            }
+            _ => None,
+        }
+    }
+    fn required(hir: &Hir) -> Option<Vec<u8>> {
+        if let Some(bytes) = atom(hir) {
+            return Some(bytes);
+        }
+        match hir.kind() {
+            HirKind::Capture(cap) => required(&cap.sub),
+            HirKind::Repetition(rep) if rep.min > 0 => required(&rep.sub),
+            HirKind::Concat(parts) => {
+                let mut best = Vec::new();
+                let mut run = Vec::new();
+                for part in parts {
+                    if let Some(bytes) = atom(part) {
+                        run.extend(bytes);
+                    } else {
+                        if run.len() > best.len() {
+                            best = std::mem::take(&mut run);
+                        }
+                        run.clear();
+                        if let Some(bytes) = required(part)
+                            && bytes.len() > best.len()
+                        {
+                            best = bytes;
+                        }
+                    }
+                }
+                if run.len() > best.len() {
+                    best = run;
+                }
+                Some(best)
+            }
+            HirKind::Alternation(parts) => {
+                let first = required(parts.first()?)?;
+                parts
+                    .iter()
+                    .all(|p| required(p).as_ref() == Some(&first))
+                    .then_some(first)
+            }
+            _ => None,
+        }
+    }
+    let hir = regex_syntax::Parser::new().parse(pattern).ok()?;
+    let literal = required(&hir)?;
+    (literal.len() >= 3 && !literal.contains(&b'\n') && !literal.contains(&b'\r'))
+        .then_some(literal)
+}
+
 pub(super) fn regex_steps(pattern: &str) -> Vec<PlanStep> {
     regex_syntax::Parser::new()
         .parse(pattern)
