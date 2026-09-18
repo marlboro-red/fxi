@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+tempfile = "3"
 
 [dependencies.fxi]
 path = ".."
@@ -23,6 +24,13 @@ bench = false
 [[bin]]
 name = "fuzz_trigram"
 path = "fuzz_targets/fuzz_trigram.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_index_reader"
+path = "fuzz_targets/fuzz_index_reader.rs"
 test = false
 doc = false
 bench = false

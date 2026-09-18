@@ -1,5 +1,8 @@
 # Build artifacts
 /target/
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/corpus/
 debug/
 release/
 
