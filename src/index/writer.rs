@@ -1019,10 +1019,9 @@ pub struct DeltaSegmentWriter {
     index_path: PathBuf,
     segment_id: SegmentId,
 
-    // Loaded from existing index
-    existing_documents: Vec<Document>,
-    existing_paths: Vec<PathBuf>,
-    path_to_id: HashMap<PathBuf, PathId>,
+    // Shared, validated metadata from the pinned durable generation.
+    base: crate::index::reader::WriterSnapshot,
+    new_path_to_id: HashMap<PathBuf, PathId>,
 
     // New data for this delta
     new_documents: Vec<Document>,
@@ -1042,15 +1041,28 @@ pub struct DeltaSegmentWriter {
 impl DeltaSegmentWriter {
     /// Create a new delta segment writer.
     /// Loads existing documents and paths from the index.
+    #[allow(dead_code)] // Public ingestion API; reconciliation supplies its pinned reader.
     pub fn new(root_path: &Path, segment_id: SegmentId) -> Result<Self> {
+        Self::with_reader(root_path, segment_id, None)
+    }
+
+    /// Reuse only an exact durable snapshot. The caller keeps its existing
+    /// writer lock through publication; the snapshot retains a generation lease.
+    /// Stale, foreign and memory readers use the ordinary disk-loading path.
+    pub(crate) fn with_reader(
+        root_path: &Path,
+        segment_id: SegmentId,
+        reader: Option<&crate::index::reader::IndexReader>,
+    ) -> Result<Self> {
         let trace = std::env::var_os("FXI_TRACE_UPDATES").is_some_and(|v| v == "1");
         let start = std::time::Instant::now();
         let root_path = root_path.canonicalize()?;
-        let index_path = get_index_dir(&root_path)?;
+        let (index_path, lease) = crate::index::generation::pin(&root_path)?;
 
-        // Load existing documents and paths
-        let existing_documents = crate::index::reader::read_documents(&index_path)?;
-        let existing_paths = crate::index::reader::read_paths(&index_path)?;
+        let base = match reader.and_then(|reader| reader.writer_snapshot(&root_path, &index_path)) {
+            Some(snapshot) => snapshot,
+            None => crate::index::reader::WriterSnapshot::open(&index_path, lease)?,
+        };
         let loaded = std::time::Instant::now();
 
         let mut generation = crate::index::generation::Generation::new(&root_path)?;
@@ -1058,21 +1070,20 @@ impl DeltaSegmentWriter {
         let index_path = generation.path.clone();
         let inherited = std::time::Instant::now();
 
-        // Build path lookup map
-        let mut path_to_id: HashMap<PathBuf, PathId> = HashMap::new();
-        for (idx, path) in existing_paths.iter().enumerate() {
-            path_to_id.insert(path.clone(), idx as PathId);
-        }
+        // Watched readers already prepared this shared lookup. A fresh CLI
+        // reader builds it here so the trace includes the actual lookup cost.
+        base.prepare_lookup();
 
         // Calculate next IDs
-        let next_doc_id = existing_documents
+        let next_doc_id = base
+            .documents()
             .iter()
             .map(|d| d.doc_id)
             .max()
             .unwrap_or(0)
             .checked_add(1)
             .context("Document ID capacity exhausted; compact or rebuild the index")?;
-        let next_path_id = PathId::try_from(existing_paths.len())
+        let next_path_id = PathId::try_from(base.path_count())
             .context("Path ID capacity exhausted; compact or rebuild the index")?;
         if trace {
             eprintln!(
@@ -1087,9 +1098,8 @@ impl DeltaSegmentWriter {
             generation,
             index_path,
             segment_id,
-            existing_documents,
-            existing_paths,
-            path_to_id,
+            base,
+            new_path_to_id: HashMap::new(),
             new_documents: Vec::new(),
             new_paths: Vec::new(),
             next_doc_id,
@@ -1106,9 +1116,9 @@ impl DeltaSegmentWriter {
     /// The document will be marked as deleted in docs.bin but its segment data remains.
     pub fn mark_tombstone(&mut self, rel_path: &Path) {
         // Find the path_id for this path
-        if let Some(&path_id) = self.path_to_id.get(rel_path) {
+        if let Some(path_id) = self.base.path_id(rel_path) {
             // Find the doc_id for this path_id (most recent non-tombstone)
-            for doc in self.existing_documents.iter().rev() {
+            for doc in self.base.documents().iter().rev() {
                 if doc.path_id == path_id && doc.is_valid() {
                     self.tombstone_doc_ids.push(doc.doc_id);
                     break;
@@ -1119,7 +1129,10 @@ impl DeltaSegmentWriter {
 
     /// Get or create a path ID for the given relative path
     fn get_or_create_path_id(&mut self, rel_path: &Path) -> Result<PathId> {
-        if let Some(&path_id) = self.path_to_id.get(rel_path) {
+        if let Some(path_id) = self.base.path_id(rel_path) {
+            return Ok(path_id);
+        }
+        if let Some(&path_id) = self.new_path_to_id.get(rel_path) {
             return Ok(path_id);
         }
 
@@ -1130,7 +1143,7 @@ impl DeltaSegmentWriter {
             .checked_add(1)
             .context("Path ID capacity exhausted; compact or rebuild the index")?;
         self.new_paths.push(rel_path.to_path_buf());
-        self.path_to_id.insert(rel_path.to_path_buf(), path_id);
+        self.new_path_to_id.insert(rel_path.to_path_buf(), path_id);
         Ok(path_id)
     }
 
@@ -1222,8 +1235,10 @@ impl DeltaSegmentWriter {
         // Merge existing and new documents, applying tombstones
         let tombstone_set: HashSet<DocId> = self.tombstone_doc_ids.iter().copied().collect();
         let mut all_documents: Vec<Document> = self
-            .existing_documents
-            .into_iter()
+            .base
+            .documents()
+            .iter()
+            .cloned()
             .map(|mut doc| {
                 if tombstone_set.contains(&doc.doc_id) {
                     doc.flags.set_tombstone();
@@ -1233,10 +1248,6 @@ impl DeltaSegmentWriter {
             .collect();
         all_documents.extend(self.new_documents);
 
-        // Merge paths
-        let mut all_paths = self.existing_paths;
-        all_paths.extend(self.new_paths);
-
         // Write atomically: segment → docs.bin → paths.bin → meta.json
         // (Segment already written above)
 
@@ -1244,7 +1255,11 @@ impl DeltaSegmentWriter {
         write_documents_atomic(&self.index_path, &all_documents)?;
 
         // Update paths.bin atomically
-        write_paths_atomic(&self.index_path, &all_paths)?;
+        write_paths_atomic_iter(
+            &self.index_path,
+            self.base.path_count() + self.new_paths.len(),
+            self.base.paths().chain(self.new_paths.iter()),
+        )?;
 
         // Update meta
         meta.version = meta.profile.format_version();
@@ -1273,11 +1288,18 @@ impl DeltaSegmentWriter {
                 .index_path
                 .join("segments")
                 .join(format!("seg_{:04}", self.segment_id));
-            capture.finish(
+            capture.finish_with_paths(
                 all_documents
                     .iter()
                     .filter(|doc| doc.segment_id == self.segment_id),
-                &all_paths,
+                |id| {
+                    let index = id as usize;
+                    if index < self.base.path_count() {
+                        self.base.path(index)
+                    } else {
+                        self.new_paths.get(index - self.base.path_count())
+                    }
+                },
                 &directory,
             )?;
         }
@@ -1354,6 +1376,14 @@ pub fn write_documents_atomic(index_path: &Path, documents: &[Document]) -> Resu
 
 /// Write paths to paths.bin atomically using temp file + rename
 pub fn write_paths_atomic(index_path: &Path, paths: &[PathBuf]) -> Result<()> {
+    write_paths_atomic_iter(index_path, paths.len(), paths.iter())
+}
+
+fn write_paths_atomic_iter<'a>(
+    index_path: &Path,
+    count: usize,
+    paths: impl IntoIterator<Item = &'a PathBuf>,
+) -> Result<()> {
     let paths_path = index_path.join("paths.bin");
     let tmp_path = index_path.join("paths.bin.tmp");
 
@@ -1361,8 +1391,13 @@ pub fn write_paths_atomic(index_path: &Path, paths: &[PathBuf]) -> Result<()> {
         let mut file = BufWriter::with_capacity(65536, File::create(&tmp_path)?);
 
         // Write count
-        file.write_all(&(paths.len() as u32).to_le_bytes())?;
+        file.write_all(
+            &u32::try_from(count)
+                .context("Path count exceeds format capacity")?
+                .to_le_bytes(),
+        )?;
 
+        let mut written = 0usize;
         for path in paths {
             let path_str = path.to_str().context(
                 "Index paths must be valid UTF-8; this path cannot be represented without loss",
@@ -1370,7 +1405,9 @@ pub fn write_paths_atomic(index_path: &Path, paths: &[PathBuf]) -> Result<()> {
             let bytes = path_str.as_bytes();
             file.write_all(&(bytes.len() as u32).to_le_bytes())?;
             file.write_all(bytes)?;
+            written += 1;
         }
+        anyhow::ensure!(written == count, "Path count does not match supplied paths");
 
         file.flush()?;
     }
@@ -1400,6 +1437,173 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn delta_writer_shares_reader_tables_and_keeps_old_results_after_publication() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        fs::write(root.join("base.rs"), "original content\n").unwrap();
+        crate::index::build::build_index(&root, true).unwrap();
+        let reader = Arc::new(crate::index::reader::IndexReader::open(&root).unwrap());
+        reader.prepare_watched_paths();
+        let retained = reader.clone();
+        let old_generation = reader.generation_path().to_path_buf();
+        let mut writer = DeltaSegmentWriter::with_reader(&root, 2, Some(&reader)).unwrap();
+        assert!(std::ptr::eq(
+            writer.base.documents().as_ptr(),
+            reader.documents().as_ptr()
+        ));
+        assert!(std::ptr::eq(
+            writer.base.path(0).unwrap(),
+            reader.get_path(&reader.documents()[0]).unwrap()
+        ));
+        assert!(writer.new_path_to_id.is_empty());
+        writer.mark_tombstone(Path::new("base.rs"));
+        let replacement = "replacement marker\n";
+        fs::write(root.join("base.rs"), replacement).unwrap();
+        let mut file = create_test_processed_file("base.rs", replacement);
+        file.trigrams = crate::utils::extract_trigrams(replacement.as_bytes());
+        writer.add_file(file).unwrap();
+        let mut added = create_test_processed_file("new.rs", "new marker\n");
+        added.trigrams = crate::utils::extract_trigrams(b"new marker\n");
+        fs::write(root.join("new.rs"), "new marker\n").unwrap();
+        writer.add_file(added).unwrap();
+        assert_eq!(writer.new_paths, vec![PathBuf::from("new.rs")]);
+        assert_eq!(
+            writer.get_or_create_path_id(Path::new("new.rs")).unwrap(),
+            1
+        );
+        let mut meta = reader.meta.clone();
+        drop(reader);
+        writer.finalize(&mut meta).unwrap();
+
+        assert!(
+            old_generation.exists(),
+            "the retained reader pins its generation"
+        );
+        assert_eq!(retained.documents().len(), 1);
+        assert!(retained.documents()[0].is_valid());
+        assert_eq!(
+            retained.get_path(&retained.documents()[0]).unwrap(),
+            Path::new("base.rs")
+        );
+        assert_eq!(
+            retained
+                .get_trigram_docs(crate::index::types::bytes_to_trigram(b'o', b'r', b'i'))
+                .unwrap()
+                .len(),
+            1
+        );
+        let next = crate::index::reader::IndexReader::open(&root).unwrap();
+        assert_eq!(next.documents().len(), 3);
+        assert_eq!(next.valid_doc_ids().len(), 2);
+        assert_eq!(
+            crate::index::reader::read_paths(next.generation_path()).unwrap(),
+            vec![PathBuf::from("base.rs"), PathBuf::from("new.rs")]
+        );
+        drop((next, retained));
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn delta_writer_falls_back_for_stale_foreign_and_memory_readers() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        fs::write(root.join("base.rs"), "base content\n").unwrap();
+        crate::index::build::build_index(&root, true).unwrap();
+        let stale = crate::index::reader::IndexReader::open(&root).unwrap();
+        fs::write(root.join("new.rs"), "new content\n").unwrap();
+        crate::index::build::build_index(&root, true).unwrap();
+        let current = crate::index::reader::IndexReader::open(&root).unwrap();
+        let preview = current
+            .with_memory_delta(vec![], &["base.rs".into()])
+            .unwrap();
+        let other = TempDir::new().unwrap();
+        fs::write(other.path().join("foreign.rs"), "foreign content\n").unwrap();
+        crate::index::build::build_index(other.path(), true).unwrap();
+        let foreign = crate::index::reader::IndexReader::open(other.path()).unwrap();
+        for reader in [&stale, &preview, &foreign] {
+            let writer = DeltaSegmentWriter::with_reader(&root, 2, Some(reader)).unwrap();
+            assert!(!std::ptr::eq(
+                writer.base.documents().as_ptr(),
+                reader.documents().as_ptr()
+            ));
+            assert_eq!(writer.base.documents().len(), 2);
+            assert!(writer.base.documents().iter().all(Document::is_valid));
+            assert!(writer.base.path_id(Path::new("base.rs")).is_some());
+            assert!(writer.base.path_id(Path::new("new.rs")).is_some());
+            assert!(writer.base.path_id(Path::new("foreign.rs")).is_none());
+        }
+        drop((stale, current, preview, foreign));
+        crate::utils::remove_index(&root).unwrap();
+        crate::utils::remove_index(other.path()).unwrap();
+    }
+
+    #[test]
+    fn delta_writer_rechecks_current_core_contents_before_sharing_resident_tables() {
+        for name in ["meta.json", "docs.bin", "paths.bin"] {
+            let directory = TempDir::new().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            fs::write(root.join("base.rs"), "base content\n").unwrap();
+            crate::index::build::build_index(&root, true).unwrap();
+            let reader = crate::index::reader::IndexReader::open(&root).unwrap();
+            reader.prepare_watched_paths();
+            let generation = reader.generation_path().to_path_buf();
+            let file = generation.join(name);
+            let modified = fs::metadata(&file).unwrap().modified().unwrap();
+            let mut bytes = fs::read(&file).unwrap();
+            match name {
+                "meta.json" => bytes[0] = b'!',
+                "docs.bin" => bytes[4..8].fill(0),
+                _ => bytes[8] = 0xff,
+            }
+            let mut handle = File::options().write(true).open(&file).unwrap();
+            handle.write_all(&bytes).unwrap();
+            handle
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+            assert!(
+                DeltaSegmentWriter::with_reader(&root, 2, Some(&reader)).is_err(),
+                "{name}"
+            );
+            assert_eq!(get_index_dir(&root).unwrap(), generation);
+            drop(reader);
+            crate::utils::remove_index(&root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delta_writer_does_not_reuse_a_damaged_retained_path_mapping() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        fs::write(root.join("base.rs"), "base content\n").unwrap();
+        crate::index::build::build_index(&root, true).unwrap();
+        let reader = crate::index::reader::IndexReader::open(&root).unwrap();
+        let path = reader.generation_path().join("paths.bin");
+        let original = fs::read(&path).unwrap();
+        let mut damaged = original.clone();
+        damaged[8] = 0xff;
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&damaged)
+            .unwrap();
+        // The current path now has the original valid bytes, but the reader's
+        // retained mapping still addresses the damaged unlinked inode.
+        let replacement = path.with_extension("replacement");
+        fs::write(&replacement, original).unwrap();
+        fs::rename(replacement, &path).unwrap();
+        let writer = DeltaSegmentWriter::with_reader(&root, 2, Some(&reader)).unwrap();
+        assert!(!std::ptr::eq(
+            writer.base.documents().as_ptr(),
+            reader.documents().as_ptr()
+        ));
+        assert_eq!(writer.base.path(0), Some(&PathBuf::from("base.rs")));
+        drop((writer, reader));
+        crate::utils::remove_index(&root).unwrap();
+    }
 
     #[test]
     fn delta_id_exhaustion_preserves_the_published_generation() {

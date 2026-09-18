@@ -465,9 +465,7 @@ impl CertifiedGeneration {
     /// structural validator. Actual gram sidecar failures remain mandatory errors.
     pub(crate) fn open(
         index: &Path,
-        metadata: &[u8],
-        documents: &[u8],
-        paths: &[u8],
+        hashes: super::reader::CoreHashes,
         meta: &super::types::IndexMeta,
     ) -> Option<Self> {
         (|| -> Result<Self> {
@@ -483,9 +481,9 @@ impl CertifiedGeneration {
             let manifest: RoutingManifest = serde_json::from_slice(&bytes[16..])?;
             anyhow::ensure!(manifest.epoch == 1, "Unsupported gram validation epoch");
             anyhow::ensure!(
-                manifest.meta_hash == xxh3_64(metadata)
-                    && manifest.docs_hash == xxh3_64(documents)
-                    && manifest.paths_hash == xxh3_64(paths),
+                manifest.meta_hash == hashes.metadata
+                    && manifest.docs_hash == hashes.documents
+                    && manifest.paths_hash == hashes.paths,
                 "Gram certification core content mismatch"
             );
             anyhow::ensure!(

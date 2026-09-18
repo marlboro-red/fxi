@@ -12,6 +12,7 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use xxhash_rust::xxh3::xxh3_64;
 
 /// Empty posting files are valid, but cannot be memory mapped on every OS.
 pub(crate) enum MappedBytes {
@@ -1204,12 +1205,84 @@ impl PathTable {
     }
 }
 
+/// Content identity captured with the validated tables, not filesystem stamps.
+/// Reusing a resident reader must not hide later damage at the same generation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CoreHashes {
+    pub(crate) metadata: u64,
+    pub(crate) documents: u64,
+    pub(crate) paths: u64,
+}
+
+impl CoreHashes {
+    fn of(metadata: &[u8], documents: &[u8], paths: &[u8]) -> Self {
+        Self {
+            metadata: xxh3_64(metadata),
+            documents: xxh3_64(documents),
+            paths: xxh3_64(paths),
+        }
+    }
+
+    fn read(index: &Path) -> Result<Self> {
+        Ok(Self::of(
+            &MappedBytes::open(&index.join("meta.json"))?,
+            &MappedBytes::open(&index.join("docs.bin"))?,
+            &MappedBytes::open(&index.join("paths.bin"))?,
+        ))
+    }
+}
+
+/// Immutable metadata retained by a delta writer. Sharing the mapped path table
+/// also shares its prepared lookup; the writer owns only its appended paths.
+pub(crate) struct WriterSnapshot {
+    documents: Arc<Vec<Document>>,
+    paths: PathTable,
+    _generation_lease: Option<Arc<File>>,
+}
+
+impl WriterSnapshot {
+    pub(crate) fn open(index: &Path, lease: Option<File>) -> Result<Self> {
+        Ok(Self {
+            documents: Arc::new(read_documents(index)?),
+            paths: PathTable::open(index, false)?,
+            _generation_lease: lease.map(Arc::new),
+        })
+    }
+
+    pub(crate) fn documents(&self) -> &[Document] {
+        &self.documents
+    }
+
+    pub(crate) fn path_count(&self) -> usize {
+        self.paths.len()
+    }
+
+    pub(crate) fn path(&self, index: usize) -> Option<&PathBuf> {
+        self.paths.get(index)
+    }
+
+    pub(crate) fn paths(&self) -> impl ExactSizeIterator<Item = &PathBuf> {
+        (0..self.paths.len()).map(|index| self.paths.get(index).expect("validated path index"))
+    }
+
+    pub(crate) fn prepare_lookup(&self) {
+        self.paths.prepared_lookup();
+    }
+
+    pub(crate) fn path_id(&self, path: &Path) -> Option<PathId> {
+        self.paths.find(path).map(|(id, _)| id)
+    }
+}
+
 /// Memory-mapped index reader for fast queries
 pub struct IndexReader {
     _generation_lease: Option<Arc<File>>,
     root_path: PathBuf,
     #[allow(dead_code)]
     index_path: PathBuf,
+    /// Content proof for writer reuse. Memory previews and strict one-shot
+    /// readers cannot seed a shared disk writer snapshot.
+    disk_snapshot: Option<CoreHashes>,
     pub meta: IndexMeta,
     /// Documents stored in on-disk order for iteration.
     documents: Arc<Vec<Document>>,
@@ -1234,7 +1307,7 @@ impl IndexReader {
     /// One-shot callers cannot reuse content admitted during their search.
     #[allow(dead_code)] // Public library API; the CLI uses dependency-aware loading.
     pub fn open_uncached(root: &Path) -> Result<Self> {
-        let mut reader = Self::open(root)?;
+        let mut reader = Self::open_with_options(root, true, false, false)?;
         reader.content_cache_enabled = false;
         Ok(reader)
     }
@@ -1257,7 +1330,8 @@ impl IndexReader {
     /// A one-shot reader cannot reuse content admitted during its search.
     #[allow(dead_code)] // Used by the CLI crate; intentionally not a public library API.
     pub(crate) fn open_for_search_uncached(root: &Path) -> Result<Self> {
-        let mut reader = Self::open_for_search(root)?;
+        let mut reader =
+            Self::open_with_options(root, false, crate::index::query_local::requested(), false)?;
         reader.content_cache_enabled = false;
         Ok(reader)
     }
@@ -1279,6 +1353,15 @@ impl IndexReader {
     }
 
     fn open_with_tokens(root_path: &Path, load_tokens: bool, query_local: bool) -> Result<Self> {
+        Self::open_with_options(root_path, load_tokens, query_local, true)
+    }
+
+    fn open_with_options(
+        root_path: &Path,
+        load_tokens: bool,
+        query_local: bool,
+        retain_writer_proof: bool,
+    ) -> Result<Self> {
         let started = std::time::Instant::now();
         let root_path = root_path.canonicalize()?;
         let (index_path, generation_lease) = crate::index::generation::pin(&root_path)?;
@@ -1318,15 +1401,16 @@ impl IndexReader {
         let paths = paths?;
         let tables_loaded = std::time::Instant::now();
         validate_document_references(&meta, &documents, paths.len())?;
+        let core_hashes = if query_local || retain_writer_proof {
+            paths
+                .disk_bytes()
+                .map(|paths| CoreHashes::of(&metadata, &document_bytes, paths))
+        } else {
+            None
+        };
         let certification = if query_local {
-            paths.disk_bytes().and_then(|path_bytes| {
-                crate::index::query_local::CertifiedGeneration::open(
-                    &index_path,
-                    &metadata,
-                    &document_bytes,
-                    path_bytes,
-                    &meta,
-                )
+            core_hashes.and_then(|hashes| {
+                crate::index::query_local::CertifiedGeneration::open(&index_path, hashes, &meta)
             })
         } else {
             None
@@ -1388,6 +1472,7 @@ impl IndexReader {
             _generation_lease: generation_lease.map(Arc::new),
             root_path,
             index_path,
+            disk_snapshot: core_hashes,
             meta,
             documents,
             doc_id_to_index,
@@ -1555,6 +1640,7 @@ impl IndexReader {
             _generation_lease: self._generation_lease.clone(),
             root_path: self.root_path.clone(),
             index_path: self.index_path.clone(),
+            disk_snapshot: None,
             meta,
             documents: Arc::new(documents),
             doc_id_to_index,
@@ -1573,6 +1659,32 @@ impl IndexReader {
     /// never call this and retain their allocation-free path-table access.
     pub(crate) fn prepare_watched_paths(&self) {
         self.paths.prepared_lookup();
+    }
+
+    /// A generation name alone is insufficient: deletion-only previews can
+    /// have exactly the disk segment list while changing document liveness.
+    pub(crate) fn is_disk_snapshot_of(&self, root: &Path, index: &Path) -> bool {
+        self.disk_snapshot.is_some() && self.root_path == root && self.index_path == index
+    }
+
+    pub(crate) fn writer_snapshot(&self, root: &Path, index: &Path) -> Option<WriterSnapshot> {
+        if !self.is_disk_snapshot_of(root, index) {
+            return None;
+        }
+        let expected = self.disk_snapshot?;
+        // Check the actual currently opened files, including same-length edits
+        // with restored timestamps. Also check the retained path mapping: its
+        // inode could have changed before a valid replacement reached the path.
+        if CoreHashes::read(index).ok()? != expected
+            || xxh3_64(self.paths.disk_bytes()?) != expected.paths
+        {
+            return None;
+        }
+        Some(WriterSnapshot {
+            documents: Arc::clone(&self.documents),
+            paths: self.paths.clone(),
+            _generation_lease: self._generation_lease.clone(),
+        })
     }
 
     /// Find the newest live incarnation without hashing every document path.
@@ -3663,6 +3775,92 @@ mod tests {
         crate::index::build::build_index(&root_path, false).expect("Failed to build index");
 
         (temp_dir, root_path)
+    }
+
+    #[test]
+    fn one_shot_readers_omit_only_optional_writer_fingerprints() {
+        let (_temp, root) = create_test_index();
+        let regular = IndexReader::open(&root).unwrap();
+        let uncached = IndexReader::open_uncached(&root).unwrap();
+        assert!(uncached.disk_snapshot.is_none());
+        assert_eq!(regular.valid_doc_ids(), uncached.valid_doc_ids());
+        assert!(
+            uncached
+                .writer_snapshot(uncached.root_path(), uncached.generation_path())
+                .is_none()
+        );
+        // Query-local validation still needs the core content hashes even when
+        // there is no subsequent writer or reusable content cache.
+        let checked = IndexReader::open_with_options(&root, false, true, false).unwrap();
+        assert!(checked.disk_snapshot.is_some());
+        for reader in [&regular, &uncached, &checked] {
+            assert_eq!(
+                crate::query::QueryExecutor::new(reader)
+                    .execute_files_only(&crate::query::parse_query("main"), 0)
+                    .unwrap(),
+                vec![PathBuf::from("test.rs")]
+            );
+        }
+        drop((regular, uncached, checked));
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn writer_snapshot_shares_tables_lookup_and_lease_but_rejects_previews() {
+        let (_temp, root) = create_test_index();
+        let root = root.canonicalize().unwrap();
+        let reader = IndexReader::open(&root).unwrap();
+        let generation = reader.generation_path().to_path_buf();
+        reader.prepare_watched_paths();
+        let snapshot = reader.writer_snapshot(&root, &generation).unwrap();
+        assert!(Arc::ptr_eq(&reader.documents, &snapshot.documents));
+        assert!(Arc::ptr_eq(&reader.paths.base, &snapshot.paths.base));
+        assert!(Arc::ptr_eq(
+            &reader.paths.base_lookup,
+            &snapshot.paths.base_lookup
+        ));
+        assert!(Arc::ptr_eq(
+            reader._generation_lease.as_ref().unwrap(),
+            snapshot._generation_lease.as_ref().unwrap()
+        ));
+        assert!(
+            reader
+                .writer_snapshot(&root.join("foreign"), &generation)
+                .is_none()
+        );
+        assert!(
+            reader
+                .writer_snapshot(&root, &generation.join("different"))
+                .is_none()
+        );
+
+        // A removal changes no segment IDs and appends no paths. Only explicit
+        // provenance distinguishes this preview from the durable generation.
+        let preview = reader
+            .with_memory_delta(vec![], &["test.rs".into()])
+            .unwrap();
+        assert_eq!(preview.generation_path(), reader.generation_path());
+        assert_eq!(preview.segments.len(), reader.segments.len());
+        assert!(preview.writer_snapshot(&root, &generation).is_none());
+        assert!(
+            reader
+                .with_memory_delta(vec![], &[])
+                .unwrap()
+                .writer_snapshot(&root, &generation)
+                .is_none()
+        );
+        drop((reader, preview));
+
+        // The writer snapshot must pin its mappings after the originating
+        // reader is released, including across another generation's cleanup.
+        crate::index::build::build_index(&root, true).unwrap();
+        assert!(generation.exists());
+        assert_eq!(snapshot.path(0), Some(&PathBuf::from("test.rs")));
+        assert_eq!(snapshot.documents().len(), 1);
+        drop(snapshot);
+        crate::index::build::build_index(&root, true).unwrap();
+        assert!(!generation.exists());
+        crate::utils::remove_index(&root).unwrap();
     }
 
     #[test]

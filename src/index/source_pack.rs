@@ -264,6 +264,17 @@ impl CaptureWriter {
         paths: &[PathBuf],
         destination: &Path,
     ) -> Result<()> {
+        self.finish_with_paths(documents, |id| paths.get(id as usize), destination)
+    }
+
+    /// Delta writers can resolve shared base paths without cloning the complete
+    /// table into an owned vector for a small captured segment.
+    pub(crate) fn finish_with_paths<'a, 'p>(
+        self,
+        documents: impl IntoIterator<Item = &'a Document>,
+        path: impl Fn(super::types::PathId) -> Option<&'p PathBuf>,
+        destination: &Path,
+    ) -> Result<()> {
         let mut state = self
             .state
             .into_inner()
@@ -276,9 +287,8 @@ impl CaptureWriter {
         let mut hashes = Vec::new();
         let mut count = 0u64;
         for doc in documents {
-            let path = paths
-                .get(doc.path_id as usize)
-                .ok_or_else(|| anyhow::anyhow!("Captured source path missing"))?;
+            let path =
+                path(doc.path_id).ok_or_else(|| anyhow::anyhow!("Captured source path missing"))?;
             let Some(mut entry) = state.entries.remove(path) else {
                 continue;
             };

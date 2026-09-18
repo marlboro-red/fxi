@@ -815,3 +815,86 @@ against `7c6445e` confirms median selective-workload daemon footprint
 **15.6 → 12.6 MiB (19% lower)**. This corroborates the two staged measurements;
 query latency remains broadly unchanged. Both implementations passed full-suite,
 Clippy and Rust 1.88 checks (1,074 then 1,080 test executions, respectively).
+
+
+## Deferred watcher framework loading: investigated, not adopted
+
+Inspection of the frozen helper-era CLI and current single executable found
+that the latter additionally imports CoreFoundation and CoreServices (27 direct
+framework imports). This plausibly contributes to the startup difference, but
+these binaries do not isolate framework initialization from other backend code.
+Locked notify 6.1.1 / fsevent-sys 4.1.0 provide no deferred-loading feature; the
+[current upstream manifest](https://raw.githubusercontent.com/notify-rs/notify/main/notify/Cargo.toml)
+also exposes none.
+
+Apple's `-delay_framework` is not a compatible linker-only replacement:
+[dyld's compatibility policy](https://raw.githubusercontent.com/apple-oss-distributions/dyld/main/mach_o/Policy.cpp)
+requires the fall-2024/macOS-15 deployment epoch, while this binary targets macOS
+11.0. Frameworks remain loaded and bound; [explicit activation](https://raw.githubusercontent.com/apple-oss-distributions/dyld/main/dyld/DyldRuntimeState.cpp)
+through `dlopen` is required before use. No custom runtime-binding backend,
+deployment-floor increase or linker setting was introduced. This was source and
+binary inspection, not a measured optimization.
+
+
+## Durable reader reuse during delta publication
+
+Delta writers now share the validated document/path tables and prepared path
+lookup of the reconciliation reader. They maintain a separate lookup only for
+new paths, stream the combined path table at publication, and resolve captured
+source paths without cloning the whole table. Documents are copied when applying
+tombstones at finalization. Generation leases keep shared mappings alive.
+
+Reuse requires the same root and durable generation plus matching hashes of the
+actual current metadata, documents and paths. The retained path mapping is also
+checked, covering an edited inode followed by a valid replacement. Memory previews
+(including deletion-only previews), foreign readers and stale generations cannot
+supply a durable snapshot. A failed reuse check falls back to ordinary disk
+validation. Inherited segment validation, writer locking and publication ordering
+remain in place. This removes duplicate parsing and lookup allocation; it does
+not eliminate the full diff, inherited-segment work or global table rewrites.
+
+Strict one-shot search readers skip the optional writer fingerprints. The initial
+[checked](queries-writer-reuse-initial.json) and
+[strict](default-writer-reuse-initial.json) controls showed small broad-query
+regressions, prompting that refinement; they do not establish hashing as the sole
+cause. Query-local certification still computes all mandatory content hashes.
+The final frozen candidate was rebuilt and the entire campaign rerun.
+
+| Workload | Before (ms) | After (ms) |
+| --- | ---: | ---: |
+| Checked absent | 4.243 | 4.296 |
+| Checked selective | 11.035 | 11.014 |
+| Checked phrase | 19.539 | 19.601 |
+| Checked broad regex | 94.574 | 94.453 |
+| Strict legacy absent | 30.134 | 30.309 |
+| Strict legacy selective | 31.923 | 31.840 |
+| Strict legacy broad regex | 115.987 | 115.704 |
+| Checked Linux one-file publication | 412.239 | 403.260 |
+| Default Linux one-file publication | 360.506 | 299.589 |
+| Synthetic one-segment publication | 34.236 | 34.536 |
+| Synthetic 64-segment publication | 190.853 | 193.288 |
+| Synthetic 256-segment publication | 684.321 | 686.523 |
+
+The [checked](queries-writer-reuse.json) and [strict](default-writer-reuse.json)
+query controls use 31 paired samples and show essentially unchanged latency.
+[Checked publication](publication-writer-reuse.json) improves about 2.2%, with
+six of seven pairs faster. [Default publication](publication-writer-reuse-default.json)
+also wins six of seven pairs, but baseline timings drift from 298 to 394 ms:
+the 17% median reduction should not be treated as a stable expected speedup.
+[Small fragmented controls](publication-writer-reuse-small.json) use five pairs
+and show no improvement; their medians are slightly worse.
+[Resident footprint](memory-writer-reuse.json) remains 12.6 MiB in five pairs.
+
+All timed binaries were frozen, compilation was idle, and the existing watch
+daemon was paused then resumed in a finally block. Publication uses a private
+source copy, exact old/new result checks and before/after corpus manifests.
+Regression coverage includes shared table/lookup ownership, lease lifetime across
+publication and cleanup, path-ID reuse, captured source, stale/foreign/preview
+fallback, same-size corruption with restored timestamps, retained-inode damage,
+and one-shot query parity. These samples do not establish tail latency or
+cross-platform performance, and the competitor table above remains the measured
+comparison for the preceding cache-only commit.
+
+Final local validation passed 1,094 test executions across all targets, Clippy
+with warnings denied, Rust 1.88 all-target checks, and rustfmt. The production
+registration store remained at 19,881 entries with no additions or removals.

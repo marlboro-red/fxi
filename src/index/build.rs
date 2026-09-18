@@ -839,8 +839,7 @@ fn reconcile_index_with_paths(
         return Ok(UpdateOutcome::Rebuilt);
     }
 
-    let reusable = cached
-        .filter(|reader| reader.root_path() == root && reader.generation_path() == index_path);
+    let reusable = cached.filter(|reader| reader.is_disk_snapshot_of(&root, &index_path));
     let opened;
     let reader = if let Some(reader) = reusable {
         reader
@@ -1489,7 +1488,7 @@ fn perform_incremental_update_visible(
         }
     }
 
-    let mut writer = DeltaSegmentWriter::new(root, next_segment_id)?;
+    let mut writer = DeltaSegmentWriter::with_reader(root, next_segment_id, base)?;
     for rel_path in &diff.deleted_files {
         writer.mark_tombstone(rel_path);
     }
@@ -1674,7 +1673,9 @@ mod encoding_tests {
             // A captured delta also must not reopen its file at finalization.
             let base = IndexReader::open(&root).unwrap();
             let mut meta = base.meta.clone();
-            let mut delta = crate::index::writer::DeltaSegmentWriter::new(&root, 2).unwrap();
+            let mut delta =
+                crate::index::writer::DeltaSegmentWriter::with_reader(&root, 2, Some(&base))
+                    .unwrap();
             let staged = crate::index::generation::Generation::new(&root).unwrap();
             let capture =
                 CaptureWriter::with_compression(&staged.path.join("capture"), true, compressed)
@@ -2314,6 +2315,40 @@ mod scoped_reconciliation_tests {
             matches(&IndexReader::open(&root).unwrap(), "anothermarker"),
             vec![PathBuf::from("another.rs")]
         );
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn memory_previews_and_foreign_readers_force_durable_reconciliation() {
+        let temp = fixture();
+        let root = temp.path().canonicalize().unwrap();
+        build_index(&root, true).unwrap();
+        let durable = IndexReader::open(&root).unwrap();
+        let preview = durable
+            .with_memory_delta(vec![], &["base0.rs".into()])
+            .unwrap();
+        fs::write(root.join("unhinted.rs"), "diskSnapshotMarker\n").unwrap();
+        reconcile_index_paths(&root, Some(&preview), 100, &["base1.rs".into()]).unwrap();
+        let after = IndexReader::open(&root).unwrap();
+        assert!(paths(&after).contains(&PathBuf::from("base0.rs")));
+        assert_eq!(
+            matches(&after, "diskSnapshotMarker"),
+            vec![PathBuf::from("unhinted.rs")]
+        );
+        assert!(preview.document_for_path(Path::new("base0.rs")).is_none());
+        assert_eq!(durable.valid_doc_ids().len(), 12);
+
+        let other = fixture();
+        build_index(other.path(), true).unwrap();
+        let foreign = IndexReader::open(other.path()).unwrap();
+        fs::write(root.join("foreign-unhinted.rs"), "foreignFallbackMarker\n").unwrap();
+        reconcile_index_paths(&root, Some(&foreign), 100, &["base1.rs".into()]).unwrap();
+        assert_eq!(
+            matches(&IndexReader::open(&root).unwrap(), "foreignFallbackMarker"),
+            vec![PathBuf::from("foreign-unhinted.rs")]
+        );
+        drop((foreign, after, preview, durable));
+        crate::utils::remove_index(other.path()).unwrap();
         crate::utils::remove_index(&root).unwrap();
     }
 }
