@@ -80,5 +80,37 @@ live files to manufacture optional packs without provenance.
 [Single-capture measurements](../performance-single-capture/NOTES.md) record full
 and lean builds, query validation, watched updates and a rejected document-ID
 ordering experiment. Compressed live reads validate source freshness before
-checksumming descriptors. Selective verification and streaming postings compaction
-remain future work.
+checksumming descriptors. The follow-up below addresses regex verification and streaming postings
+compaction.
+
+## Query verification, startup, publication and streamed compaction
+
+Required-literal line routing now accelerates regex existence and matching-line
+counts. Every candidate line is still checked by the full regex. Proven ASCII
+case-fold runs can provide anchors; Unicode classes with additional folds cannot
+be reduced to ASCII. The generated oracle covers nullable branches, alternatives,
+anchors, CRLF, case folding and compressed-block boundaries.
+
+Gram membership preparation is reused across a segment's dictionary entries;
+contiguous membership validation batches longer runs of one-byte deltas. The
+reader still validates every posting, with no relaxed corruption policy.
+
+Publication reuses the durability of immutable hard links inherited from CURRENT.
+New/copied bytes, legacy-layout inputs and new directory entries still get synced
+before publication. This retains generation leases and existing reclamation.
+
+Compaction now performs a sorted term-at-a-time merge of grams, tokens and token
+positions and streams line-map records. It retains input mappings, document
+remapping and metadata, plus the current term's output. A materialized reference
+remains test-only; strict invalid-input failure and source-capture provenance are
+preserved. This does not yet introduce stable segment references, independently
+scheduled durable updates, or a query-local validation format.
+
+[Measurements and remaining tradeoffs](../performance-architecture-next/NOTES.md)
+cover each change separately, including raw samples and control workloads.
+
+A follow-up correctness check now rejects stored line-map records naming a
+foreign segment's document, both during lazy API loading and streamed compaction.
+Errors remain cached as errors and failed compaction does not publish. A mixed
+legacy fixture also confirms that missing optional positions/line maps remain
+absent instead of being manufactured by the merger.

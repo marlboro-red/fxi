@@ -1,0 +1,11 @@
+{
+  "baseline_indexes": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-mhgq9htq/2-after",
+  "compacted_indexes": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-layout-comparison-1u52p4gy/indexes",
+  "corpus": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "binary_sha256": "10012fff0874a7688a6ad72f3798149be3f9df81774035898715b9890d0601d1",
+  "seconds": 6.145776874996955,
+  "peak_rss_bytes": 491274240,
+  "index_bytes": 855700118,
+  "stdout": "",
+  "stderr": "Merging 33 segments (65284 docs, 0 tombstones)...\n  Remapped 65284 valid docs (skipped 0 tombstones)\n  Merged 323183 trigrams, 0 tokens\n  Wrote merged segment to seg_0001\n  Updated meta.json\nMerge complete: 65284 docs in 1 segment (was 33 segments)\n        6.14 real         5.33 user         0.52 sys\n           491274240  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               86290  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 847  voluntary context switches\n                1912  involuntary context switches\n         80420743424  instructions retired\n         20645617507  cycles elapsed\n           248103704  peak memory footprint\n"
+}

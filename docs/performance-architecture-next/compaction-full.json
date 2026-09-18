@@ -1,0 +1,132 @@
+{
+  "corpus": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "manifest_sha256": "adb3052a8f1cd3f0d7b49c7dff2cc5ad36b831da7a4c238c2f899db85ae57854",
+  "files": 65284,
+  "profile": "full",
+  "chunk_size": 4096,
+  "source_pack": false,
+  "platform": "macOS-26.1-arm64-arm-64bit-Mach-O",
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-compaction-comparison-0xgi2nlq",
+  "harness_sha256": "0e6b5a15602d7e92a2f4c996ea89b94c3403109cd32a7cf4f226150266400c2a",
+  "binaries": {
+    "before": {
+      "path": "/private/tmp/fxi-architecture-next-baseline",
+      "sha256": "c6324a7054d640971ec94199e332d8db27dca154bf4db7cc5492dfbd213bd9b8"
+    },
+    "after": {
+      "path": "/Users/cjpark/Desktop/Projects/fxi/target/release/fxi",
+      "sha256": "38a4bd70dc6336c867f7c01e828a720385009014522149df8926abdfce7eef7a"
+    }
+  },
+  "samples": [
+    {
+      "variant": "before",
+      "repetition": 0,
+      "seconds": 6.847086540976306,
+      "max_rss_bytes": 3923542016,
+      "resource_output": "Merging 16 segments (65284 docs, 0 tombstones)...\n  Remapped 65284 valid docs (skipped 0 tombstones)\n  Merged 323183 trigrams, 835140 tokens, 835140 tokens with positions\n  Wrote merged segment to seg_0001\n  Updated meta.json\nMerge complete: 65284 docs in 1 segment (was 16 segments)\n        6.84 real         6.63 user         0.73 sys\n          3923542016  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n              270937  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                1039  voluntary context switches\n                1396  involuntary context switches\n         84472371901  instructions retired\n         26223067408  cycles elapsed\n          3384052928  peak memory footprint\n",
+      "component_sha256": {
+        "grams.postings": "23a97dcb6098655f7cc9adcd04e9804d65837cbd1d27f154c0a1e1e7485b0072",
+        "grams.dict": "d9999ff3b8e994ef55db4dd7f9e8549d4b6878a67ed4537efe23f892410118d8",
+        "tokens.positions": "f96bab1b61d58523d695cb8eefa6f910c175610d07799b1b577a1917cef43dd0",
+        "tokens.dict": "b2fb1f5980c8d94d121f6479b9cce93b95e035e49c7d779d58c5edeb9a310411",
+        "bloom.bin": "5eed99481b4fc10081663fa7625342d71d8f468fb548ceeac917f381ebd8181b",
+        "tokens.postings": "dc9c87a7ee5e23b7240e3d913e27e965ed3647f50546f4e40ffb4cb475c894e0"
+      },
+      "index_bytes": 476664930
+    },
+    {
+      "variant": "after",
+      "repetition": 0,
+      "seconds": 4.881381915998645,
+      "max_rss_bytes": 931266560,
+      "resource_output": "Merging 16 segments (65284 docs, 0 tombstones)...\n  Remapped 65284 valid docs (skipped 0 tombstones)\n  Merged 323183 trigrams, 835140 tokens\n  Wrote merged segment to seg_0001\n  Updated meta.json\nMerge complete: 65284 docs in 1 segment (was 16 segments)\n        4.87 real         5.20 user         0.35 sys\n           931266560  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               71324  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 326  voluntary context switches\n                 879  involuntary context switches\n         70589977127  instructions retired\n         19734278390  cycles elapsed\n            90899512  peak memory footprint\n",
+      "component_sha256": {
+        "grams.postings": "23a97dcb6098655f7cc9adcd04e9804d65837cbd1d27f154c0a1e1e7485b0072",
+        "grams.dict": "d9999ff3b8e994ef55db4dd7f9e8549d4b6878a67ed4537efe23f892410118d8",
+        "tokens.positions": "f96bab1b61d58523d695cb8eefa6f910c175610d07799b1b577a1917cef43dd0",
+        "tokens.dict": "b2fb1f5980c8d94d121f6479b9cce93b95e035e49c7d779d58c5edeb9a310411",
+        "bloom.bin": "5eed99481b4fc10081663fa7625342d71d8f468fb548ceeac917f381ebd8181b",
+        "tokens.postings": "dc9c87a7ee5e23b7240e3d913e27e965ed3647f50546f4e40ffb4cb475c894e0"
+      },
+      "index_bytes": 476664930
+    },
+    {
+      "variant": "after",
+      "repetition": 1,
+      "seconds": 4.807496624998748,
+      "max_rss_bytes": 929759232,
+      "resource_output": "Merging 16 segments (65284 docs, 0 tombstones)...\n  Remapped 65284 valid docs (skipped 0 tombstones)\n  Merged 323183 trigrams, 835140 tokens\n  Wrote merged segment to seg_0001\n  Updated meta.json\nMerge complete: 65284 docs in 1 segment (was 16 segments)\n        4.80 real         5.13 user         0.32 sys\n           929759232  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               71232  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 355  voluntary context switches\n                 604  involuntary context switches\n         70523939103  instructions retired\n         19563204758  cycles elapsed\n            89375776  peak memory footprint\n",
+      "component_sha256": {
+        "grams.postings": "23a97dcb6098655f7cc9adcd04e9804d65837cbd1d27f154c0a1e1e7485b0072",
+        "grams.dict": "d9999ff3b8e994ef55db4dd7f9e8549d4b6878a67ed4537efe23f892410118d8",
+        "tokens.positions": "f96bab1b61d58523d695cb8eefa6f910c175610d07799b1b577a1917cef43dd0",
+        "tokens.dict": "b2fb1f5980c8d94d121f6479b9cce93b95e035e49c7d779d58c5edeb9a310411",
+        "bloom.bin": "5eed99481b4fc10081663fa7625342d71d8f468fb548ceeac917f381ebd8181b",
+        "tokens.postings": "dc9c87a7ee5e23b7240e3d913e27e965ed3647f50546f4e40ffb4cb475c894e0"
+      },
+      "index_bytes": 476664930
+    },
+    {
+      "variant": "before",
+      "repetition": 1,
+      "seconds": 6.691984749981202,
+      "max_rss_bytes": 3921477632,
+      "resource_output": "Merging 16 segments (65284 docs, 0 tombstones)...\n  Remapped 65284 valid docs (skipped 0 tombstones)\n  Merged 323183 trigrams, 835140 tokens, 835140 tokens with positions\n  Wrote merged segment to seg_0001\n  Updated meta.json\nMerge complete: 65284 docs in 1 segment (was 16 segments)\n        6.68 real         6.64 user         0.70 sys\n          3921477632  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n              270812  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 412  voluntary context switches\n                 669  involuntary context switches\n         84416719052  instructions retired\n         26311130958  cycles elapsed\n          3388591344  peak memory footprint\n",
+      "component_sha256": {
+        "grams.postings": "23a97dcb6098655f7cc9adcd04e9804d65837cbd1d27f154c0a1e1e7485b0072",
+        "grams.dict": "d9999ff3b8e994ef55db4dd7f9e8549d4b6878a67ed4537efe23f892410118d8",
+        "tokens.positions": "f96bab1b61d58523d695cb8eefa6f910c175610d07799b1b577a1917cef43dd0",
+        "tokens.dict": "b2fb1f5980c8d94d121f6479b9cce93b95e035e49c7d779d58c5edeb9a310411",
+        "bloom.bin": "5eed99481b4fc10081663fa7625342d71d8f468fb548ceeac917f381ebd8181b",
+        "tokens.postings": "dc9c87a7ee5e23b7240e3d913e27e965ed3647f50546f4e40ffb4cb475c894e0"
+      },
+      "index_bytes": 476664930
+    },
+    {
+      "variant": "before",
+      "repetition": 2,
+      "seconds": 6.723493916011648,
+      "max_rss_bytes": 3930980352,
+      "resource_output": "Merging 16 segments (65284 docs, 0 tombstones)...\n  Remapped 65284 valid docs (skipped 0 tombstones)\n  Merged 323183 trigrams, 835140 tokens, 835140 tokens with positions\n  Wrote merged segment to seg_0001\n  Updated meta.json\nMerge complete: 65284 docs in 1 segment (was 16 segments)\n        6.71 real         6.58 user         0.71 sys\n          3930980352  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n              271389  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 569  voluntary context switches\n                 695  involuntary context switches\n         84370506820  instructions retired\n         26092396969  cycles elapsed\n          3394637016  peak memory footprint\n",
+      "component_sha256": {
+        "grams.postings": "23a97dcb6098655f7cc9adcd04e9804d65837cbd1d27f154c0a1e1e7485b0072",
+        "grams.dict": "d9999ff3b8e994ef55db4dd7f9e8549d4b6878a67ed4537efe23f892410118d8",
+        "tokens.positions": "f96bab1b61d58523d695cb8eefa6f910c175610d07799b1b577a1917cef43dd0",
+        "tokens.dict": "b2fb1f5980c8d94d121f6479b9cce93b95e035e49c7d779d58c5edeb9a310411",
+        "bloom.bin": "5eed99481b4fc10081663fa7625342d71d8f468fb548ceeac917f381ebd8181b",
+        "tokens.postings": "dc9c87a7ee5e23b7240e3d913e27e965ed3647f50546f4e40ffb4cb475c894e0"
+      },
+      "index_bytes": 476664930
+    },
+    {
+      "variant": "after",
+      "repetition": 2,
+      "seconds": 4.840995250007836,
+      "max_rss_bytes": 930627584,
+      "resource_output": "Merging 16 segments (65284 docs, 0 tombstones)...\n  Remapped 65284 valid docs (skipped 0 tombstones)\n  Merged 323183 trigrams, 835140 tokens\n  Wrote merged segment to seg_0001\n  Updated meta.json\nMerge complete: 65284 docs in 1 segment (was 16 segments)\n        4.83 real         5.21 user         0.34 sys\n           930627584  maximum resident set size\n                   0  average shared memory size\n                   0  average unshared data size\n                   0  average unshared stack size\n               71279  page reclaims\n                   0  page faults\n                   0  swaps\n                   0  block input operations\n                   0  block output operations\n                   0  messages sent\n                   0  messages received\n                   0  signals received\n                 470  voluntary context switches\n                 599  involuntary context switches\n         70590375053  instructions retired\n         19730012618  cycles elapsed\n            90260536  peak memory footprint\n",
+      "component_sha256": {
+        "grams.postings": "23a97dcb6098655f7cc9adcd04e9804d65837cbd1d27f154c0a1e1e7485b0072",
+        "grams.dict": "d9999ff3b8e994ef55db4dd7f9e8549d4b6878a67ed4537efe23f892410118d8",
+        "tokens.positions": "f96bab1b61d58523d695cb8eefa6f910c175610d07799b1b577a1917cef43dd0",
+        "tokens.dict": "b2fb1f5980c8d94d121f6479b9cce93b95e035e49c7d779d58c5edeb9a310411",
+        "bloom.bin": "5eed99481b4fc10081663fa7625342d71d8f468fb548ceeac917f381ebd8181b",
+        "tokens.postings": "dc9c87a7ee5e23b7240e3d913e27e965ed3647f50546f4e40ffb4cb475c894e0"
+      },
+      "index_bytes": 476664930
+    }
+  ],
+  "summary": {
+    "before": {
+      "seconds": 6.723493916011648,
+      "max_rss_bytes": 3923542016,
+      "index_bytes": 476664930
+    },
+    "after": {
+      "seconds": 4.840995250007836,
+      "max_rss_bytes": 930627584,
+      "index_bytes": 476664930
+    }
+  },
+  "manifest_verified_after": true
+}

@@ -1,0 +1,224 @@
+{
+  "harness_sha256": "c7669136798bebcab502ed57bfc5ec9244168b362256c459f9ac3c87f7365ac1",
+  "candidate_indexes": null,
+  "rayon_threads": {
+    "before": null,
+    "after": null
+  },
+  "search_parallelism": {
+    "before": null,
+    "after": null
+  },
+  "corpus": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "indexes": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-mhgq9htq/2-after",
+  "mode": "direct",
+  "output_mode": "files",
+  "query_syntax": "regex",
+  "binaries": {
+    "before": {
+      "path": "/private/tmp/fxi-architecture-next-baseline",
+      "sha256": "c6324a7054d640971ec94199e332d8db27dca154bf4db7cc5492dfbd213bd9b8"
+    },
+    "after": {
+      "path": "/Users/cjpark/Desktop/Projects/fxi/target/release/fxi",
+      "sha256": "95b1d4fc4e5fb3e18c2945e2e88b49a8d481e2271688e145daebd98887b58a04"
+    }
+  },
+  "rows": [
+    {
+      "query": "auditNonexistentSymbol94283",
+      "pattern": "auditNonexistentSymbol94283",
+      "files": 0,
+      "tools": {
+        "before": {
+          "median_ms": 32.791375,
+          "samples_ms": [
+            32.889459,
+            32.824,
+            32.365208,
+            32.925375,
+            32.952041,
+            32.220333,
+            32.415541,
+            32.456917,
+            32.333333,
+            32.817833,
+            32.791375
+          ]
+        },
+        "after": {
+          "median_ms": 31.961542,
+          "samples_ms": [
+            32.507875,
+            31.941167,
+            31.961542,
+            31.682708,
+            31.881917,
+            32.052125,
+            32.196041,
+            31.999625,
+            31.81,
+            32.503125,
+            31.759834
+          ]
+        }
+      }
+    },
+    {
+      "query": "folio_wait_bit_common",
+      "pattern": "folio_wait_bit_common",
+      "files": 1,
+      "tools": {
+        "before": {
+          "median_ms": 35.094583,
+          "samples_ms": [
+            37.096542,
+            35.429,
+            34.976834,
+            35.056542,
+            34.764834,
+            35.599583,
+            35.000917,
+            35.094583,
+            35.130375,
+            35.713083,
+            34.887708
+          ]
+        },
+        "after": {
+          "median_ms": 34.217542,
+          "samples_ms": [
+            34.297083,
+            34.110083,
+            34.40275,
+            34.217542,
+            34.173584,
+            35.079333,
+            33.99125,
+            34.179042,
+            34.827583,
+            33.822,
+            34.287208
+          ]
+        }
+      }
+    },
+    {
+      "query": "return.*0",
+      "pattern": "return.*0",
+      "files": 32609,
+      "tools": {
+        "before": {
+          "median_ms": 270.193667,
+          "samples_ms": [
+            295.299959,
+            270.193667,
+            226.523791,
+            257.056542,
+            219.3655,
+            319.380833,
+            293.556042,
+            246.5385,
+            272.134875,
+            309.175167,
+            238.385291
+          ]
+        },
+        "after": {
+          "median_ms": 118.810167,
+          "samples_ms": [
+            116.504708,
+            118.124208,
+            120.336292,
+            119.048459,
+            119.345833,
+            117.946917,
+            116.677083,
+            118.810167,
+            119.486917,
+            117.572625,
+            119.035958
+          ]
+        }
+      }
+    },
+    {
+      "query": "(?i)return.*0",
+      "pattern": "(?i)return.*0",
+      "files": 33072,
+      "tools": {
+        "before": {
+          "median_ms": 323.872667,
+          "samples_ms": [
+            364.549542,
+            313.847042,
+            307.948333,
+            350.332375,
+            319.012333,
+            341.548333,
+            310.850834,
+            333.408959,
+            308.23475,
+            358.678166,
+            323.872667
+          ]
+        },
+        "after": {
+          "median_ms": 163.833208,
+          "samples_ms": [
+            163.439625,
+            164.09275,
+            163.390209,
+            163.833208,
+            163.237958,
+            164.586875,
+            164.174209,
+            164.257209,
+            163.683708,
+            164.948791,
+            163.755792
+          ]
+        }
+      }
+    },
+    {
+      "query": "return.*[0-9]{12}",
+      "pattern": "return.*[0-9]{12}",
+      "files": 28,
+      "tools": {
+        "before": {
+          "median_ms": 544.607583,
+          "samples_ms": [
+            546.436292,
+            520.282291,
+            659.15975,
+            583.810375,
+            494.67925,
+            457.375042,
+            531.240375,
+            544.607583,
+            611.27175,
+            621.85875,
+            498.456333
+          ]
+        },
+        "after": {
+          "median_ms": 133.873583,
+          "samples_ms": [
+            133.873583,
+            134.866625,
+            132.375458,
+            134.013625,
+            133.706709,
+            130.425625,
+            132.597291,
+            137.022416,
+            133.900833,
+            134.883917,
+            129.31425
+          ]
+        }
+      }
+    }
+  ]
+}

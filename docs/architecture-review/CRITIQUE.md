@@ -8,7 +8,10 @@ below distinguish code observations, measured costs and proposed designs.
 Subsequent changes: [implementation progress](IMPLEMENTATION.md) covers the
 line-map correctness fix, opt-in lean profile and single-capture source packs.
 [Capture measurements](../performance-single-capture/NOTES.md) document the
-source-pack build improvements and remaining query tradeoffs. The new
+source-pack build improvements and remaining query tradeoffs.
+[Further implementation measurements](../performance-architecture-next/NOTES.md)
+cover regex line routing, streamed compaction, publication durability reuse and
+startup validation. The numbered findings below describe the reviewed baseline. The new
 [lean-profile measurements](../performance-lean-profile/NOTES.md) replace the
 estimated savings below with measured results for that implementation.
 

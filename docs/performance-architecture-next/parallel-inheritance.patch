@@ -1,0 +1,146 @@
+diff --git a/src/index/generation.rs b/src/index/generation.rs
+index c57bcff..d59720a 100644
+--- a/src/index/generation.rs
++++ b/src/index/generation.rs
+@@ -1,6 +1,7 @@
+ //! Immutable index generations with one atomic publication point.
+ use anyhow::{Context, Result};
+ use fs2::FileExt;
++use rayon::prelude::*;
+ use std::collections::HashSet;
+ use std::fs::{self, File, OpenOptions};
+ use std::io::Write;
+@@ -61,23 +62,27 @@ impl Generation {
+             destination: &Path,
+             durable: bool,
+             links: &mut HashSet<PathBuf>,
++            directory: bool,
+         ) -> Result<()> {
++            if !directory {
++                match fs::hard_link(source, destination) {
++                    Ok(()) if durable => {
++                        links.insert(destination.to_path_buf());
++                    }
++                    Ok(()) => {}
++                    Err(_) => {
++                        fs::copy(source, destination)?;
++                    }
++                }
++                return Ok(());
++            }
+             fs::create_dir_all(destination)?;
+             for entry in fs::read_dir(source)? {
+                 let entry = entry?;
+                 let target = destination.join(entry.file_name());
+-                if entry.file_type()?.is_dir() {
+-                    link_tree(&entry.path(), &target, durable, links)?;
+-                } else if entry.file_type()?.is_file() {
+-                    match fs::hard_link(entry.path(), &target) {
+-                        Ok(()) if durable => {
+-                            links.insert(target);
+-                        }
+-                        Ok(()) => {}
+-                        Err(_) => {
+-                            fs::copy(entry.path(), &target)?;
+-                        }
+-                    }
++                let kind = entry.file_type()?;
++                if kind.is_dir() || kind.is_file() {
++                    link_tree(&entry.path(), &target, durable, links, kind.is_dir())?;
+                 }
+             }
+             Ok(())
+@@ -86,12 +91,34 @@ impl Generation {
+         if source.exists() {
+             let durable = previous.parent() == Some(self.container.join("generations").as_path())
+                 && resolve(&self.container)? == previous;
+-            link_tree(
+-                &source,
+-                &self.path.join("segments"),
+-                durable,
+-                &mut self.durable_links,
+-            )?;
++            let destination = self.path.join("segments");
++            fs::create_dir_all(&destination)?;
++            let entries = fs::read_dir(&source)?.collect::<std::io::Result<Vec<_>>>()?;
++            // Independent segment directories can overlap metadata I/O. Bound
++            // the fan-out; do not create one task per inherited file.
++            let links = entries
++                .par_chunks(entries.len().div_ceil(4).max(1))
++                .map(|entries| -> Result<HashSet<PathBuf>> {
++                    let mut links = HashSet::new();
++                    for entry in entries {
++                        let kind = entry.file_type()?;
++                        if kind.is_dir() || kind.is_file() {
++                            link_tree(
++                                &entry.path(),
++                                &destination.join(entry.file_name()),
++                                durable,
++                                &mut links,
++                                kind.is_dir(),
++                            )?;
++                        }
++                    }
++                    Ok(links)
++                })
++                .try_reduce(HashSet::new, |mut all, links| {
++                    all.extend(links);
++                    Ok(all)
++                })?;
++            self.durable_links.extend(links);
+         }
+         Ok(())
+     }
+@@ -225,10 +252,22 @@ mod tests {
+         let mut first = Generation::new(root.path()).unwrap();
+         fs::create_dir_all(first.path.join("segments/seg_0001")).unwrap();
+         fs::write(first.path.join("segments/seg_0001/evidence"), b"original").unwrap();
++        for id in 2..=12 {
++            let directory = first.path.join(format!("segments/seg_{id:04}"));
++            fs::create_dir_all(&directory).unwrap();
++            fs::write(directory.join("evidence"), id.to_string()).unwrap();
++        }
+         fs::write(first.path.join("meta.json"), b"{}").unwrap();
+         first.publish().unwrap();
+         let mut next = Generation::new(root.path()).unwrap();
+         next.inherit_segments(&first.path).unwrap();
++        for id in 2..=12 {
++            assert_eq!(
++                fs::read_to_string(next.path.join(format!("segments/seg_{id:04}/evidence")))
++                    .unwrap(),
++                id.to_string()
++            );
++        }
+         let inherited = next.path.join("segments/seg_0001/evidence");
+         // A platform may decline hard linking; then the copy must be synced.
+         let was_linked = next.durable_links.contains(&inherited);
+@@ -261,6 +300,29 @@ mod tests {
+         crate::utils::remove_index(root.path()).unwrap();
+     }
+ 
++    #[test]
++    fn inherited_directory_failure_does_not_replace_current() {
++        let root = tempfile::tempdir().unwrap();
++        let mut first = Generation::new(root.path()).unwrap();
++        for id in 0..8 {
++            let directory = first.path.join(format!("segments/seg_{id:04}"));
++            fs::create_dir_all(&directory).unwrap();
++            fs::write(directory.join("evidence"), b"original").unwrap();
++        }
++        fs::write(first.path.join("meta.json"), b"{}").unwrap();
++        first.publish().unwrap();
++        let mut next = Generation::new(root.path()).unwrap();
++        fs::create_dir(next.path.join("segments")).unwrap();
++        fs::write(next.path.join("segments/seg_0003"), b"directory collision").unwrap();
++        assert!(next.inherit_segments(&first.path).is_err());
++        assert_eq!(resolve(&next.container).unwrap(), first.path);
++        let unpublished = next.path.clone();
++        drop(next);
++        assert!(!unpublished.exists());
++        drop(first);
++        crate::utils::remove_index(root.path()).unwrap();
++    }
++
+     #[test]
+     fn legacy_inheritance_does_not_assume_prior_durability() {
+         let root = tempfile::tempdir().unwrap();
