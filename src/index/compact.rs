@@ -2,7 +2,9 @@
 //!
 //! This module implements segment merging to prevent index fragmentation from
 //! delta segment accumulation. Merging reuses stored postings; optional source
-//! packs may still require source reads. Performance depends on corpus and layout.
+//! packs preserve their captured bytes. Performance depends on corpus and layout.
+
+mod stream;
 
 use crate::index::reader::MappedBytes;
 use crate::index::reader::{read_documents, read_paths};
@@ -13,6 +15,7 @@ use crate::utils::{decode_position_postings, delta_decode, find_codebase_root};
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
+#[cfg(test)]
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -121,20 +124,6 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
         meta.doc_count as usize - remapping.valid_docs.len()
     );
 
-    // Step 2: Merge all segment postings
-    let (trigram_postings, token_postings, line_maps, token_positions, has_positions) =
-        merge_all_segments(&index_path, &segment_ids, &remapping, meta.profile)?;
-    eprintln!(
-        "  Merged {} trigrams, {} tokens{}",
-        trigram_postings.len(),
-        token_postings.len(),
-        if has_positions {
-            format!(", {} tokens with positions", token_positions.len())
-        } else {
-            String::new()
-        }
-    );
-
     // Keep every available posting. Only legacy/configured omissions must
     // remain marked: compaction cannot reconstruct previously omitted data.
     let stop_grams: HashSet<_> = meta.stop_grams.iter().copied().collect();
@@ -148,22 +137,21 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
     // Create new segment directory
     fs::create_dir_all(&new_segment_path)?;
 
-    // Write segment files. The merged segment drops stop-grams entirely:
-    // they can't narrow and the executor never looks them up.
-    segment_io::write_trigram_index(&new_segment_path, &trigram_postings, Some(&stop_grams))?;
-    if meta.profile == IndexProfile::Full {
-        segment_io::write_token_index(
-            &new_segment_path,
-            &token_postings,
-            if has_positions {
-                Some(&token_positions)
-            } else {
-                None
-            },
-        )?;
-        segment_io::write_line_maps(&new_segment_path, &line_maps)?;
-    }
-    segment_io::build_and_write_bloom(&new_segment_path, trigram_postings.keys().copied(), 10000)?;
+    // Keep only one term's merged postings/positions in memory. Input mappings
+    // and document remapping remain live, but output evidence is streamed.
+    let input_paths: Vec<_> = segment_ids
+        .iter()
+        .map(|id| index_path.join("segments").join(format!("seg_{id:04}")))
+        .collect();
+    let gram_count = stream::grams(&input_paths, &new_segment_path, &remapping, &stop_grams)?;
+    let (token_count, has_positions) = if meta.profile == IndexProfile::Full {
+        let result = stream::tokens(&input_paths, &new_segment_path, &remapping)?;
+        stream::lines(&input_paths, &new_segment_path, &remapping)?;
+        result
+    } else {
+        (0, false)
+    };
+    eprintln!("  Merged {gram_count} trigrams, {token_count} tokens");
     eprintln!("  Wrote merged segment to seg_{:04}", new_segment_id);
 
     // Step 5: Write global files atomically
@@ -281,10 +269,12 @@ fn build_doc_id_remapping(index_path: &Path) -> Result<DocIdRemapping> {
 }
 
 /// Token -> doc -> positions postings, as merged during compaction
+#[cfg(test)]
 type PositionPostings = BTreeMap<String, BTreeMap<DocId, Vec<u32>>>;
 
 /// All merged segment data: trigram postings, token postings, line maps,
 /// position postings, and whether every segment had position data
+#[cfg(test)]
 type MergedSegments = (
     BTreeMap<Trigram, Vec<DocId>>,
     BTreeMap<String, Vec<DocId>>,
@@ -294,6 +284,7 @@ type MergedSegments = (
 );
 
 /// Merge postings from all segments, remapping doc_ids.
+#[cfg(test)]
 fn merge_all_segments(
     index_path: &Path,
     segment_ids: &[SegmentId],
@@ -354,6 +345,7 @@ fn merge_all_segments(
 }
 
 /// Merge trigram postings from a single segment.
+#[cfg(test)]
 fn merge_trigram_segment(
     segment_path: &Path,
     merged: &mut BTreeMap<Trigram, Vec<DocId>>,
@@ -437,6 +429,7 @@ fn merge_trigram_segment(
 }
 
 /// Merge token postings from a single segment.
+#[cfg(test)]
 fn merge_token_segment(
     segment_path: &Path,
     merged: &mut BTreeMap<String, Vec<DocId>>,
@@ -508,6 +501,7 @@ fn merge_token_segment(
 }
 
 /// Merge line maps from a single segment.
+#[cfg(test)]
 fn merge_line_maps_segment(
     segment_path: &Path,
     merged: &mut HashMap<DocId, Vec<u32>>,
@@ -526,6 +520,7 @@ fn merge_line_maps_segment(
 /// Merge token position data from a single segment.
 /// Reads the token dict (with position offsets) and the tokens.positions file,
 /// then remaps doc_ids and merges into the accumulator.
+#[cfg(test)]
 fn merge_token_positions_segment(
     segment_path: &Path,
     merged: &mut BTreeMap<String, BTreeMap<DocId, Vec<u32>>>,
@@ -598,6 +593,73 @@ mod tests {
         crate::index::build::build_index_with_chunk_size(&root, true, Some(2)).unwrap();
         let generation = crate::utils::get_index_dir(&root).unwrap();
         (dir, root, generation)
+    }
+
+    #[test]
+    fn streaming_merge_matches_materialized_reference_with_tombstones() {
+        for profile in [IndexProfile::Full, IndexProfile::Lean] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            for id in 0..37 {
+                fs::write(
+                    root.join(format!("{id}.rs")),
+                    format!(
+                        "shared term_{id} naïve\n{}tail\n",
+                        "shared repeated ".repeat(id)
+                    ),
+                )
+                .unwrap();
+            }
+            crate::index::build::build_index_with_profile(&root, true, false, Some(4), profile)
+                .unwrap();
+            let index = crate::utils::get_index_dir(&root).unwrap();
+            let mut docs = read_documents(&index).unwrap();
+            for doc in &mut docs {
+                if doc.doc_id % 3 == 0 {
+                    doc.flags.set_tombstone();
+                }
+            }
+            write_documents_atomic(&index, &docs).unwrap();
+            let remapping = build_doc_id_remapping(&index).unwrap();
+            let ids: Vec<_> = (1..=10).collect();
+            let paths: Vec<_> = ids
+                .iter()
+                .map(|id| index.join(format!("segments/seg_{id:04}")))
+                .collect();
+            let (grams, tokens, lines, positions, has_positions) =
+                merge_all_segments(&index, &ids, &remapping, profile).unwrap();
+            let stops: HashSet<_> = grams.keys().take(3).copied().collect();
+            let expected = tempfile::tempdir().unwrap();
+            let actual = tempfile::tempdir().unwrap();
+            segment_io::write_trigram_index(expected.path(), &grams, Some(&stops)).unwrap();
+            stream::grams(&paths, actual.path(), &remapping, &stops).unwrap();
+            for name in ["grams.dict", "grams.postings"] {
+                assert_eq!(
+                    fs::read(expected.path().join(name)).unwrap(),
+                    fs::read(actual.path().join(name)).unwrap(),
+                    "{name}"
+                );
+            }
+            if profile == IndexProfile::Full {
+                segment_io::write_token_index(expected.path(), &tokens, Some(&positions)).unwrap();
+                let (_, actual_positions) =
+                    stream::tokens(&paths, actual.path(), &remapping).unwrap();
+                assert_eq!(actual_positions, has_positions);
+                for name in ["tokens.dict", "tokens.postings", "tokens.positions"] {
+                    assert_eq!(
+                        fs::read(expected.path().join(name)).unwrap(),
+                        fs::read(actual.path().join(name)).unwrap(),
+                        "{name}"
+                    );
+                }
+                stream::lines(&paths, actual.path(), &remapping).unwrap();
+                assert_eq!(
+                    crate::index::reader::read_line_maps(actual.path()).unwrap(),
+                    lines
+                );
+            }
+            crate::utils::remove_index(&root).unwrap();
+        }
     }
 
     #[test]
