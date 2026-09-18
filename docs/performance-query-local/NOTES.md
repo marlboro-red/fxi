@@ -678,3 +678,38 @@ samples, warm filesystem state, complete file results and source-manifest checks
 All values are milliseconds. Absence remains a near tie with csearch; the other
 two cases have larger FXI leads. This remains a three-query comparison on one
 corpus/platform with pinned tools, not a universal ranking or a default-mode claim.
+
+
+## Single-executable packaging restored
+
+The separate macOS `fxid` helper was removed: its startup improvement did not
+justify shipping two executables and requiring a matching sibling installation.
+All platforms again install one `fxi`, including daemon and watch functionality.
+For these macOS release builds, installed executable bytes fall from 8,063,936
+(two files, 7.69 MiB) to 4,596,720 (one file, 4.38 MiB).
+The indexing, validation-reuse, radix-builder and mapped-Bloom changes remain.
+
+The [31-pair startup check](startup-single-binary.json) measures version startup
+at 2.475 → 3.352 ms and empty checked absence at 2.747 → 3.682 ms. The
+[31-pair Linux query check](queries-single-binary.json), with the same checked
+packed index and exact source-scan result verification, gives:
+
+| Pattern | Split executable (ms) | Single executable (ms) |
+| --- | ---: | ---: |
+| `auditNonexistentSymbol94283` | 3.203 | 4.196 |
+| `folio_wait_bit_common` | 10.230 | 11.393 |
+| `struct file_operations` | 18.903 | 20.374 |
+| `return.*0` | 96.321 | 96.925 |
+
+The [five-pair daemon memory check](memory-single-binary.json) is essentially
+unchanged: median physical footprint 15.5 → 15.6 MiB. These are paired packaging
+comparisons on this Mac/Linux-source workload, not fresh competitor rankings.
+Earlier helper-based competitor timings above remain historical and must not
+be described as measurements of the restored single executable.
+
+Timing used frozen copied binaries, with the existing watch daemon paused and
+resumed afterward. The rollback passed 1,043 test executions, Clippy, Rust 1.88,
+and a private installed-directory smoke test containing only `fxi`, covering
+indexing, native watch, search, shutdown and persisted updates. GitHub CI for
+commit `9e37ede` passed. The accepted tradeoff is approximately one millisecond
+on short commands in exchange for simpler installation and maintenance.
