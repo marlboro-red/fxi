@@ -106,7 +106,7 @@ struct CachedRegex {
 }
 
 enum LineAnchor {
-    Exact(memchr::memmem::Finder<'static>),
+    Exact(Box<memchr::memmem::Finder<'static>>),
     AsciiFold(Vec<u8>),
 }
 impl LineAnchor {
@@ -236,7 +236,7 @@ impl RegexCache {
             existence_literal: super::regex_plan::existence_literal(pattern),
             required_literal: super::regex_plan::required_literal(pattern)
                 .map(|literal| {
-                    LineAnchor::Exact(memchr::memmem::Finder::new(&literal).into_owned())
+                    LineAnchor::Exact(Box::new(memchr::memmem::Finder::new(&literal).into_owned()))
                 })
                 .or_else(|| {
                     super::regex_plan::required_ascii_literal(pattern).map(LineAnchor::AsciiFold)
