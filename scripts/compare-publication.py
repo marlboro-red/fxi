@@ -20,6 +20,7 @@ def main():
     p = argparse.ArgumentParser(__doc__)
     p.add_argument('--baseline', type=Path, required=True)
     p.add_argument('--candidate', type=Path, required=True)
+    p.add_argument('--candidate-query-local', action='store_true', help='Prepare checked evidence and enable candidate query-local validation')
     p.add_argument('--repetitions', type=int, default=5)
     p.add_argument('--output', type=Path, required=True)
     args = p.parse_args()
@@ -35,9 +36,9 @@ def main():
     env = {**os.environ, 'FXI_SOCKET': str(base / 'unused.sock'), 'XDG_RUNTIME_DIR': str(base),
            'FXI_SOURCE_PACK': '0', 'FXI_TRACE_UPDATES': '1'}
     def run(command, indexes):
-        return sp.run([str(x) for x in command], cwd=root, env={**env, 'FXI_INDEXES': str(indexes)},
+        return sp.run([str(x) for x in command], cwd=root, env={**env, 'FXI_INDEXES': str(indexes), 'FXI_QUERY_LOCAL': '1' if args.candidate_query_local and command[0] == binaries['after'] else '0'},
                       capture_output=True, text=True, check=True, timeout=120)
-    result = {'base': str(base), 'files': 4096, 'profile': 'full', 'source_pack': False,
+    result = {'base': str(base), 'files': 4096, 'profile': 'full', 'source_pack': False, 'candidate_query_local': args.candidate_query_local,
               'harness_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'binaries': {v: {'path': str(b), 'sha256': hashlib.sha256(b.read_bytes()).hexdigest()} for v, b in binaries.items()},
               'rows': []}
@@ -45,7 +46,7 @@ def main():
         added = root / 'new.rs'
         added.unlink(missing_ok=True)
         prepared = base / f'prepared-{segments}'
-        run([binaries['before'], 'index', '--force', '--chunk-size', 4096 // segments, root], prepared)
+        run([binaries['after'] if args.candidate_query_local else binaries['before'], 'index', '--force', '--chunk-size', 4096 // segments, root], prepared)
         added.write_text('newPublicationMarker shared\n')
         samples = {'before': [], 'after': []}
         for repetition in range(args.repetitions):

@@ -274,3 +274,66 @@ pub(crate) fn write(path: &Path, dictionary: &[u8], postings: &[u8]) -> Result<(
     std::fs::write(path.join(NAME), bytes)?;
     Ok(())
 }
+
+const BLOOM_PROOF: &str = "grams.bloom-check";
+const BLOOM_PROOF_MAGIC: &[u8; 8] = b"FXIBLM01";
+
+// The legacy rotating-XOR Bloom checksum has word-permutation collisions.
+// Bind ordered content independently instead of treating it as integrity proof.
+fn bloom_digest(bloom: &crate::utils::BloomFilter) -> u64 {
+    let mut bytes = Vec::with_capacity(9 + bloom.bits().len() * 8);
+    bytes.push(bloom.num_hashes());
+    bytes.extend_from_slice(&(bloom.bits().len() as u64).to_le_bytes());
+    for &word in bloom.bits() {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    xxh3_64(&bytes)
+}
+
+/// Optional acceleration only: malformed evidence disables pruning, so the
+/// checked dictionary remains the fallback source of routing completeness.
+impl PostingChecks {
+    pub(crate) fn proves_bloom(&self, path: &Path, bloom: &crate::utils::BloomFilter) -> bool {
+        let Ok(proof) = std::fs::read(path.join(BLOOM_PROOF)) else {
+            return false;
+        };
+        proof.len() == 32
+            && &proof[..8] == BLOOM_PROOF_MAGIC
+            && u64_at(&proof, 24) == xxh3_64(&proof[..24])
+            && u64_at(&proof, 8) == u64_at(&self.bytes, 8)
+            && u64_at(&proof, 16) == bloom_digest(bloom)
+    }
+}
+
+/// Bind a coverage-checked Bloom to this exact checked dictionary root. No file
+/// stamps are involved: the reader hashes its actual root and loaded filter.
+pub(crate) fn write_bloom_proof(
+    path: &Path,
+    dictionary: &[u8],
+    bloom: Option<&crate::utils::BloomFilter>,
+) -> Result<()> {
+    if path.join(BLOOM_PROOF).try_exists()? {
+        return Ok(());
+    }
+    let Some(bloom) = bloom else {
+        return Ok(());
+    };
+    if !dictionary[4..]
+        .as_chunks::<20>()
+        .0
+        .iter()
+        .all(|record| bloom.might_contain(u32_at(record, 0)))
+    {
+        return Ok(());
+    }
+    // The caller strictly validated any inherited checks before arriving here.
+    let checks = std::fs::read(path.join(NAME))?;
+    anyhow::ensure!(checks.len() >= 16, "Truncated gram checks");
+    let mut proof = BLOOM_PROOF_MAGIC.to_vec();
+    proof.extend_from_slice(&checks[8..16]);
+    proof.extend_from_slice(&bloom_digest(bloom).to_le_bytes());
+    let hash = xxh3_64(&proof);
+    proof.extend_from_slice(&hash.to_le_bytes());
+    std::fs::write(path.join(BLOOM_PROOF), proof)?;
+    Ok(())
+}

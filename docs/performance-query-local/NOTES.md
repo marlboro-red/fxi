@@ -21,7 +21,13 @@ changed bytes. All new files use the existing sync-before-CURRENT protocol.
 Version 1 remains readable; inherited v1 segments keep the whole-dictionary cost.
 A forced rebuild generates v2 pages for every segment.
 
-Experimental readers validate the root at open and disable Bloom pruning. Each
+Experimental readers validate the root at open. Optional `grams.bloom-check`
+evidence binds that checked root digest to an XXH3 digest of a coverage-checked
+Bloom filter's ordered words, probe count and length. Publication verifies every dictionary key is represented before
+issuing this proof. Readers hash the actual root and loaded filter, without file
+stamps; absent, damaged or mismatched proof disables Bloom pruning and falls back
+to checked pages. This adds 32 bytes per segment and retains safe fallback for
+legacy filters. Each
 accessed page and posting is checksummed; postings are fully validated for count,
 ordering and document membership before decoding, including before an intersection
 can stop decoding early. Successful checks are cached within that immutable
@@ -100,3 +106,15 @@ followed by 3.735 and 3.645 s. That outlier is retained, not attributed to a
 specific cause. Packed index size increased from 941,356,724 to 975,095,412 bytes
 (+33,738,688 bytes, about 3.6%). These results motivate paging the dictionary
 rather than treating the remaining whole-dictionary scan as solved.
+
+
+## Legacy Bloom checksum correction
+
+Review found that the existing rotating-XOR Bloom checksum permits swaps of
+words 64 positions apart without changing the checksum. Such a swap can remove
+a required probe bit. Strict readers now corroborate Bloom negatives against
+the fully validated dictionary before excluding a segment. Experimental proofs
+use an independent ordered-content XXH3 digest, so a reordered filter disables
+pruning and falls back to checked pages. A regression deliberately preserves the
+legacy checksum while removing a match's probe bit and checks both reader modes.
+The legacy on-disk Bloom format remains readable.

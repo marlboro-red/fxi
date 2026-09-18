@@ -389,13 +389,14 @@ impl SegmentReader {
         // Line maps are NOT loaded here - loaded lazily on first access
 
         // Load bloom filter if it exists (optional for backwards compat)
-        // Experimental routing uses the checked complete dictionary. An optional
-        // Bloom must not bypass its fallible posting dependency checks.
-        let bloom_filter = if lazy {
-            None
-        } else {
-            read_bloom_filter(segment_path).ok()
-        };
+        // Experimental Bloom pruning requires a content-bound coverage proof.
+        // Without one, the checked page directory supplies routing evidence.
+        let bloom_filter = read_bloom_filter(segment_path).ok().filter(|bloom| {
+            !lazy
+                || gram_checks
+                    .as_ref()
+                    .is_some_and(|checks| checks.proves_bloom(segment_path, bloom))
+        });
 
         if std::env::var_os("FXI_DEBUG").is_some() {
             eprintln!(
@@ -575,10 +576,16 @@ impl SegmentReader {
         if !self.might_contain_trigrams(trigrams) {
             return Ok(RoaringBitmap::new());
         }
-        let mut sorted: Vec<_> = trigrams
-            .iter()
-            .map(|&g| self.get_trigram_doc_freq(g).map(|frequency| (g, frequency)))
-            .collect::<Result<Vec<_>>>()?;
+        let mut sorted = Vec::with_capacity(trigrams.len());
+        for &gram in trigrams {
+            let frequency = self.get_trigram_doc_freq(gram)?;
+            if frequency == 0 {
+                // A missing term settles this intersection without touching
+                // unrelated pages. A stored empty list still crosses validation.
+                return self.get_trigram_docs(gram);
+            }
+            sorted.push((gram, frequency));
+        }
         sorted.sort_unstable_by_key(|&(_, frequency)| frequency);
         let mut result = self.get_trigram_docs(sorted[0].0)?;
         for &(gram, _) in &sorted[1..] {
@@ -735,7 +742,13 @@ impl SegmentReader {
     #[inline]
     fn might_contain_trigrams(&self, trigrams: &[Trigram]) -> bool {
         match &self.bloom_filter {
-            Some(bf) => bf.might_contain_all(trigrams),
+            Some(bf) if self.gram_checks.is_some() => bf.might_contain_all(trigrams),
+            // Legacy Bloom checksums cannot detect some word permutations.
+            // Strict readers already validated the dictionary: confirm negative
+            // filter evidence there before excluding a segment.
+            Some(bf) => trigrams
+                .iter()
+                .all(|&gram| bf.might_contain(gram) || self.trigram_dict.lookup(gram).is_some()),
             None => true, // No bloom filter = assume might contain
         }
     }
@@ -2320,6 +2333,11 @@ pub(crate) fn write_query_local_checks(index_path: &Path) -> Result<()> {
             &segment.trigram_dict.data,
             &segment.trigram_postings,
         )?;
+        crate::index::query_local::write_bloom_proof(
+            &path,
+            &segment.trigram_dict.data,
+            segment.bloom_filter.as_ref(),
+        )?;
     }
     Ok(())
 }
@@ -2391,6 +2409,93 @@ mod tests {
 
     fn open_checked_segment(path: &Path, lazy: bool) -> Result<SegmentReader> {
         SegmentReader::open_with_policy(path, 1, false, false, Arc::new((1..=4).collect()), lazy)
+    }
+
+    #[test]
+    fn bloom_word_permutation_cannot_hide_matches() {
+        let dir = checked_segment_fixture();
+        let dictionary = fs::read(dir.path().join("grams.dict")).unwrap();
+        let mut original = BloomFilter::with_params(8192, 1);
+        for gram in [1, 2, 3] {
+            original.insert(gram);
+        }
+        super::super::segment_io::write_bloom_file(dir.path(), &original).unwrap();
+        crate::index::query_local::write_bloom_proof(dir.path(), &dictionary, Some(&original))
+            .unwrap();
+        let mut words = original.bits().to_vec();
+        let index = (0..128)
+            .find(|&i| words[i] != 0 && words[(i + 64) % 128] == 0)
+            .unwrap();
+        words.swap(index, (index + 64) % 128);
+        let damaged = BloomFilter::from_raw(words, original.num_hashes());
+        assert_eq!(
+            original.checksum(),
+            damaged.checksum(),
+            "legacy checksum collision"
+        );
+        assert!([1, 2, 3].into_iter().any(|g| !damaged.might_contain(g)));
+        super::super::segment_io::write_bloom_file(dir.path(), &damaged).unwrap();
+        for lazy in [true, false] {
+            let reader = open_checked_segment(dir.path(), lazy).unwrap();
+            if lazy {
+                assert!(
+                    reader.bloom_filter.is_none(),
+                    "proof must reject reordered words"
+                );
+            }
+            for gram in [1, 2, 3] {
+                assert_eq!(
+                    reader.intersect_trigrams(&[gram]).unwrap(),
+                    reader.get_trigram_docs(gram).unwrap()
+                );
+                assert!(reader.might_contain_trigrams(&[gram]));
+            }
+        }
+    }
+
+    #[test]
+    fn query_local_bloom_requires_content_bound_coverage_proof() {
+        let dir = checked_segment_fixture();
+        let dictionary = fs::read(dir.path().join("grams.dict")).unwrap();
+        let mut bloom = BloomFilter::new(3, 0.01);
+        super::super::segment_io::write_bloom_file(dir.path(), &bloom).unwrap();
+        crate::index::query_local::write_bloom_proof(dir.path(), &dictionary, Some(&bloom))
+            .unwrap();
+        assert!(
+            !dir.path().join("grams.bloom-check").exists(),
+            "incomplete filter cannot be certified"
+        );
+        let reader = open_checked_segment(dir.path(), true).unwrap();
+        assert!(reader.bloom_filter.is_none());
+        assert_eq!(reader.intersect_trigrams(&[1]).unwrap().len(), 2);
+        drop(reader);
+        for gram in [1, 2, 3] {
+            bloom.insert(gram);
+        }
+        super::super::segment_io::write_bloom_file(dir.path(), &bloom).unwrap();
+        crate::index::query_local::write_bloom_proof(dir.path(), &dictionary, Some(&bloom))
+            .unwrap();
+        let reader = open_checked_segment(dir.path(), true).unwrap();
+        assert!(reader.bloom_filter.is_some());
+        assert_eq!(reader.intersect_trigrams(&[1]).unwrap().len(), 2);
+        drop(reader);
+        let proof_path = dir.path().join("grams.bloom-check");
+        let original = fs::read(&proof_path).unwrap();
+        for at in 0..original.len() {
+            let mut proof = original.clone();
+            proof[at] ^= 1;
+            fs::write(&proof_path, proof).unwrap();
+            let reader = open_checked_segment(dir.path(), true).unwrap();
+            assert!(reader.bloom_filter.is_none());
+            assert_eq!(reader.intersect_trigrams(&[1]).unwrap().len(), 2);
+        }
+        fs::write(&proof_path, original).unwrap();
+        // A valid but different filter must not reuse this dictionary's proof.
+        let replacement = BloomFilter::new(3, 0.01);
+        super::super::segment_io::write_bloom_file(dir.path(), &replacement).unwrap();
+        let reader = open_checked_segment(dir.path(), true).unwrap();
+        assert!(reader.bloom_filter.is_none());
+        assert_eq!(reader.intersect_trigrams(&[1]).unwrap().len(), 2);
     }
 
     #[test]
