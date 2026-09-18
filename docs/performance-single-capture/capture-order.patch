@@ -1,0 +1,75 @@
+diff --git a/src/index/build.rs b/src/index/build.rs
+index c4da140..e322ab7 100644
+--- a/src/index/build.rs
++++ b/src/index/build.rs
+@@ -1420,7 +1420,7 @@ fn perform_incremental_update_visible(
+         crate::index::source_pack::requested()
+             || crate::index::source_pack::present(&get_index_dir(root)?),
+     )?;
+-    let outcomes: Vec<Result<ProcessedFile, (PathBuf, u64)>> = to_index
++    let mut outcomes: Vec<Result<ProcessedFile, (PathBuf, u64)>> = to_index
+         .par_iter()
+         .map(|(full, rel)| {
+             Ok(
+@@ -1452,6 +1452,13 @@ fn perform_incremental_update_visible(
+         })
+         .collect::<Result<Vec<_>>>()?;
+ 
++    if let Some(capture) = &source_capture {
++        capture.order(&mut outcomes, |outcome| match outcome {
++            Ok(file) => &file.rel_path,
++            Err((path, _)) => path,
++        })?;
++    }
++
+     // Keep the extra memory bounded. Large updates retain the durable path;
+     // small saves reuse exactly the bytes/tokens already extracted for it.
+     if let (Some(base), Some(visible)) = (base, visible)
+diff --git a/src/index/source_pack.rs b/src/index/source_pack.rs
+index 22c48ed..b83ae41 100644
+--- a/src/index/source_pack.rs
++++ b/src/index/source_pack.rs
+@@ -258,6 +258,21 @@ impl CaptureWriter {
+             .insert(relative.to_path_buf(), CapturedEntry { record, hashes });
+         Ok(())
+     }
++    /// Assign document IDs in payload order, keeping sequential posting walks
++    /// local without retaining or copying source bytes to reorder the pack.
++    pub(crate) fn order<T>(&self, files: &mut [T], path: impl Fn(&T) -> &Path) -> Result<()> {
++        let state = self
++            .state
++            .lock()
++            .map_err(|_| anyhow::anyhow!("Source capture writer poisoned"))?;
++        files.sort_by_cached_key(|file| {
++            state
++                .entries
++                .get(path(file))
++                .map_or(u64::MAX, |entry| entry.record[2])
++        });
++        Ok(())
++    }
+     pub(crate) fn finish<'a>(
+         self,
+         documents: impl IntoIterator<Item = &'a Document>,
+diff --git a/src/index/writer.rs b/src/index/writer.rs
+index 4dcc9e1..a9a277b 100644
+--- a/src/index/writer.rs
++++ b/src/index/writer.rs
+@@ -419,13 +419,16 @@ impl ChunkedIndexWriter {
+     fn write_chunk_impl<T: Into<crate::utils::PackedTokens>>(
+         &mut self,
+         segment_id: SegmentId,
+-        processed_files: Vec<ProcessedFile<T>>,
++        mut processed_files: Vec<ProcessedFile<T>>,
+         capture: Option<crate::index::source_pack::CaptureWriter>,
+     ) -> Result<()> {
+         if processed_files.is_empty() {
+             return Ok(());
+         }
+ 
++        if let Some(capture) = &capture {
++            capture.order(&mut processed_files, |file| &file.rel_path)?;
++        }
+         self.segment_ids.push(segment_id);
+ 
+         // Assign IDs and build documents synchronously (fast - just ID assignment)

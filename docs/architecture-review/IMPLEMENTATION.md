@@ -76,3 +76,9 @@ publication, restored mtimes during the metadata/read window, stale captures
 through compaction, legacy/current pack mixtures and existing CLI output oracles.
 Public writers accepting caller-supplied `ProcessedFile` values no longer reread
 live files to manufacture optional packs without provenance.
+
+[Single-capture measurements](../performance-single-capture/NOTES.md) record full
+and lean builds, query validation, watched updates and a rejected document-ID
+ordering experiment. Compressed live reads validate source freshness before
+checksumming descriptors. Selective verification and streaming postings compaction
+remain future work.

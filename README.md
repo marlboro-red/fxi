@@ -298,6 +298,12 @@ and the separate experimental negative-routing option.
 Experimental compressed packs add `FXI_SOURCE_PACK_COMPRESSION=1` during building.
 They trade decompression work for less disk usage; see the
 [measurements and limitations](docs/performance-source-compression/NOTES.md).
+Pack payloads now come from the same source capture as the index postings.
+Compaction preserves that provenance and omits legacy, missing or corrupt pack
+evidence; live-source fallback remains available, and a full rebuild restores
+pack coverage. [Single-capture measurements](docs/performance-single-capture/NOTES.md)
+show substantially lower pack build time and memory, with mixed search timings.
+
 
 ## Development
 

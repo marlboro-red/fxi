@@ -1,0 +1,214 @@
+{
+  "corpus": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "corpus_manifest": {
+    "files": 65284,
+    "source_bytes": 1311592608,
+    "sha256": "adb3052a8f1cd3f0d7b49c7dff2cc5ad36b831da7a4c238c2f899db85ae57854"
+  },
+  "runtime": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-3v636zi1",
+  "source_pack": "1",
+  "mode": "full builds, warm filesystem; oracle checks outside timing",
+  "harness_sha256": "af9c8e735e216036631734f96ce8314ef2d9e37d31dc82b5589c7a76761459f3",
+  "retained_indexes": {
+    "before": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-3v636zi1/2-before",
+    "after": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-3v636zi1/2-after"
+  },
+  "oracle_file_counts": {
+    "auditNonexistentSymbol94283": 0,
+    "folio_wait_bit_common": 1,
+    "struct file_operations": 1240,
+    "return": 44258
+  },
+  "binaries": {
+    "before": {
+      "path": "/private/tmp/fxi-single-capture-baseline",
+      "sha256": "5922e3fb0df2ceda8a559f68c4aff4b3995a4ee51a5b4b3e314af785b016d463"
+    },
+    "after": {
+      "path": "/Users/cjpark/Desktop/Projects/fxi/target/release/fxi",
+      "sha256": "988e111506f723b409ae38d81c71f06010166606651012a64cc3298f26670cbf"
+    }
+  },
+  "tools": {
+    "before": {
+      "samples": [
+        {
+          "seconds": 5.183208375,
+          "peak_rss_bytes": 338329600,
+          "index_bytes": 1549949795,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 691,
+            "docs.bin": 1958524,
+            "grams.postings": 134770424,
+            "source.table": 9641704,
+            "grams.dict": 84343552,
+            "source.data": 1311592608,
+            "bloom.bin": 5053475
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-single-capture-baseline",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force",
+            "--profile",
+            "lean"
+          ]
+        },
+        {
+          "seconds": 5.506437875,
+          "peak_rss_bytes": 167804928,
+          "index_bytes": 1549949795,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 691,
+            "docs.bin": 1958524,
+            "grams.postings": 134770424,
+            "source.table": 9641704,
+            "grams.dict": 84343552,
+            "source.data": 1311592608,
+            "bloom.bin": 5053475
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-single-capture-baseline",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force",
+            "--profile",
+            "lean"
+          ]
+        },
+        {
+          "seconds": 5.241258208,
+          "peak_rss_bytes": 343343104,
+          "index_bytes": 1549949795,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 691,
+            "docs.bin": 1958524,
+            "grams.postings": 134770424,
+            "source.table": 9641704,
+            "grams.dict": 84343552,
+            "source.data": 1311592608,
+            "bloom.bin": 5053475
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/private/tmp/fxi-single-capture-baseline",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force",
+            "--profile",
+            "lean"
+          ]
+        }
+      ],
+      "median_seconds": 5.241258208,
+      "median_peak_rss_bytes": 338329600
+    },
+    "after": {
+      "samples": [
+        {
+          "seconds": 2.908294583,
+          "peak_rss_bytes": 147177472,
+          "index_bytes": 1549949795,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 691,
+            "docs.bin": 1958524,
+            "grams.postings": 134770424,
+            "source.table": 9641704,
+            "grams.dict": 84343552,
+            "source.data": 1311592608,
+            "bloom.bin": 5053475
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/cjpark/Desktop/Projects/fxi/target/release/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force",
+            "--profile",
+            "lean"
+          ]
+        },
+        {
+          "seconds": 2.736495875,
+          "peak_rss_bytes": 178257920,
+          "index_bytes": 1549949795,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 691,
+            "docs.bin": 1958524,
+            "grams.postings": 134770424,
+            "source.table": 9641704,
+            "grams.dict": 84343552,
+            "source.data": 1311592608,
+            "bloom.bin": 5053475
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/cjpark/Desktop/Projects/fxi/target/release/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force",
+            "--profile",
+            "lean"
+          ]
+        },
+        {
+          "seconds": 2.671250666,
+          "peak_rss_bytes": 173916160,
+          "index_bytes": 1549949795,
+          "components": {
+            "fxi-common-index-56d5aabee3b5b70d.lock": 0,
+            "CURRENT": 32,
+            "paths.bin": 2588785,
+            "lease": 0,
+            "meta.json": 691,
+            "docs.bin": 1958524,
+            "grams.postings": 134770424,
+            "source.table": 9641704,
+            "grams.dict": 84343552,
+            "source.data": 1311592608,
+            "bloom.bin": 5053475
+          },
+          "command": [
+            "/usr/bin/time",
+            "-l",
+            "/Users/cjpark/Desktop/Projects/fxi/target/release/fxi",
+            "index",
+            "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+            "--force",
+            "--profile",
+            "lean"
+          ]
+        }
+      ],
+      "median_seconds": 2.736495875,
+      "median_peak_rss_bytes": 173916160
+    }
+  }
+}
