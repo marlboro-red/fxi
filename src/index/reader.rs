@@ -317,6 +317,52 @@ impl SegmentMembership {
     }
 }
 
+/// Query-local readers retain the exact mapped bytes checked against the Bloom
+/// coverage proof. Strict readers and constructed memory segments keep the owned
+/// representation. All published mappings must remain immutable while in use.
+enum SegmentBloom {
+    Owned(BloomFilter),
+    Mapped(MappedBytes),
+}
+
+impl SegmentBloom {
+    fn open_checked(
+        path: &Path,
+        checks: &crate::index::query_local::PostingChecks,
+    ) -> Option<Self> {
+        let bytes = MappedBytes::open(&path.join("bloom.bin")).ok()?;
+        checks
+            .proves_mapped_bloom(path, &bytes)
+            .then_some(Self::Mapped(bytes))
+    }
+
+    fn as_owned(&self) -> Option<&BloomFilter> {
+        match self {
+            Self::Owned(bloom) => Some(bloom),
+            Self::Mapped(_) => None,
+        }
+    }
+
+    fn might_contain(&self, gram: Trigram) -> bool {
+        match self {
+            Self::Owned(bloom) => bloom.might_contain(gram),
+            Self::Mapped(_) => self.might_contain_all(&[gram]),
+        }
+    }
+
+    fn might_contain_all(&self, grams: &[Trigram]) -> bool {
+        match self {
+            Self::Owned(bloom) => bloom.might_contain_all(grams),
+            Self::Mapped(bytes) => {
+                // The header and both content checks were established at open.
+                // A malformed view can only decline pruning, never prove absence.
+                crate::utils::bloom::CertifiedBloomView::from_prevalidated_bytes(bytes)
+                    .is_none_or(|bloom| bloom.might_contain_all(grams))
+            }
+        }
+    }
+}
+
 /// Reader for a single segment
 struct SegmentReader {
     source_pack: OnceLock<Option<crate::index::source_pack::SourcePack>>,
@@ -334,7 +380,7 @@ struct SegmentReader {
     /// Path to segment directory for lazy loading
     segment_path: PathBuf,
     /// Bloom filter for fast trigram pre-filtering (optional for backwards compat)
-    bloom_filter: Option<BloomFilter>,
+    bloom_filter: Option<SegmentBloom>,
 }
 
 impl SegmentReader {
@@ -465,12 +511,13 @@ impl SegmentReader {
         // Load bloom filter if it exists (optional for backwards compat)
         // Experimental Bloom pruning requires a content-bound coverage proof.
         // Without one, the checked page directory supplies routing evidence.
-        let bloom_filter = read_bloom_filter(segment_path).ok().filter(|bloom| {
-            !lazy
-                || gram_checks
-                    .as_ref()
-                    .is_some_and(|checks| checks.proves_bloom(segment_path, bloom))
-        });
+        let bloom_filter = if lazy {
+            SegmentBloom::open_checked(segment_path, gram_checks.as_ref().unwrap())
+        } else {
+            read_bloom_filter(segment_path)
+                .ok()
+                .map(SegmentBloom::Owned)
+        };
 
         if std::env::var_os("FXI_DEBUG").is_some() {
             eprintln!(
@@ -617,7 +664,7 @@ impl SegmentReader {
             line_maps: OnceLock::from(Ok(line_maps)),
             // All lazy cells are populated; this path is never opened.
             segment_path: PathBuf::new(),
-            bloom_filter: Some(bloom),
+            bloom_filter: Some(SegmentBloom::Owned(bloom)),
         })
     }
 
@@ -2549,18 +2596,23 @@ pub(crate) fn write_query_local_checks(index_path: &Path) -> Result<()> {
             &segment.trigram_dict.data,
             &segment.trigram_postings,
         )?;
-        crate::index::query_local::write_bloom_proof(
-            &path,
-            &segment.trigram_dict.data,
-            segment.bloom_filter.as_ref(),
-        )?;
+        let bloom = segment
+            .bloom_filter
+            .as_ref()
+            .map(|bloom| {
+                bloom
+                    .as_owned()
+                    .context("Strict publisher requires an owned Bloom")
+            })
+            .transpose()?;
+        crate::index::query_local::write_bloom_proof(&path, &segment.trigram_dict.data, bloom)?;
         if let Some(records) = &mut routing {
             if let Some(record) = crate::index::query_local::routing_segment(
                 &path,
                 id,
                 &segment.trigram_dict.data,
                 &segment.trigram_postings,
-                segment.bloom_filter.as_ref(),
+                bloom,
             )? {
                 records.push(record);
             } else {
@@ -2600,6 +2652,8 @@ pub(crate) fn validate_negative_routing_core(index_path: &Path, meta: &IndexMeta
         )?;
         let bloom = segment
             .bloom_filter
+            .as_ref()
+            .and_then(SegmentBloom::as_owned)
             .context("Missing or invalid routing Bloom")?;
         anyhow::ensure!(
             segment
@@ -2650,6 +2704,122 @@ mod tests {
             lazy,
             None,
         )
+    }
+
+    fn add_checked_bloom(path: &Path) {
+        let mut bloom = BloomFilter::new(3, 0.01);
+        for gram in [1, 2, 3] {
+            bloom.insert(gram);
+        }
+        super::super::segment_io::write_bloom_file(path, &bloom).unwrap();
+        crate::index::query_local::write_bloom_proof(
+            path,
+            &fs::read(path.join("grams.dict")).unwrap(),
+            Some(&bloom),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn mapped_bloom_matches_owned_filters_without_changing_strict_loading() {
+        let dir = checked_segment_fixture();
+        add_checked_bloom(dir.path());
+        let mapped = open_checked_segment(dir.path(), true).unwrap();
+        let owned = open_checked_segment(dir.path(), false).unwrap();
+        assert!(matches!(mapped.bloom_filter, Some(SegmentBloom::Mapped(_))));
+        assert!(matches!(owned.bloom_filter, Some(SegmentBloom::Owned(_))));
+        for gram in 0..2048 {
+            assert_eq!(
+                mapped.might_contain_trigrams(&[gram]),
+                owned.might_contain_trigrams(&[gram]),
+                "gram {gram}"
+            );
+        }
+        assert_eq!(
+            mapped.might_contain_trigrams(&[]),
+            owned.might_contain_trigrams(&[])
+        );
+        for grams in [vec![1, 2, 3], vec![1, 4], vec![100, 200]] {
+            assert_eq!(
+                mapped.intersect_trigrams(&grams).unwrap(),
+                owned.intersect_trigrams(&grams).unwrap()
+            );
+        }
+        // A replacement at the pathname does not change this reader's retained
+        // immutable mapping. A later reader must independently validate the file.
+        let bloom = dir.path().join("bloom.bin");
+        fs::rename(&bloom, dir.path().join("previous-bloom.bin")).unwrap();
+        fs::write(&bloom, b"malformed replacement").unwrap();
+        assert!(
+            open_checked_segment(dir.path(), true)
+                .unwrap()
+                .bloom_filter
+                .is_none()
+        );
+        assert_eq!(mapped.intersect_trigrams(&[1]).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn mapped_bloom_damage_and_missing_evidence_disable_pruning() {
+        let dir = checked_segment_fixture();
+        add_checked_bloom(dir.path());
+        let path = dir.path().join("bloom.bin");
+        let original = fs::read(&path).unwrap();
+        for at in 0..original.len() {
+            let mut changed = original.clone();
+            changed[at] ^= 1;
+            fs::write(&path, changed).unwrap();
+            let reader = open_checked_segment(dir.path(), true).unwrap();
+            assert!(reader.bloom_filter.is_none(), "byte {at}");
+            assert_eq!(
+                reader.intersect_trigrams(&[1]).unwrap().len(),
+                2,
+                "byte {at}"
+            );
+        }
+        for length in 0..original.len() {
+            fs::write(&path, &original[..length]).unwrap();
+            let reader = open_checked_segment(dir.path(), true).unwrap();
+            assert!(reader.bloom_filter.is_none(), "length {length}");
+            assert_eq!(reader.intersect_trigrams(&[1]).unwrap().len(), 2);
+        }
+        fs::remove_file(&path).unwrap();
+        assert!(
+            open_checked_segment(dir.path(), true)
+                .unwrap()
+                .bloom_filter
+                .is_none()
+        );
+        fs::write(&path, original).unwrap();
+        fs::remove_file(dir.path().join("grams.bloom-check")).unwrap();
+        let reader = open_checked_segment(dir.path(), true).unwrap();
+        assert!(reader.bloom_filter.is_none());
+        assert_eq!(reader.intersect_trigrams(&[1]).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn mapped_bloom_proof_is_bound_to_the_actual_checked_root() {
+        let dir = checked_segment_fixture();
+        add_checked_bloom(dir.path());
+        let path = dir.path().join("grams.dict");
+        let mut dictionary = fs::read(&path).unwrap();
+        for (index, gram) in [100u32, 200, 300].into_iter().enumerate() {
+            dictionary[4 + index * 20..8 + index * 20].copy_from_slice(&gram.to_le_bytes());
+        }
+        fs::write(&path, &dictionary).unwrap();
+        fs::remove_file(dir.path().join("grams.checks")).unwrap();
+        // The new dictionary/postings are structurally valid; the old Bloom
+        // proof has valid bytes but belongs to a different checked dictionary.
+        open_checked_segment(dir.path(), false).unwrap();
+        crate::index::query_local::write(
+            dir.path(),
+            &dictionary,
+            &fs::read(dir.path().join("grams.postings")).unwrap(),
+        )
+        .unwrap();
+        let reader = open_checked_segment(dir.path(), true).unwrap();
+        assert!(reader.bloom_filter.is_none());
+        assert_eq!(reader.intersect_trigrams(&[100]).unwrap().len(), 2);
     }
 
     fn certified_membership_fixture() -> (TempDir, PathBuf) {

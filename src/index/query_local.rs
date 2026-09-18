@@ -335,6 +335,22 @@ fn bloom_digest(bloom: &crate::utils::BloomFilter) -> u64 {
 /// checked dictionary remains the fallback source of routing completeness.
 impl PostingChecks {
     pub(crate) fn proves_bloom(&self, path: &Path, bloom: &crate::utils::BloomFilter) -> bool {
+        self.proves_bloom_digest(path, || bloom_digest(bloom))
+    }
+
+    /// The mapped query reader retains these exact immutable bytes. Check both
+    /// the legacy file checksum and the strong coverage-proof digest before any
+    /// negative is usable; parsing a mapped Bloom header alone is insufficient.
+    pub(crate) fn proves_mapped_bloom(&self, path: &Path, bytes: &[u8]) -> bool {
+        let Some(bloom) = crate::utils::bloom::CertifiedBloomView::from_prevalidated_bytes(bytes)
+        else {
+            return false;
+        };
+        bloom.checksum() == u64_at(bytes, bytes.len() - 8)
+            && self.proves_bloom_digest(path, || bloom.content_digest())
+    }
+
+    fn proves_bloom_digest(&self, path: &Path, digest: impl FnOnce() -> u64) -> bool {
         let Ok(proof) = std::fs::read(path.join(BLOOM_PROOF)) else {
             return false;
         };
@@ -342,7 +358,7 @@ impl PostingChecks {
             && &proof[..8] == BLOOM_PROOF_MAGIC
             && u64_at(&proof, 24) == xxh3_64(&proof[..24])
             && u64_at(&proof, 8) == u64_at(&self.bytes, 8)
-            && u64_at(&proof, 16) == bloom_digest(bloom)
+            && u64_at(&proof, 16) == digest()
     }
 }
 

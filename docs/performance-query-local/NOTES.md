@@ -614,3 +614,61 @@ the earlier +14.2% result is retained above as historical evidence.
 All these timing campaigns paused/resumed the existing watch daemon and ran
 without compilation. The build harness now records generation routing separately
 for both variants.
+
+
+## Mapped Bloom filters: memory rather than a large latency win
+
+Query-local segment readers now retain the exact checked Bloom mapping rather
+than decoding it into an owned word vector and serializing a temporary copy for
+the coverage digest. Both the legacy checksum and strong content/root proof remain
+mandatory. Invalid/missing evidence disables pruning. Strict readers, publication
+and constructed memory segments retain owned filters.
+
+Three new tests cover mapped/owned parity, every byte mutation/truncation and
+missing evidence, retained mappings across pathname replacement, and proof/root
+binding. The existing checksum-collision permutation regression also passes.
+The integrated suite passed 990 executions, Clippy and Rust 1.88 checks passed,
+and both release binaries built.
+
+An initial timing campaign overlapped an unrelated `cargo test --release`; it was
+stopped and its contended measurements were excluded. That test build also
+replaced the shared executable. `cargo build --release --bins` restored the normal
+release hash, and the clean rerun used copied executables outside `target/`. The
+watch daemon was paused/resumed, and no compilation ran during the clean campaign.
+
+[31 paired lean-index searches](queries-bloom.json):
+
+| Pattern | Owned Bloom (ms) | Mapped Bloom (ms) |
+| --- | ---: | ---: |
+| `auditNonexistentSymbol94283` | 3.160 | 3.112 |
+| `folio_wait_bit_common` | 10.428 | 10.347 |
+| `struct file_operations` | 18.874 | 18.794 |
+| `return.*0` | 94.412 | 94.927 |
+
+The [full-profile control](queries-bloom-full.json) and
+[default strict-mode control](default-bloom.json) are also essentially unchanged.
+[Eleven additional kernel queries](queries-bloom-varied.json), selected before
+timing and measured with eleven pairs each, mostly improve by less than 3%;
+this is not a major latency gain. Every sample matches an independent source scan.
+
+The material benefit is memory. The new
+[`compare-daemon-memory.py`](../../scripts/compare-daemon-memory.py) harness starts
+a fresh private unwatched daemon per sample, issues the same source-checked API
+search three times, captures macOS `vmmap -summary`, and terminates it. Across
+[five alternating pairs](memory-bloom.json), median physical footprint was
+**22.3 → 15.4 MiB (about 31% lower)**. This is one resident workload, not CLI peak
+RSS, total index size or a universal memory ratio. The mapped implementation is
+retained for this demonstrated memory reduction.
+
+The [updated pinned-tool comparison](competitors-bloom.json) uses eleven randomized
+samples, warm filesystem state, complete file results and source-manifest checks:
+
+| Pattern | FXI experimental packed | tgrep | csearch | Zoekt | ripgrep |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Absent identifier | 4.40 | 18.05 | 4.33 | 56.97 | 3132.84 |
+| Selective identifier | 11.38 | 19.38 | 16.18 | 57.85 | 3101.50 |
+| `return.*0` | 100.82 | 2250.49 | 1801.60 | 289.41 | 3142.52 |
+
+All values are milliseconds. Absence remains a near tie with csearch; the other
+two cases have larger FXI leads. This remains a three-query comparison on one
+corpus/platform with pinned tools, not a universal ranking or a default-mode claim.
