@@ -528,7 +528,10 @@ impl<'a> QueryExecutor<'a> {
             return Ok(Vec::new());
         }
 
-        let ordered = file_limit != 0
+        // Only a potentially binding limit needs path order before verification.
+        // Server safety caps often exceed the entire candidate set; sorting all
+        // false positives first then spends work that sorting matches avoids.
+        let ordered = (file_limit != 0 && (file_limit as u64) < candidates.len())
             || plan.verification.is_none()
             || self.reader.should_cache_path_order(&candidates);
         let candidate_ids = if ordered {
@@ -568,6 +571,22 @@ impl<'a> QueryExecutor<'a> {
                 if !text.is_empty() =>
             {
                 get_regex_cache().get_or_compile(&format!("(?i:{})", regex::escape(text)))
+            }
+            VerificationStep::Phrase {
+                text,
+                case_insensitive,
+            }
+            | VerificationStep::BoostedPhrase {
+                text,
+                case_insensitive,
+                ..
+            } => {
+                let escaped = regex::escape(text);
+                get_regex_cache().get_or_compile(&if *case_insensitive {
+                    format!("(?i:{escaped})")
+                } else {
+                    escaped
+                })
             }
             _ => None,
         };
@@ -1896,7 +1915,103 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    /// Create a test index with multiple files for comprehensive testing
+    #[test]
+    fn prepared_phrases_preserve_boundaries_limits_unicode_and_live_verification() {
+        let dir = TempDir::new().unwrap();
+        // Place matching paths after false-positive candidates in lexical order.
+        // These exceed the parallel threshold and exercise both ordering paths.
+        for i in 0..140 {
+            let text = if i % 3 == 0 {
+                "prefix struct file_operations suffix\nKelvin needle\nfoo\r\nbar\n"
+            } else {
+                "struct noise\nfile_operations apart\nKELVIN NEEDLE\nfoo\rbar\n"
+            };
+            fs::write(
+                dir.path().join(format!("{i:03}.txt")),
+                format!("{}{}", "unrelated\n".repeat(600), text),
+            )
+            .unwrap();
+        }
+        crate::index::build::build_index(dir.path(), false).unwrap();
+        let reader = IndexReader::open(dir.path()).unwrap();
+        let executor = QueryExecutor::new(&reader);
+        for (literal, insensitive) in [
+            ("struct file_operations", false),
+            ("Kelvin needle", true),
+            ("KELVIN NEEDLE", false),
+            ("", false),
+            ("foo\nbar", false),
+            ("foo\rbar", false),
+        ] {
+            let expected: Vec<_> = (0..140)
+                .filter_map(|i| {
+                    let relative = PathBuf::from(format!("{i:03}.txt"));
+                    let source = fs::read_to_string(dir.path().join(&relative)).unwrap();
+                    let expression = if insensitive {
+                        format!("(?i:{})", regex::escape(literal))
+                    } else {
+                        regex::escape(literal)
+                    };
+                    let regex = Regex::new(&expression).unwrap();
+                    source
+                        .lines()
+                        .any(|line| regex.is_match(line))
+                        .then_some(relative)
+                })
+                .collect();
+            let mut query = parse_query("placeholder");
+            query.root = crate::query::QueryNode::Phrase(literal.into());
+            query.options.case_insensitive = insensitive;
+            for limit in [0, 1, 17, 140, 10_000_000] {
+                let count = if limit == 0 {
+                    expected.len()
+                } else {
+                    limit.min(expected.len())
+                };
+                for _ in 0..2 {
+                    // Cold and cached source/position evidence.
+                    assert_eq!(
+                        executor.execute_files_only(&query, limit).unwrap(),
+                        expected[..count],
+                        "{literal:?}, {insensitive}, {limit}"
+                    );
+                }
+            }
+        }
+        let query = parse_query("\"struct file_operations\"");
+        assert_eq!(executor.execute_files_only(&query, 0).unwrap().len(), 47);
+        // Same-size edits with restored mtime must invalidate cached evidence.
+        let path = dir.path().join("000.txt");
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let old = fs::read_to_string(&path).unwrap();
+        fs::write(
+            &path,
+            old.replace("struct file_operations", "STRUCT file_operations"),
+        )
+        .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(
+            executor
+                .execute_files_only(&query, 10_000_000)
+                .unwrap()
+                .len(),
+            46
+        );
+        fs::remove_file(dir.path().join("003.txt")).unwrap();
+        assert_eq!(
+            executor
+                .execute_files_only(&query, 10_000_000)
+                .unwrap()
+                .len(),
+            45
+        );
+    }
+
     #[test]
     fn context_uses_the_verified_source_after_rewrites_deletions_and_truncation() {
         for file_count in [1, 70] {
