@@ -286,20 +286,22 @@ impl CompressedPack {
         })
     }
     fn source(&self, id: DocId, relative: &Path, path: &Path) -> Option<Source<'_>> {
-        let source = self.stored_source(id, relative)?;
-        if stamp(&fs::metadata(path).ok()?)?.as_slice() != &source.record[5..12] {
+        let record = self.record(id, relative)?;
+        // Reject stale captures before touching descriptors, and keep descriptor
+        // checksumming adjacent to filter evaluation rather than across a stat.
+        if stamp(&fs::metadata(path).ok()?)?.as_slice() != &record[5..12] {
             return None;
         }
-        Some(source)
+        self.stored_source(record)
     }
-    fn stored_source(&self, id: DocId, relative: &Path) -> Option<Source<'_>> {
+    fn record(&self, id: DocId, relative: &Path) -> Option<&[u64; WORDS]> {
         let record = &self.records[self
             .records
             .binary_search_by_key(&u64::from(id), |r| r[0])
             .ok()?];
-        if record[1] != path_hash(relative) {
-            return None;
-        }
+        (record[1] == path_hash(relative)).then_some(record)
+    }
+    fn stored_source<'a>(&'a self, record: &'a [u64; WORDS]) -> Option<Source<'a>> {
         let start = usize::try_from(record[2]).ok()?;
         let len = usize::try_from(record[12]).ok()?;
         let bytes = self
@@ -335,7 +337,7 @@ impl CompressedPack {
         if !self.bound {
             return None;
         }
-        let source = self.stored_source(id, relative)?;
+        let source = self.stored_source(self.record(id, relative)?)?;
         if source.record[3] != size {
             return None;
         }
