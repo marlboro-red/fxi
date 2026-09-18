@@ -63,3 +63,38 @@ The JSON retains samples, candidate/match counts, payload sizes, serial encode
 times and limitations. First-run provenance includes the harness, binary and
 Cargo.lock SHA-256 values. Existing source files and indexes are read-only;
 private temporary pack files are deleted when the process exits.
+
+## Filtered compression experiment
+
+[Second-run samples](linux-filtered-lab.json) reuse a Zstd decoder per thread
+and add 2,048-bit per-block trigram filters. Each filter covers its block plus
+up to 255 following source bytes, so it can reject impossible match starts for
+literals of 3–256 bytes without losing boundary-spanning matches. Other lengths
+use ordinary verification. The filter is built from the pack's own capture;
+it must not be inferred from earlier postings. This lab keeps filters in memory;
+a production representation must checksum the filter metadata before trusting
+negative evidence. The generated boundary test checks 5,760 present substrings
+across codecs and block sizes, plus absent queries and the original corruption
+and freshness tests.
+
+| Variant | Payload + filters MB | Phrase ms | `return` ms | `unlikely(` ms | Forced absent ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Raw baseline | 1311.6 | 7.30 | 37.16 | 5.25 | 70.78 |
+| Filtered raw | 1402.8 | 3.92 | 36.84 | 4.31 | 47.46 |
+| Filtered LZ4 4 KiB | 597.2 | 5.91 | 48.78 | 6.06 | 46.00 |
+| Filtered Zstd 1, 4 KiB | 451.4 | 12.22 | 87.61 | 11.76 | 47.05 |
+| Filtered raw prefix + LZ4 4 KiB | 693.9 | 5.69 | 40.32 | 5.66 | 46.92 |
+
+The hybrid cuts payload-plus-filter bytes 47.1%, improves this phrase by 22.1%
+and improves forced negative scanning by 33.7%, but costs 8.5% on `return` and
+7.8% on `unlikely(`. `Copyright` is approximately unchanged (39.20 → 38.79 ms).
+These are mixed results, not a universal improvement. The filtered raw control
+shows that skipping blocks supplies the speed benefit; compression supplies the
+storage benefit and adds decoding cost.
+
+Reusing Zstd contexts reduces its overhead but does not reverse the warm-search
+ranking. Simply choosing a denser codec or excluding large files does not solve
+this workload. More compact static filters, such as
+[binary fuse filters](https://arxiv.org/abs/2201.01174), remain a separate possible
+experiment; their construction cost and per-block size must be measured here,
+not assumed to beat this small fixed Bloom filter.

@@ -20,6 +20,7 @@ struct Mode {
     block: usize,
     raw_prefix: bool,
     max_file: usize,
+    filter: bool,
 }
 struct Block {
     start: usize,
@@ -27,6 +28,7 @@ struct Block {
     len: usize,
     hash: u64,
     raw: bool,
+    filter: [u64; 32],
 }
 struct Entry {
     path: PathBuf,
@@ -63,6 +65,59 @@ struct Pack {
     size: u64,
     build_seconds: f64,
 }
+thread_local! {
+    static ZSTD_DECODER: std::cell::RefCell<zstd::bulk::Decompressor<'static>> = std::cell::RefCell::new(zstd::bulk::Decompressor::new().expect("zstd context"));
+}
+fn block_filter(bytes: &[u8]) -> [u64; 32] {
+    let mut bits = [0u64; 32];
+    for gram in bytes.windows(3) {
+        let n = u64::from(gram[0]) | (u64::from(gram[1]) << 8) | (u64::from(gram[2]) << 16);
+        let hash = n.wrapping_mul(0x9e3779b185ebca87);
+        for shift in [0, 21, 42] {
+            let bit = ((hash >> shift) & 2047) as usize;
+            bits[bit / 64] |= 1 << (bit % 64);
+        }
+    }
+    bits
+}
+fn filtered_match(
+    blocks: &[Block],
+    data: &[u8],
+    codec: Codec,
+    finder: &Finder<'_>,
+) -> Result<bool> {
+    if !(3..=256).contains(&finder.needle().len()) {
+        return packed_match(blocks, data, codec, finder);
+    }
+    let query = block_filter(finder.needle());
+    let mut out = Vec::new();
+    let mut window = Vec::new();
+    for (i, b) in blocks.iter().enumerate() {
+        if !query.iter().zip(b.filter).all(|(q, b)| q & b == *q) {
+            continue;
+        }
+        decode(b, data, codec, &mut out)?;
+        if finder.find(&out).is_some() {
+            return Ok(true);
+        }
+        window.clear();
+        window.extend_from_slice(&out[out.len().saturating_sub(finder.needle().len() - 1)..]);
+        let mut needed = finder.needle().len() - 1;
+        for next in &blocks[i + 1..] {
+            if needed == 0 {
+                break;
+            }
+            decode(next, data, codec, &mut out)?;
+            let n = needed.min(out.len());
+            window.extend_from_slice(&out[..n]);
+            needed -= n;
+        }
+        if finder.find(&window).is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 fn encode(bytes: &[u8], codec: Codec) -> Result<Vec<u8>> {
     Ok(match codec {
         Codec::Raw => bytes.to_vec(),
@@ -81,7 +136,10 @@ fn decode(block: &Block, data: &[u8], codec: Codec, out: &mut Vec<u8>) -> Result
     } else {
         let n = match codec {
             Codec::Lz4 => lz4_flex::block::decompress_into(bytes, out)?,
-            Codec::Zstd(_) => zstd::bulk::decompress_to_buffer(bytes, out.as_mut_slice())?,
+            Codec::Zstd(_) => ZSTD_DECODER.with(|d| {
+                d.borrow_mut()
+                    .decompress_to_buffer(bytes, out.as_mut_slice())
+            })?,
             Codec::Raw => anyhow::bail!("invalid raw block"),
         };
         ensure!(n == block.len, "decoded length");
@@ -109,6 +167,7 @@ fn build(entries: &[Entry], mode: Mode) -> Result<Pack> {
         let chunks = entry.text[..prefix]
             .chunks(4096)
             .chain(entry.text[prefix..].chunks(mode.block));
+        let mut source_offset = 0;
         for (i, bytes) in chunks.enumerate() {
             let codec = if mode.raw_prefix && i == 0 {
                 Codec::Raw
@@ -125,8 +184,17 @@ fn build(entries: &[Entry], mode: Mode) -> Result<Pack> {
                 len: bytes.len(),
                 hash: xxh3_64(bytes),
                 raw,
+                filter: if mode.filter {
+                    block_filter(
+                        &entry.text[source_offset
+                            ..(source_offset + bytes.len() + 255).min(entry.text.len())],
+                    )
+                } else {
+                    [0; 32]
+                },
             });
             size += payload.len();
+            source_offset += bytes.len();
         }
         blocks.push(Some(list));
     }
@@ -197,7 +265,12 @@ fn search(
             .find(fs::read_to_string(&entry.path)?.as_bytes())
             .is_some());
     }
-    packed_match(
+    let matcher = if pack.mode.filter {
+        filtered_match
+    } else {
+        packed_match
+    };
+    matcher(
         blocks.unwrap(),
         pack.map.as_deref().unwrap_or(&[]),
         pack.mode.codec,
@@ -235,6 +308,7 @@ fn main() -> Result<()> {
             block: 4096,
             raw_prefix: false,
             max_file: usize::MAX,
+            filter: false,
         },
         Mode {
             name: "lz4-4k",
@@ -242,6 +316,7 @@ fn main() -> Result<()> {
             block: 4096,
             raw_prefix: false,
             max_file: usize::MAX,
+            filter: false,
         },
         Mode {
             name: "lz4-16k",
@@ -249,6 +324,7 @@ fn main() -> Result<()> {
             block: 16384,
             raw_prefix: false,
             max_file: usize::MAX,
+            filter: false,
         },
         Mode {
             name: "lz4-64k",
@@ -256,6 +332,7 @@ fn main() -> Result<()> {
             block: 65536,
             raw_prefix: false,
             max_file: usize::MAX,
+            filter: false,
         },
         Mode {
             name: "zstd1-16k",
@@ -263,6 +340,7 @@ fn main() -> Result<()> {
             block: 16384,
             raw_prefix: false,
             max_file: usize::MAX,
+            filter: false,
         },
         Mode {
             name: "zstd3-16k",
@@ -270,6 +348,7 @@ fn main() -> Result<()> {
             block: 16384,
             raw_prefix: false,
             max_file: usize::MAX,
+            filter: false,
         },
         Mode {
             name: "prefix-lz4-16k",
@@ -277,6 +356,7 @@ fn main() -> Result<()> {
             block: 16384,
             raw_prefix: true,
             max_file: usize::MAX,
+            filter: false,
         },
         Mode {
             name: "prefix-zstd1-16k",
@@ -284,6 +364,7 @@ fn main() -> Result<()> {
             block: 16384,
             raw_prefix: true,
             max_file: usize::MAX,
+            filter: false,
         },
         Mode {
             name: "raw-under64k",
@@ -291,6 +372,39 @@ fn main() -> Result<()> {
             block: 4096,
             raw_prefix: false,
             max_file: 65536,
+            filter: false,
+        },
+        Mode {
+            name: "filtered-raw-4k",
+            codec: Codec::Raw,
+            block: 4096,
+            raw_prefix: false,
+            max_file: usize::MAX,
+            filter: true,
+        },
+        Mode {
+            name: "filtered-lz4-4k",
+            codec: Codec::Lz4,
+            block: 4096,
+            raw_prefix: false,
+            max_file: usize::MAX,
+            filter: true,
+        },
+        Mode {
+            name: "filtered-zstd1-4k",
+            codec: Codec::Zstd(1),
+            block: 4096,
+            raw_prefix: false,
+            max_file: usize::MAX,
+            filter: true,
+        },
+        Mode {
+            name: "filtered-prefix-lz4-4k",
+            codec: Codec::Lz4,
+            block: 4096,
+            raw_prefix: true,
+            max_file: usize::MAX,
+            filter: true,
         },
     ];
     let mut packs = Vec::new();
@@ -389,7 +503,7 @@ fn main() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &serde_json::json!({"root":root,"files":entries.len(),"source_bytes":entries.iter().map(|e|e.text.len()).sum::<usize>(),"variants":packs.iter().map(|p|serde_json::json!({"name":p.mode.name,"payload_bytes":p.size,"blocks":p.blocks.iter().flatten().map(Vec::len).sum::<usize>(),"packed_files":p.blocks.iter().filter(|b|b.is_some()).count(),"encode_seconds":p.build_seconds})).collect::<Vec<_>>(),"rows":rows,"limits":"Offline warm-filesystem verification stage, four parallel tasks; index opening, planning, CLI and serialization excluded. Raw baseline scans borrowed blocks; production CLI must still be compared separately before shipping. Payload sizes exclude serialized metadata. Full exact roundtrip and whole-source oracle checked. All source bytes resident for oracle; this is not a cold-storage/RSS benchmark. Compression build serial; times are not full index builds."})
+            &serde_json::json!({"root":root,"files":entries.len(),"source_bytes":entries.iter().map(|e|e.text.len()).sum::<usize>(),"variants":packs.iter().map(|p|serde_json::json!({"name":p.mode.name,"payload_bytes":p.size,"filter_bytes":if p.mode.filter {p.blocks.iter().flatten().map(Vec::len).sum::<usize>()*256} else {0},"blocks":p.blocks.iter().flatten().map(Vec::len).sum::<usize>(),"packed_files":p.blocks.iter().filter(|b|b.is_some()).count(),"encode_seconds":p.build_seconds})).collect::<Vec<_>>(),"rows":rows,"limits":"Offline warm-filesystem verification stage, four parallel tasks; index opening, planning, CLI and serialization excluded. Raw baseline scans borrowed blocks; production CLI must still be compared separately before shipping. Payload sizes exclude serialized metadata. Full exact roundtrip and whole-source oracle checked. All source bytes resident for oracle; this is not a cold-storage/RSS benchmark. Compression build serial; times are not full index builds."})
         )?
     );
     Ok(())
@@ -397,6 +511,60 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn filtered_scans_match_whole_source_across_arbitrary_boundaries() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("source");
+        let mut state = 17u64;
+        let text: Vec<u8> = (0..9000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b'a' + (state % 26) as u8
+            })
+            .collect();
+        fs::write(&path, &text)?;
+        let entries = [Entry {
+            stamp: stamp(&path)?,
+            path,
+            text,
+            id: 1,
+        }];
+        for codec in [Codec::Raw, Codec::Lz4, Codec::Zstd(1)] {
+            for block in [7, 31, 4096] {
+                let p = build(
+                    &entries,
+                    Mode {
+                        name: "filtered",
+                        codec,
+                        block,
+                        raw_prefix: false,
+                        max_file: usize::MAX,
+                        filter: true,
+                    },
+                )?;
+                for start in (0..entries[0].text.len() - 300).step_by(137) {
+                    for len in [0, 1, 2, 3, 7, 31, 255, 256, 257, 300] {
+                        let needle = &entries[0].text[start..start + len];
+                        assert!(
+                            search(&entries[0], p.blocks[0].as_ref(), &p, &Finder::new(needle))?,
+                            "block {block}, start {start}, len {len}"
+                        );
+                    }
+                }
+                for absent in [b"aaaXYZ".as_slice(), b"XYZ", b"aXYZ", b"0123456789"] {
+                    assert!(!search(
+                        &entries[0],
+                        p.blocks[0].as_ref(),
+                        &p,
+                        &Finder::new(absent)
+                    )?);
+                }
+            }
+        }
+        Ok(())
+    }
     #[test]
     fn codecs_boundaries_and_corruption() -> Result<()> {
         for codec in [Codec::Raw, Codec::Lz4, Codec::Zstd(1), Codec::Zstd(3)] {
@@ -424,6 +592,7 @@ mod tests {
                         block: 31,
                         raw_prefix: prefix,
                         max_file: usize::MAX,
+                        filter: false,
                     },
                 )?;
                 for needle in ["éclair", "longneedle", "absent", "", &text[5000..5100]] {
