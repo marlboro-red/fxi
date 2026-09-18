@@ -3,6 +3,8 @@
 //! These tests verify that fxi's CLI flags and output format match ripgrep's
 //! conventions for familiar usage patterns.
 
+mod support;
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -112,7 +114,7 @@ pub fn debug_print(msg: &str) {
 
     // Build the index
     let fxi = fxi_binary();
-    let output = Command::new(&fxi)
+    let output = support::fxi_command(&fxi)
         .args(["index", "--force"])
         .arg(&dir)
         .output()
@@ -148,7 +150,7 @@ fn run_fxi(args: &[&str], dir: &Path) -> (String, String, bool) {
     let mut cmd_args: Vec<&str> = args.to_vec();
     cmd_args.extend(["-p", dir.to_str().unwrap(), "--color=never"]);
 
-    let output = Command::new(&fxi)
+    let output = support::fxi_command(&fxi)
         .args(&cmd_args)
         .output()
         .expect("Failed to run fxi");
@@ -479,7 +481,7 @@ fn test_flag_color_always() {
 
     // Run without --color=never override
     let fxi = fxi_binary();
-    let output = Command::new(&fxi)
+    let output = support::fxi_command(&fxi)
         .args(["fn", "-p"])
         .arg(&dir)
         .arg("--color=always")
@@ -819,7 +821,7 @@ fn test_filter_file_only_single_result_per_file() {
 #[test]
 fn test_help_shows_ripgrep_flags() {
     let fxi = fxi_binary();
-    let output = Command::new(&fxi)
+    let output = support::fxi_command(&fxi)
         .arg("--help")
         .output()
         .expect("Failed to run fxi --help");
@@ -991,7 +993,7 @@ fn test_binary_files_excluded_by_extension() {
 
     // Build index
     let fxi = fxi_binary();
-    let output = Command::new(&fxi)
+    let output = support::fxi_command(&fxi)
         .args(["index", "--force"])
         .arg(&dir)
         .output()
@@ -1025,7 +1027,7 @@ fn test_binary_content_excluded() {
 
     // Build index
     let fxi = fxi_binary();
-    let output = Command::new(&fxi)
+    let output = support::fxi_command(&fxi)
         .args(["index", "--force"])
         .arg(&dir)
         .output()
@@ -1174,7 +1176,7 @@ fn test_chunk_size_zero_all_in_one() {
     let fxi = fxi_binary();
 
     // Index with chunk_size=0 (all files in one chunk)
-    let output = Command::new(&fxi)
+    let output = support::fxi_command(&fxi)
         .args(["index", "--force", "--chunk-size", "0"])
         .arg(&dir)
         .output()
@@ -1203,7 +1205,7 @@ fn test_chunk_size_small_multiple_segments() {
     let fxi = fxi_binary();
 
     // Index with small chunk_size to force multiple segments
-    let output = Command::new(&fxi)
+    let output = support::fxi_command(&fxi)
         .args(["index", "--force", "--chunk-size", "3"])
         .arg(&dir)
         .output()
@@ -1230,7 +1232,7 @@ fn test_chunk_size_default_no_flag() {
     let fxi = fxi_binary();
 
     // Index without chunk_size flag (uses default)
-    let output = Command::new(&fxi)
+    let output = support::fxi_command(&fxi)
         .args(["index", "--force"])
         .arg(&dir)
         .output()

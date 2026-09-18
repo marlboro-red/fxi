@@ -494,6 +494,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new(docs: &[Document]) -> Self {
+        fxi::utils::app_data::isolate_test_storage().unwrap();
         let directory = tempfile::tempdir().unwrap();
         for doc in docs {
             let path = directory.path().join(&doc.path);

@@ -11,6 +11,8 @@
 //! combinations: -i with a quoted phrase, -i with a regex, -l only being
 //! optimized on one of the two execution paths.
 
+mod support;
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -95,7 +97,7 @@ static QUERY_FILTERS_MAX: usize = 8;
     .unwrap();
 
     // Build the index
-    let out = Command::new(fxi_binary())
+    let out = support::fxi_command(fxi_binary())
         .args(["index", "--force"])
         .arg(&dir)
         .output()
@@ -118,7 +120,7 @@ fn fxi_binary() -> PathBuf {
 
 /// Files-with-matches set from fxi
 fn fxi_files(args: &[&str], dir: &Path) -> HashSet<String> {
-    let out = Command::new(fxi_binary())
+    let out = support::fxi_command(fxi_binary())
         .args(["-l", "--color=never", "-p"])
         .arg(dir)
         .args(args)
@@ -323,7 +325,7 @@ struct DaemonGuard {
 #[cfg(unix)]
 impl Drop for DaemonGuard {
     fn drop(&mut self) {
-        let mut cmd = Command::new(fxi_binary());
+        let mut cmd = support::fxi_command(fxi_binary());
         cmd.args(["daemon", "stop"]);
         for (k, v) in &self.env {
             cmd.env(k, v);
@@ -361,7 +363,7 @@ fn parity_grid_daemon() {
 
     let _guard = DaemonGuard { env: env.clone() };
 
-    let mut start = Command::new(fxi_binary());
+    let mut start = support::fxi_command(fxi_binary());
     start.args(["daemon", "start"]);
     with_env(&mut start, &env);
     let out = start.output().expect("daemon start");
@@ -375,7 +377,7 @@ fn parity_grid_daemon() {
     let env_query = env.clone();
     let failures = run_grid(
         move |args, dir| {
-            let mut cmd = Command::new(fxi_binary());
+            let mut cmd = support::fxi_command(fxi_binary());
             cmd.args(["-l", "--color=never", "-p"]).arg(dir).args(args);
             with_env(&mut cmd, &env_query);
             let out = cmd.output().expect("run fxi via daemon");

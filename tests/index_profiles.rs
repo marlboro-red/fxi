@@ -63,6 +63,7 @@ fn assert_lean(root: &Path) {
 
 #[test]
 fn lean_profile_survives_updates_compaction_rebuild_and_explicit_conversion() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     fs::create_dir(root.join(".git")).unwrap();
@@ -90,6 +91,7 @@ fn lean_profile_survives_updates_compaction_rebuild_and_explicit_conversion() {
 
 #[test]
 fn legacy_metadata_requires_tokens_and_unknown_profiles_are_rejected() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     fs::write(root.join("a.txt"), "needle alpha\n").unwrap();
@@ -119,6 +121,7 @@ fn legacy_metadata_requires_tokens_and_unknown_profiles_are_rejected() {
 
 #[test]
 fn lean_profile_still_requires_gram_evidence() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     fs::write(root.join("a.txt"), "needle alpha\n").unwrap();
@@ -137,6 +140,7 @@ fn lean_profile_still_requires_gram_evidence() {
 
 #[test]
 fn profile_and_format_version_must_agree() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     fs::write(root.join("a.txt"), "needle alpha\n").unwrap();

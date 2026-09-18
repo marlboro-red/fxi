@@ -5,6 +5,7 @@ use std::fs;
 
 #[test]
 fn empty_insensitive_phrase_does_not_invent_a_line_after_final_newline() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let dir = tempfile::tempdir().unwrap();
     for (name, text) in [
         ("lf.txt", "alpha\n"),
@@ -77,6 +78,7 @@ fn check_files(query: &str, expected: &[&str]) {
 
 #[test]
 fn or_includes_branches_without_index_constraints() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     for query in [
         "needle | x",
         "x | needle",
@@ -89,6 +91,7 @@ fn or_includes_branches_without_index_constraints() {
 
 #[test]
 fn files_only_obeys_line_regex_and_filter_semantics() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     check_files("re:/^needle$/", &["a.txt"]);
     check_files("re:/^x$/", &["b.txt"]);
     check_files("needle line:20-30", &[]);
@@ -98,6 +101,7 @@ fn files_only_obeys_line_regex_and_filter_semantics() {
 
 #[test]
 fn invalid_regex_is_an_error_even_with_no_candidates() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("a.txt"), "unrelated").unwrap();
     build_index_with_progress(dir.path(), true, true).unwrap();
@@ -118,6 +122,7 @@ fn invalid_regex_is_an_error_even_with_no_candidates() {
 
 #[test]
 fn substring_candidates_are_a_superset_of_unicode_matches() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let corpus = [
         "PREFIXNEEDLESUFFIX",
@@ -183,6 +188,7 @@ fn substring_candidates_are_a_superset_of_unicode_matches() {
 
 #[test]
 fn ranked_filename_hits_respect_filters_boolean_terms_and_unlimited() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let dir = tempfile::tempdir().unwrap();
     for (name, text) in [
         ("needle.md", "other"),
@@ -219,6 +225,7 @@ fn ranked_filename_hits_respect_filters_boolean_terms_and_unlimited() {
 
 #[test]
 fn ranked_limit_is_a_prefix_of_the_complete_ranking() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let dir = tempfile::tempdir().unwrap();
     for i in 0..30 {
         fs::write(
@@ -254,6 +261,7 @@ fn ranked_limit_is_a_prefix_of_the_complete_ranking() {
 
 #[test]
 fn hir_candidates_match_brute_force_regex_across_deltas_and_compaction() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let mut corpus: Vec<String> = [
         "needle",
@@ -376,6 +384,7 @@ fn hir_candidates_match_brute_force_regex_across_deltas_and_compaction() {
 
 #[test]
 fn parallel_cached_verification_observes_rewrites_and_deletions() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let dir = tempfile::tempdir().unwrap();
     for i in 0..128 {
         fs::write(dir.path().join(format!("f{i}.txt")), "cached_needle\n").unwrap();
@@ -408,6 +417,7 @@ fn parallel_cached_verification_observes_rewrites_and_deletions() {
 
 #[test]
 fn boosts_preserve_phrase_case_and_only_affect_matching_lines() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("a.txt"), "needle\nother\nNEEDLE\n").unwrap();
     build_index_with_progress(dir.path(), true, true).unwrap();
@@ -449,6 +459,7 @@ fn boosts_preserve_phrase_case_and_only_affect_matching_lines() {
 
 #[test]
 fn compound_regex_candidates_are_sound_across_segment_partitions() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let sources = [
         "FoObAr\n",
         "foobaz\n",

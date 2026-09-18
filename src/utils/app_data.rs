@@ -4,11 +4,85 @@ use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 const APP_NAME: &str = "fxi";
 
+struct TestAppData {
+    path: PathBuf,
+    owner: u32,
+}
+
+static TEST_APP_DATA: OnceLock<std::result::Result<TestAppData, String>> = OnceLock::new();
+
+/// Give this test process its own application data directory before using FXI.
+///
+/// Unit-test builds select this automatically. Integration tests and benchmark
+/// fixtures link the ordinary library, so they must call this explicitly before
+/// any index operation. All threads share one directory without changing the
+/// process environment. An explicit `FXI_INDEXES` still takes precedence; child
+/// CLI processes must receive the chosen indexes directory through `Command::env`.
+/// Normal process exit removes only the directory created here. An abort or kill
+/// can leave temporary files, but never creates indexes in the user's app data.
+#[doc(hidden)]
+pub fn isolate_test_storage() -> Result<PathBuf> {
+    let storage = TEST_APP_DATA.get_or_init(|| {
+        (|| -> Result<TestAppData> {
+            let owner = std::process::id();
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos();
+            let mut attempt = 0u64;
+            let path = loop {
+                let path = env::temp_dir().join(format!("fxi-tests-{owner}-{nonce:x}-{attempt}"));
+                let builder = fs::DirBuilder::new();
+                #[cfg(unix)]
+                let builder = {
+                    use std::os::unix::fs::DirBuilderExt;
+                    let mut builder = builder;
+                    builder.mode(0o700);
+                    builder
+                };
+                match builder.create(&path) {
+                    Ok(()) => break path,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        attempt = attempt.checked_add(1).context("Test directory capacity")?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            };
+            // SAFETY: this callback has the required C ABI, uses process-lifetime
+            // OnceLock state, and only removes our exclusively created directory.
+            // Static values do not run Drop at exit, so a TempDir in a static
+            // would otherwise leak every test process's files.
+            if unsafe { libc::atexit(cleanup_test_storage) } != 0 {
+                let _ = fs::remove_dir_all(&path);
+                anyhow::bail!("Cannot register test storage cleanup");
+            }
+            Ok(TestAppData { path, owner })
+        })()
+        .map_err(|error| error.to_string())
+    });
+    match storage {
+        Ok(storage) => Ok(storage.path.clone()),
+        Err(error) => anyhow::bail!("Cannot isolate test storage: {error}"),
+    }
+}
+
+extern "C" fn cleanup_test_storage() {
+    if let Some(Ok(storage)) = TEST_APP_DATA.get()
+        && storage.owner == std::process::id()
+    {
+        // A forked child must not remove its parent's shared fixture directory.
+        let _ = fs::remove_dir_all(&storage.path);
+    }
+}
+
 /// Get the application data directory for storing indexes
 pub fn get_app_data_dir() -> Result<PathBuf> {
+    if cfg!(test) || TEST_APP_DATA.get().is_some() {
+        return isolate_test_storage();
+    }
     let base = if cfg!(target_os = "macos") {
         dirs::home_dir().map(|h| h.join("Library").join("Application Support"))
     } else if cfg!(target_os = "windows") {
@@ -27,7 +101,7 @@ pub fn get_app_data_dir() -> Result<PathBuf> {
 
 /// Get the indexes directory, using FXI_INDEXES env var if set
 fn get_indexes_dir() -> Result<PathBuf> {
-    let indexes_dir = if let Ok(custom_dir) = env::var("FXI_INDEXES") {
+    let indexes_dir = if let Some(custom_dir) = env::var_os("FXI_INDEXES") {
         PathBuf::from(custom_dir)
     } else {
         let app_data = get_app_data_dir()?;
@@ -214,6 +288,25 @@ mod tests {
 
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn unit_test_storage_is_automatic_and_shared_with_workers() {
+        let directory = get_app_data_dir().unwrap();
+        assert_eq!(directory.parent(), Some(env::temp_dir().as_path()));
+        assert!(
+            directory
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("fxi-tests-")
+        );
+        let workers: Vec<_> = (0..8)
+            .map(|_| std::thread::spawn(|| get_app_data_dir().unwrap()))
+            .collect();
+        for worker in workers {
+            assert_eq!(worker.join().unwrap(), directory);
+        }
     }
 }
 

@@ -158,6 +158,7 @@ fn verify(root: &Path) -> Result<()> {
     Ok(())
 }
 fn replay(operations: &[Operation]) -> Result<()> {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let fixture = Fixture(tempfile::tempdir()?);
     let root = fixture.0.path();
     fs::create_dir(root.join(".git"))?;

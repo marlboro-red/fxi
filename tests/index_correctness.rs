@@ -51,6 +51,7 @@ impl Drop for Fixture {
 
 #[test]
 fn opening_reader_preserves_in_progress_writer_files() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let fixture = Fixture::new();
     let index = fixture.index();
     let _writer_lock = fxi::utils::IndexLock::acquire(fixture.0.path()).unwrap();
@@ -73,6 +74,7 @@ fn opening_reader_preserves_in_progress_writer_files() {
 
 #[test]
 fn repeated_compaction_preserves_omitted_gram_coverage() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     use fxi::index::{build::update_index, compact::merge_segments};
     use fxi::query::{QueryExecutor, parse_query};
     let fixture = Fixture::new();
@@ -115,6 +117,7 @@ fn repeated_compaction_preserves_omitted_gram_coverage() {
 
 #[test]
 fn incomplete_segments_fail_open_instead_of_losing_matches() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     for file in [
         "grams.dict",
         "grams.postings",
@@ -136,6 +139,7 @@ fn incomplete_segments_fail_open_instead_of_losing_matches() {
 
 #[test]
 fn empty_postings_are_valid_without_placeholder_files() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let fixture = Fixture::new();
     fs::write(fixture.0.path().join("a.txt"), "x").unwrap();
     build_index_with_options(fixture.0.path(), true, true, None).unwrap();
@@ -151,6 +155,7 @@ fn empty_postings_are_valid_without_placeholder_files() {
 
 #[test]
 fn truncated_postings_fail_open() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     for name in ["grams.postings", "tokens.postings", "tokens.positions"] {
         let fixture = Fixture::new();
         fs::write(fixture.index().join("segments/seg_0001").join(name), []).unwrap();
@@ -160,6 +165,7 @@ fn truncated_postings_fail_open() {
 
 #[test]
 fn published_readers_remain_valid_across_compaction_and_rebuild() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let fixture = Fixture::new();
     fs::write(fixture.0.path().join("b.txt"), "other text\n").unwrap();
     build_index_with_options(fixture.0.path(), true, true, Some(1)).unwrap();
@@ -190,6 +196,7 @@ fn published_readers_remain_valid_across_compaction_and_rebuild() {
 
 #[test]
 fn failed_rebuild_does_not_replace_published_index() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let fixture = Fixture::new();
     let published = fixture.index();
     let mut writer = fxi::index::writer::ChunkedIndexWriter::new(
@@ -211,6 +218,7 @@ fn failed_rebuild_does_not_replace_published_index() {
 
 #[test]
 fn deletion_only_delta_publishes_no_missing_segment() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let fixture = Fixture::new();
     let mut meta = IndexReader::open(fixture.0.path()).unwrap().meta.clone();
     let mut writer = fxi::index::writer::DeltaSegmentWriter::new(fixture.0.path(), 2).unwrap();
@@ -223,6 +231,7 @@ fn deletion_only_delta_publishes_no_missing_segment() {
 
 #[test]
 fn concurrent_opens_observe_complete_rebuild_generations() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let fixture = Fixture::new();
     let root = fixture.0.path().to_path_buf();
     let worker = std::thread::spawn(move || {
@@ -247,6 +256,7 @@ fn concurrent_opens_observe_complete_rebuild_generations() {
 
 #[test]
 fn incremental_scan_detects_subsecond_and_same_stamp_size_changes() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     use std::time::{Duration, UNIX_EPOCH};
     let fixture = Fixture::new();
     let path = fixture.0.path().join("a.txt");
@@ -287,6 +297,7 @@ fn incremental_scan_detects_subsecond_and_same_stamp_size_changes() {
 
 #[test]
 fn legacy_seconds_and_watcher_nanoseconds_normalize_on_read() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     for raw in [1_700_000_000_u64, 1_700_000_000_000_000_000_u64] {
         let fixture = Fixture::new();
         let index = fixture.index();
@@ -305,6 +316,7 @@ fn legacy_seconds_and_watcher_nanoseconds_normalize_on_read() {
 
 #[test]
 fn impossible_record_counts_and_path_lengths_fail_before_allocation() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     for name in [
         "docs.bin",
         "paths.bin",
@@ -329,6 +341,7 @@ fn impossible_record_counts_and_path_lengths_fail_before_allocation() {
 
 #[test]
 fn mapped_dictionaries_reject_bad_lengths_and_token_encoding() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     for corrupt_length in [false, true] {
         let fixture = Fixture::new();
         let path = fixture.index().join("segments/seg_0001/tokens.dict");
@@ -345,6 +358,7 @@ fn mapped_dictionaries_reject_bad_lengths_and_token_encoding() {
 
 #[test]
 fn damaged_or_legacy_optional_blooms_cannot_hide_documents() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     for corruption in 0..5 {
         let fixture = Fixture::new();
         let path = fixture.index().join("segments/seg_0001/bloom.bin");
@@ -374,6 +388,7 @@ fn damaged_or_legacy_optional_blooms_cannot_hide_documents() {
 
 #[test]
 fn common_grams_remain_selective_after_repeated_compaction() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     use fxi::index::compact::merge_segments;
     let fixture = Fixture::new();
     fs::write(fixture.0.path().join("b.txt"), "vector::start\n").unwrap();
@@ -394,6 +409,7 @@ fn common_grams_remain_selective_after_repeated_compaction() {
 
 #[test]
 fn token_dictionary_order_and_overflowed_ranges_fail_open() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     for corruption in 0..4 {
         let fixture = Fixture::new();
         let path = fixture.index().join("segments/seg_0001/tokens.dict");
@@ -432,6 +448,7 @@ fn token_dictionary_order_and_overflowed_ranges_fail_open() {
 
 #[test]
 fn legacy_token_dictionaries_without_positions_remain_readable() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let fixture = Fixture::new();
     let index = fixture.index();
     let dict_path = index.join("segments/seg_0001/tokens.dict");
@@ -464,6 +481,7 @@ fn legacy_token_dictionaries_without_positions_remain_readable() {
 
 #[test]
 fn index_payload_directories_are_rejected() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     for name in ["grams.postings", "tokens.postings", "tokens.positions"] {
         let fixture = Fixture::new();
         let path = fixture.index().join("segments/seg_0001").join(name);
@@ -475,6 +493,7 @@ fn index_payload_directories_are_rejected() {
 
 #[test]
 fn incremental_searches_exclude_tombstoned_documents_in_every_output_mode() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     use fxi::index::build::update_index;
     use fxi::query::{QueryExecutor, parse_query};
     let fixture = Fixture::new();
@@ -553,6 +572,7 @@ fn incremental_searches_exclude_tombstoned_documents_in_every_output_mode() {
 
 #[test]
 fn file_limits_select_the_sorted_prefix_across_segments() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     use fxi::query::{QueryExecutor, parse_query};
     for file_count in [9, 500] {
         let root = tempfile::tempdir().unwrap();
@@ -605,6 +625,7 @@ fn file_limits_select_the_sorted_prefix_across_segments() {
 
 #[test]
 fn prepared_file_regex_matches_line_oracle_with_limits_and_filters() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     use fxi::query::{QueryExecutor, parse_query};
     let root = tempfile::tempdir().unwrap();
     let texts = [
@@ -671,6 +692,7 @@ fn prepared_file_regex_matches_line_oracle_with_limits_and_filters() {
 
 #[test]
 fn prepared_bare_identifiers_preserve_unicode_case_folding() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     use fxi::query::{QueryExecutor, parse_query};
     let root = tempfile::tempdir().unwrap();
     let texts = [
@@ -726,6 +748,7 @@ fn prepared_bare_identifiers_preserve_unicode_case_folding() {
 
 #[test]
 fn positional_source_evidence_is_invalidated_by_edits_and_invalid_utf8() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     use fxi::query::{QueryExecutor, parse_query};
     let root = tempfile::tempdir().unwrap();
     let contents = format!("{}\nstruct file_operations\r\n", "x".repeat(5000));
@@ -787,6 +810,7 @@ fn positional_source_evidence_is_invalidated_by_edits_and_invalid_utf8() {
 
 #[test]
 fn legacy_and_compact_token_segments_coexist_across_updates_and_compaction() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     use fxi::index::{build::update_index, compact::merge_segments};
     use fxi::query::{QueryExecutor, parse_query};
     let fixture = Fixture::new();
@@ -846,6 +870,7 @@ fn legacy_and_compact_token_segments_coexist_across_updates_and_compaction() {
 
 #[test]
 fn compact_token_dictionary_rejects_order_ranges_frequencies_and_trailing_bytes() {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     for corruption in 0..5 {
         let fixture = Fixture::new();
         let path = fixture.index().join("segments/seg_0001/tokens.dict");

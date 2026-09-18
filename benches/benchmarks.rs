@@ -9,6 +9,7 @@ use tempfile::TempDir;
 
 /// Create a test directory with sample files for benchmarking
 fn create_benchmark_fixtures() -> (TempDir, PathBuf) {
+    fxi::utils::app_data::isolate_test_storage().unwrap();
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let root_path = temp_dir.path().to_path_buf();
 

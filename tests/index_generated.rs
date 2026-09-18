@@ -16,6 +16,7 @@ impl Drop for TinyIndex {
 }
 impl TinyIndex {
     pub fn new() -> Result<Self, Error> {
+        fxi::utils::app_data::isolate_test_storage().unwrap();
         let root = tempfile::tempdir()?;
         fs::create_dir(root.path().join(".git"))?;
         fs::write(root.path().join("a.txt"), "alpha needle\nneedle twice\n")?;
