@@ -86,7 +86,7 @@ struct Cli {
     #[arg(short = 'i', long)]
     ignore_case: bool,
 
-    /// Unsupported: inverse line matching is not available with indexed search
+    /// Unsupported: inverse line matching is not implemented
     #[arg(short = 'v', long)]
     invert_match: bool,
 
@@ -94,7 +94,7 @@ struct Cli {
     #[arg(short = 'w', long)]
     word_regexp: bool,
 
-    /// Maximum number of results (-m), 0 for unlimited
+    /// Global matching-line limit (file limit with -l), 0 for unlimited
     #[arg(short = 'm', long, default_value = "0")]
     max_count: usize,
 
@@ -102,7 +102,7 @@ struct Cli {
     #[arg(short = 'l', long)]
     files_with_matches: bool,
 
-    /// Print match count per file (-c)
+    /// Print matching-line count per file (-c)
     #[arg(short = 'c', long)]
     count: bool,
 
