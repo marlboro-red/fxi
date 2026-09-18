@@ -288,16 +288,17 @@ pub(super) fn tokens(
     Ok((count, has_positions))
 }
 
-pub(super) fn lines(
-    paths: &[PathBuf],
+pub(super) fn lines<'a>(
+    inputs: impl IntoIterator<Item = (SegmentId, &'a Path)>,
     destination: &Path,
     remapping: &DocIdRemapping,
+    belongs_to_segment: impl Fn(DocId, SegmentId) -> bool,
 ) -> Result<()> {
     let mut writer = output(destination, "linemap.bin")?;
     writer.write_all(&0u32.to_le_bytes())?;
     let mut written = 0u32;
     let mut seen = HashSet::new();
-    for path in paths {
+    for (segment_id, path) in inputs {
         // Legacy segments may have no stored line-map capability.
         if !path.join("linemap.bin").try_exists()? {
             continue;
@@ -328,7 +329,7 @@ pub(super) fn lines(
                 "Invalid line offsets"
             );
             anyhow::ensure!(
-                remapping.contains(old) && seen.insert(old),
+                remapping.contains(old) && belongs_to_segment(old, segment_id) && seen.insert(old),
                 "Unknown or duplicate line map document"
             );
             if let Some(new) = remapping.remap(old) {

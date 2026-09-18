@@ -71,11 +71,10 @@ impl DocIdRemapping {
 ///
 /// This function:
 /// 1. Builds doc_id remapping (old -> new contiguous IDs, skip tombstones)
-/// 2. Reads and merges trigram/token postings from all segments
-/// 3. Computes stop-grams from merged frequencies
-/// 4. Writes merged segment atomically
-/// 5. Updates docs.bin, paths.bin, meta.json
-/// 6. Deletes old segments after meta commit
+/// 2. Streams merged gram/token evidence while retaining legacy stop-grams
+/// 3. Writes remapped metadata and revision-bound optional source packs
+/// 4. Publishes the complete generation atomically
+/// 5. Reclaims retired generations only after their reader leases are released
 pub fn merge_segments(root_path: &Path) -> Result<()> {
     let root = find_codebase_root(root_path)?;
     // Pin and validate every required segment before mutation. In particular,
@@ -146,7 +145,19 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
     let gram_count = stream::grams(&input_paths, &new_segment_path, &remapping, &stop_grams)?;
     let (token_count, has_positions) = if meta.profile == IndexProfile::Full {
         let result = stream::tokens(&input_paths, &new_segment_path, &remapping)?;
-        stream::lines(&input_paths, &new_segment_path, &remapping)?;
+        stream::lines(
+            segment_ids
+                .iter()
+                .zip(&input_paths)
+                .map(|(&id, path)| (id, path.as_path())),
+            &new_segment_path,
+            &remapping,
+            |id, segment| {
+                validated
+                    .get_document(id)
+                    .is_some_and(|doc| doc.segment_id == segment)
+            },
+        )?;
         result
     } else {
         (0, false)
@@ -652,7 +663,18 @@ mod tests {
                         "{name}"
                     );
                 }
-                stream::lines(&paths, actual.path(), &remapping).unwrap();
+                stream::lines(
+                    ids.iter()
+                        .zip(&paths)
+                        .map(|(&id, path)| (id, path.as_path())),
+                    actual.path(),
+                    &remapping,
+                    |id, segment| {
+                        docs.iter()
+                            .any(|doc| doc.doc_id == id && doc.segment_id == segment)
+                    },
+                )
+                .unwrap();
                 assert_eq!(
                     crate::index::reader::read_line_maps(actual.path()).unwrap(),
                     lines
@@ -660,6 +682,49 @@ mod tests {
             }
             crate::utils::remove_index(&root).unwrap();
         }
+    }
+
+    #[test]
+    fn streaming_merge_preserves_legacy_missing_optional_evidence() {
+        let (_dir, root, index) = fixture();
+        let first = index.join("segments/seg_0001");
+        let remapping = build_doc_id_remapping(&index).unwrap();
+        let mut first_tokens = BTreeMap::new();
+        merge_token_segment(&first, &mut first_tokens, &remapping).unwrap();
+        segment_io::write_token_index(&first, &first_tokens, None).unwrap();
+        fs::remove_file(first.join("tokens.positions")).unwrap();
+        fs::remove_file(first.join("linemap.bin")).unwrap();
+        let mut meta: IndexMeta =
+            serde_json::from_slice(&fs::read(index.join("meta.json")).unwrap()).unwrap();
+        meta.has_positions = false;
+        write_meta_atomic(&index, &meta).unwrap();
+        let (_, tokens, lines, _, positions) =
+            merge_all_segments(&index, &[1, 2, 3], &remapping, IndexProfile::Full).unwrap();
+        assert!(!positions);
+        let expected = tempfile::tempdir().unwrap();
+        segment_io::write_token_index(expected.path(), &tokens, None).unwrap();
+        merge_segments(&root).unwrap();
+        let merged = crate::utils::get_index_dir(&root)
+            .unwrap()
+            .join("segments/seg_0001");
+        assert!(!merged.join("tokens.positions").exists());
+        for name in ["tokens.dict", "tokens.postings"] {
+            assert_eq!(
+                fs::read(expected.path().join(name)).unwrap(),
+                fs::read(merged.join(name)).unwrap()
+            );
+        }
+        assert_eq!(
+            crate::index::reader::read_line_maps(&merged).unwrap(),
+            lines
+        );
+        assert!(
+            !crate::index::reader::IndexReader::open(&root)
+                .unwrap()
+                .meta
+                .has_positions
+        );
+        crate::utils::remove_index(&root).unwrap();
     }
 
     #[test]
@@ -673,6 +738,8 @@ mod tests {
             "token_utf8",
             "position_count",
             "line_count",
+            "line_other_segment",
+            "line_foreign_without_original",
             "sparse_document",
         ] {
             let (_dir, root, generation) = fixture();
@@ -711,6 +778,21 @@ mod tests {
                     let mut bytes = fs::read(&path).unwrap();
                     bytes[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
                     fs::write(path, bytes).unwrap();
+                }
+                "line_other_segment" | "line_foreign_without_original" => {
+                    let first = fs::read(segment.join("linemap.bin")).unwrap();
+                    let path = generation.join("segments/seg_0002/linemap.bin");
+                    let mut bytes = fs::read(&path).unwrap();
+                    let target_doc = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+                    bytes[4..8].copy_from_slice(&first[4..8]);
+                    fs::write(path, bytes).unwrap();
+                    if damage == "line_foreign_without_original" {
+                        fs::remove_file(segment.join("linemap.bin")).unwrap();
+                    }
+                    let reader = crate::index::reader::IndexReader::open(&root).unwrap();
+                    assert!(reader.get_line_map(target_doc).is_err());
+                    // Lazy errors are retained, not cached as an empty map.
+                    assert!(reader.get_line_map(target_doc).is_err());
                 }
                 "sparse_document" => {
                     let path = generation.join("docs.bin");

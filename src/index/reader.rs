@@ -609,7 +609,17 @@ impl SegmentReader {
     /// Get a line map, preserving lazy validation failures for every caller.
     fn get_line_map(&self, doc_id: DocId) -> Result<Option<&Vec<u32>>> {
         let line_maps = self.line_maps.get_or_init(|| {
-            read_line_maps(&self.segment_path).map_err(|error| format!("{error:#}"))
+            (|| -> Result<_> {
+                let maps = read_line_maps(&self.segment_path)?;
+                anyhow::ensure!(
+                    self.allowed_docs
+                        .as_ref()
+                        .is_none_or(|allowed| maps.keys().all(|id| allowed.contains(*id))),
+                    "Line map references an unknown segment document"
+                );
+                Ok(maps)
+            })()
+            .map_err(|error| format!("{error:#}"))
         });
         match line_maps {
             Ok(maps) => Ok(maps.get(&doc_id)),
