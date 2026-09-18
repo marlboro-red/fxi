@@ -24,6 +24,7 @@ def main():
     p.add_argument('--candidate-query-local', action='store_true', help='Prepare checked evidence and enable candidate query-local validation')
     p.add_argument('--baseline-query-local', action='store_true')
     p.add_argument('--candidate-generation-routing', action='store_true')
+    p.add_argument('--baseline-generation-routing', action='store_true')
     p.add_argument('--corpus', type=Path, help='Copy an existing corpus for a realistic one-file update; never modifies the supplied source')
     p.add_argument('--chunk-size', type=int, default=2048, help='Initial chunk size for --corpus')
     p.add_argument('--repetitions', type=int, default=5)
@@ -31,6 +32,11 @@ def main():
     args = p.parse_args()
     if args.repetitions < 1 or args.chunk_size < 1:
         p.error('repetitions and chunk-size must be positive')
+    policies = {'before': (args.baseline_query_local, args.baseline_generation_routing),
+                'after': (args.candidate_query_local, args.candidate_generation_routing)}
+    for variant, (query_local, generation_routing) in policies.items():
+        if generation_routing and not query_local:
+            p.error(f'{variant} generation routing requires query-local validation')
     binaries = {'before': args.baseline.resolve(), 'after': args.candidate.resolve()}
     base = Path(tempfile.mkdtemp(prefix='fxi-publication-comparison-'))
     root = base / 'corpus'
@@ -50,10 +56,11 @@ def main():
     manifest = helper.corpus_manifest(root)
     env = {**os.environ, 'FXI_SOCKET': str(base / 'unused.sock'), 'XDG_RUNTIME_DIR': str(base),
            'FXI_SOURCE_PACK': '0', 'FXI_TRACE_UPDATES': '1', 'FXI_APP_DATA': str(base / 'app-data')}
-    def run(command, indexes):
-        return sp.run([str(x) for x in command], cwd=root, env={**env, 'FXI_INDEXES': str(indexes), 'FXI_QUERY_LOCAL': '1' if (args.candidate_query_local if command[0] == binaries['after'] else args.baseline_query_local) else '0', 'FXI_GENERATION_ROUTING': '1' if args.candidate_generation_routing and command[0] == binaries['after'] else '0'},
+    def run(command, indexes, variant):
+        query_local, generation_routing = policies[variant]
+        return sp.run([str(x) for x in command], cwd=root, env={**env, 'FXI_INDEXES': str(indexes), 'FXI_QUERY_LOCAL': '1' if query_local else '0', 'FXI_GENERATION_ROUTING': '1' if generation_routing else '0'},
                       capture_output=True, text=True, check=True, timeout=120)
-    result = {'base': str(base), 'source_corpus': str(args.corpus.resolve()) if args.corpus else None, 'files': None if args.corpus else 4096, 'profile': 'lean' if args.corpus else 'full', 'source_pack': False, 'candidate_query_local': args.candidate_query_local, 'baseline_query_local': args.baseline_query_local, 'candidate_generation_routing': args.candidate_generation_routing,
+    result = {'base': str(base), 'source_corpus': str(args.corpus.resolve()) if args.corpus else None, 'files': None if args.corpus else 4096, 'profile': 'lean' if args.corpus else 'full', 'source_pack': False, 'candidate_query_local': args.candidate_query_local, 'baseline_query_local': args.baseline_query_local, 'candidate_generation_routing': args.candidate_generation_routing, 'baseline_generation_routing': args.baseline_generation_routing,
               'harness_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'manifest_helper_sha256': hashlib.sha256(manifest_helper.read_bytes()).hexdigest(), 'corpus_manifest': manifest,
               'binaries': {v: {'path': str(b), 'sha256': hashlib.sha256(b.read_bytes()).hexdigest()} for v, b in binaries.items()},
@@ -65,7 +72,8 @@ def main():
         else:
             added.unlink(missing_ok=True)
         prepared = base / f'prepared-{chunk_size}'
-        run([binaries['after'] if args.candidate_query_local else binaries['before'], 'index', '--force', '--profile', result['profile'], '--chunk-size', chunk_size, root], prepared)
+        preparation_variant = 'after' if args.candidate_query_local else 'before'
+        run([binaries[preparation_variant], 'index', '--force', '--profile', result['profile'], '--chunk-size', chunk_size, root], prepared, preparation_variant)
         current, = prepared.rglob('CURRENT')
         generation = current.parent / 'generations' / current.read_text().strip()
         original = json.loads((generation / 'meta.json').read_text())
@@ -84,10 +92,10 @@ def main():
                 indexes = base / f'{segments}-{repetition}-{variant}'
                 shutil.copytree(prepared, indexes)
                 start = time.perf_counter()
-                proc = run([binaries[variant], 'index', root], indexes)
+                proc = run([binaries[variant], 'index', root], indexes, variant)
                 elapsed = time.perf_counter() - start
                 for pattern, expected in [('newPublicationMarker', {added.name}), (control_pattern, original_matches | ({added.name} if control_pattern == 'shared' else set()))]:
-                    output = run([binaries[variant], '-l', '--color=never', f're:/{pattern}/', '-p', root], indexes).stdout
+                    output = run([binaries[variant], '-l', '--color=never', f're:/{pattern}/', '-p', root], indexes, variant).stdout
                     paths = [str(Path(line).relative_to(root)) if Path(line).is_absolute() else line.removeprefix('./') for line in output.splitlines()]
                     assert len(paths) == len(set(paths)) and set(paths) == expected
                 current, = indexes.rglob('CURRENT')

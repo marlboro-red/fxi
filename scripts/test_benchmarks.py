@@ -51,6 +51,48 @@ def load_harness(name):
 
 
 class IndexerHarnessTests(unittest.TestCase):
+    def test_publication_policies_are_per_variant_even_with_same_binary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            corpus = root / 'corpus'
+            corpus.mkdir()
+            for index in range(16):
+                (corpus / f'{index}.rs').write_text('folio_wait_bit_common\n' if index == 0 else 'original\n')
+            log = root / 'calls.jsonl'
+            binary = root / 'fake-fxi'
+            binary.write_text(
+                '#!/usr/bin/env python3\n'
+                'import json, os, sys\n'
+                'from pathlib import Path\n'
+                'args = sys.argv[1:]\n'
+                "with open(os.environ['BENCH_TEST_LOG'], 'a') as out:\n"
+                "    out.write(json.dumps({'args': args, 'query_local': os.environ['FXI_QUERY_LOCAL'], 'generation_routing': os.environ['FXI_GENERATION_ROUTING']}) + '\\n')\n"
+                "if args[0] == 'index':\n"
+                "    store = Path(os.environ['FXI_INDEXES']) / 'test-index'\n"
+                "    generation = store / 'generations' / 'one'\n"
+                '    generation.mkdir(parents=True, exist_ok=True)\n'
+                "    (store / 'CURRENT').write_text('one')\n"
+                "    added = '--force' not in args\n"
+                "    (generation / 'meta.json').write_text(json.dumps({'doc_count': 16 + added, 'segment_count': 1 + added}))\n"
+                'else:\n'
+                "    print('__fxi_publication_probe_94283.rs' if any('newPublicationMarker' in a for a in args) else '0.rs')\n"
+            )
+            binary.chmod(0o755)
+            output = root / 'report.json'
+            subprocess.run([sys.executable, str(Path(__file__).with_name('compare-publication.py')),
+                            '--corpus', str(corpus), '--baseline', str(binary), '--candidate', str(binary),
+                            '--candidate-query-local', '--candidate-generation-routing',
+                            '--repetitions', '1', '--output', str(output)],
+                           env={**os.environ, 'BENCH_TEST_LOG': str(log)}, check=True,
+                           capture_output=True, timeout=30)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            updates = [call for call in calls if call['args'][0] == 'index' and '--force' not in call['args']]
+            self.assertEqual([(call['query_local'], call['generation_routing']) for call in updates],
+                             [('0', '0'), ('1', '1')])
+            report = json.loads(output.read_text())
+            self.assertTrue(report['manifest_verified_before_and_after'])
+            self.assertEqual(report['files'], 16)
+
     def test_focused_open_probe_uses_each_index_and_stops_after_measurement(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
