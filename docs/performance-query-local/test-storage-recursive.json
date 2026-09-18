@@ -1,0 +1,9 @@
+{
+  "test_executions": 996,
+  "app_data_entries": 303769,
+  "guard_result": "unchanged",
+  "scope": "recursive lstat type, size, mtime_ns; not content hashing",
+  "existing_watch_daemon": "paused for snapshot, test run and verification; resumed in finally",
+  "guard_sha256": "98b11b6bcf8cf36d055b9fd1d0a591d3f1cfe32bf5f0f772f3fce261cede5870",
+  "tested_commit": "5dbf46e"
+}

@@ -281,3 +281,12 @@ Default strict reader on the same legacy index (31 pairs):
 [Default-mode samples](default-routing.json). The experimental headline numbers
 require rebuilding and searching with `FXI_QUERY_LOCAL=1`; they are not the
 default product performance.
+
+
+Final storage verification at `5dbf46e`: **996 test executions passed**, with the
+recursive metadata of **303,769 real app-data entries unchanged**. See
+[test-storage-recursive.json](test-storage-recursive.json). The existing watch
+daemon was paused for this check and resumed afterward with its loaded state
+preserved. An earlier unpaused check correctly detected that daemon updating the
+new repository index; it was not counted as a clean isolation result. The remote
+Linux/macOS tests also pass the clean-machine storage guard.
