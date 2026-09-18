@@ -11,6 +11,7 @@ fn assert_lean(root: &Path) {
     let reader = IndexReader::open(root).unwrap();
     assert_eq!(reader.meta.profile, IndexProfile::Lean);
     assert!(!reader.meta.has_positions);
+    assert_eq!(reader.meta.version, 3);
     assert!(
         reader
             .get_token_docs("needle")
@@ -131,5 +132,26 @@ fn lean_profile_still_requires_gram_evidence() {
         .path();
     fs::remove_file(segment.join("grams.postings")).unwrap();
     assert!(IndexReader::open(root).is_err());
+    fxi::utils::remove_index(root).unwrap();
+}
+
+#[test]
+fn profile_and_format_version_must_agree() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::write(root.join("a.txt"), "needle alpha\n").unwrap();
+    build_index_with_profile(root, true, true, None, IndexProfile::Lean).unwrap();
+    let index = fxi::utils::get_index_dir(root).unwrap();
+    let path = index.join("meta.json");
+    let original: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for (version, profile, positions) in [(2, "lean", false), (3, "full", false), (3, "lean", true)]
+    {
+        let mut meta = original.clone();
+        meta["version"] = version.into();
+        meta["profile"] = profile.into();
+        meta["has_positions"] = positions.into();
+        fs::write(&path, serde_json::to_vec(&meta).unwrap()).unwrap();
+        assert!(IndexReader::open(root).is_err());
+    }
     fxi::utils::remove_index(root).unwrap();
 }

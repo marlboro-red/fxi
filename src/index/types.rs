@@ -222,6 +222,15 @@ pub enum IndexProfile {
     Lean,
 }
 
+impl IndexProfile {
+    pub(crate) fn format_version(self) -> u32 {
+        match self {
+            Self::Full => 2,
+            Self::Lean => 3,
+        }
+    }
+}
+
 /// Index metadata stored in meta.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexMeta {
@@ -248,7 +257,7 @@ pub struct IndexMeta {
     #[serde(default)]
     pub delta_baseline: usize,
     /// Whether segments contain token position data for phrase queries.
-    /// Old indexes default to false; new indexes set this to true.
+    /// Old indexes default to false; new full-profile indexes set this to true.
     #[serde(default)]
     pub has_positions: bool,
     /// Files the indexer rejected after reading content (binary sniff, no
@@ -257,6 +266,23 @@ pub struct IndexMeta {
     /// re-rejecting them on every update.
     #[serde(default)]
     pub rejected_files: Vec<(PathBuf, u64)>,
+}
+
+impl IndexMeta {
+    pub(crate) fn validate_format(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            matches!(
+                (self.version, self.profile),
+                (1 | 2, IndexProfile::Full) | (3, IndexProfile::Lean)
+            ),
+            "Unsupported index version/profile combination; rebuild with an explicit --profile"
+        );
+        anyhow::ensure!(
+            self.profile != IndexProfile::Lean || !self.has_positions,
+            "Lean index metadata cannot require token positions"
+        );
+        Ok(())
+    }
 }
 
 impl Default for IndexMeta {

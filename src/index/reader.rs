@@ -952,15 +952,7 @@ impl IndexReader {
         let meta_path = index_path.join("meta.json");
         let meta_file = File::open(&meta_path).context("Failed to open meta.json")?;
         let meta: IndexMeta = serde_json::from_reader(meta_file)?;
-        anyhow::ensure!(
-            meta.profile != IndexProfile::Lean || !meta.has_positions,
-            "Lean index metadata cannot require token positions"
-        );
-        anyhow::ensure!(
-            matches!(meta.version, 1 | 2),
-            "Unsupported index version {}; rebuild the index",
-            meta.version
-        );
+        meta.validate_format()?;
 
         // Collect all segment IDs to load
         let mut segment_ids: Vec<SegmentId> = Vec::new();
@@ -1900,12 +1892,13 @@ fn segment_document_ids(documents: &[Document]) -> HashMap<SegmentId, Arc<Roarin
 /// Read documents from an immutable index generation.
 pub fn read_documents(index_path: &Path) -> Result<Vec<Document>> {
     let meta: IndexMeta = serde_json::from_reader(File::open(index_path.join("meta.json"))?)?;
+    meta.validate_format()?;
     read_documents_version(index_path, meta.version)
 }
 
 fn read_documents_version(index_path: &Path, version: u32) -> Result<Vec<Document>> {
     anyhow::ensure!(
-        matches!(version, 1 | 2),
+        matches!(version, 1..=3),
         "Unsupported index version; rebuild the index"
     );
     let data = MappedBytes::open(&index_path.join("docs.bin"))?;
@@ -2170,11 +2163,7 @@ pub(crate) fn read_bloom_filter(segment_path: &Path) -> Result<BloomFilter> {
 /// only while strong file stamps remain unchanged. Unused token/line-map/source
 /// evidence keeps its existing independent, lazy validation behavior.
 pub(crate) fn validate_negative_routing_core(index_path: &Path, meta: &IndexMeta) -> Result<()> {
-    anyhow::ensure!(
-        matches!(meta.version, 1 | 2),
-        "Unsupported index version {}; rebuild the index",
-        meta.version
-    );
+    meta.validate_format()?;
     let documents = read_documents_version(index_path, meta.version)?;
     let paths = read_paths(index_path)?;
     validate_document_references(meta, &documents, paths.len())?;

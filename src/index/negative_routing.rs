@@ -204,7 +204,7 @@ fn prove_absent(index: &Path, literal: &[u8]) -> Result<Option<IndexMeta>> {
         "routing metadata mismatch"
     );
     let meta: IndexMeta = serde_json::from_slice(&metadata)?;
-    ensure!(matches!(meta.version, 1 | 2), "unsupported index version");
+    meta.validate_format()?;
     let stop: std::collections::HashSet<_> = meta.stop_grams.iter().copied().collect();
     let mut grams: Vec<_> = literal
         .windows(3)

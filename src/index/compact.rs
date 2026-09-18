@@ -181,7 +181,7 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
 
     let new_meta = IndexMeta {
         profile: meta.profile,
-        version: 2,
+        version: meta.profile.format_version(),
         root_path: meta.root_path,
         doc_count: remapping.valid_docs.len() as u32,
         segment_count: 1,

@@ -284,7 +284,9 @@ postings, positions and stored line maps. All ordinary CLI search modes remain
 available: they use trigrams and verify source text. The default for new indexes
 is still `full`. Updates, compaction and ordinary forced rebuilds preserve the
 stored profile; `--profile full` explicitly rebuilds the omitted evidence.
-`fxi stats` displays the profile. Library token and positional APIs are fallible:
+`fxi stats` displays the profile. Lean uses a newer index format that older
+binaries reject; rebuild with `--profile full` for older-reader compatibility.
+Library token and positional APIs are fallible:
 a lean index reports unavailable evidence, rather than an empty match set.
 Stored line-map lookup returns no map for lean indexes. Neither profile changes
 search freshness guarantees or makes stale source verification unnecessary.

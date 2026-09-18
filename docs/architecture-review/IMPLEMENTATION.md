@@ -39,3 +39,9 @@ Additional tests cover incremental writes/deletes, compaction, rebuild profile
 inheritance, explicit conversion, legacy metadata and missing required files,
 and preview-only updates. These tests supplement existing corruption and
 stateful differential suites; they do not prove every filesystem race absent.
+
+Lean generations use format version 3; full generations retain version 2 and
+legacy version 1 remains readable. Readers validate the version/profile pair.
+This ensures pre-profile readers reject lean generations before interpreting
+missing evidence, rather than allowing old maintenance paths to lose the
+capability declaration. Explicit conversion to full rebuilds version 2 data.
