@@ -1,6 +1,7 @@
 //! Immutable index generations with one atomic publication point.
 use anyhow::{Context, Result};
 use fs2::FileExt;
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,9 @@ pub(crate) struct Generation {
     pub path: PathBuf,
     _lease: File,
     published: bool,
+    /// Immutable hard links whose bytes were synced by a prior publication.
+    /// Copies and legacy-layout files have no such durability proof.
+    durable_links: HashSet<PathBuf>,
 }
 
 impl Generation {
@@ -46,28 +50,48 @@ impl Generation {
             path,
             _lease: lease,
             published: false,
+            durable_links: HashSet::new(),
         })
     }
 
     /// Reuse immutable segment bytes; metadata is always written afresh.
-    pub fn inherit_segments(&self, previous: &Path) -> Result<()> {
-        fn link_tree(source: &Path, destination: &Path) -> Result<()> {
+    pub fn inherit_segments(&mut self, previous: &Path) -> Result<()> {
+        fn link_tree(
+            source: &Path,
+            destination: &Path,
+            durable: bool,
+            links: &mut HashSet<PathBuf>,
+        ) -> Result<()> {
             fs::create_dir_all(destination)?;
             for entry in fs::read_dir(source)? {
                 let entry = entry?;
                 let target = destination.join(entry.file_name());
                 if entry.file_type()?.is_dir() {
-                    link_tree(&entry.path(), &target)?;
+                    link_tree(&entry.path(), &target, durable, links)?;
                 } else if entry.file_type()?.is_file() {
-                    fs::hard_link(entry.path(), &target)
-                        .or_else(|_| fs::copy(entry.path(), &target).map(|_| ()))?;
+                    match fs::hard_link(entry.path(), &target) {
+                        Ok(()) if durable => {
+                            links.insert(target);
+                        }
+                        Ok(()) => {}
+                        Err(_) => {
+                            fs::copy(entry.path(), &target)?;
+                        }
+                    }
                 }
             }
             Ok(())
         }
         let source = previous.join("segments");
         if source.exists() {
-            link_tree(&source, &self.path.join("segments"))?;
+            let durable = previous.parent() == Some(self.container.join("generations").as_path())
+                && resolve(&self.container)? == previous;
+            link_tree(
+                &source,
+                &self.path.join("segments"),
+                durable,
+                &mut self.durable_links,
+            )?;
         }
         Ok(())
     }
@@ -75,7 +99,16 @@ impl Generation {
     pub fn publish(&mut self) -> Result<()> {
         crate::index::negative_routing::write_if_requested(&self.path)?;
         // Publish only after every referenced byte and directory entry is durable.
-        sync_tree(&self.path)?;
+        // Inherited hard links reuse already-durable bytes. Their new directory
+        // entries still require syncing, as do every copied/new file and CURRENT.
+        sync_tree(&self.path, &self.durable_links, &mut |path| {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)?
+                .sync_all()?;
+            Ok(())
+        })?;
         sync_directory(&self.container.join("generations"))?;
         let pending = self.container.join("CURRENT.tmp");
         let mut file = File::create(&pending)?;
@@ -122,17 +155,17 @@ impl Drop for Generation {
     }
 }
 
-fn sync_tree(path: &Path) -> Result<()> {
+fn sync_tree(
+    path: &Path,
+    durable_links: &HashSet<PathBuf>,
+    sync_file: &mut impl FnMut(&Path) -> Result<()>,
+) -> Result<()> {
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
-            sync_tree(&entry.path())?;
-        } else {
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(entry.path())?
-                .sync_all()?;
+            sync_tree(&entry.path(), durable_links, sync_file)?;
+        } else if !durable_links.contains(&entry.path()) {
+            sync_file(&entry.path())?;
         }
     }
     sync_directory(path)
@@ -179,5 +212,70 @@ pub(crate) fn resolve(container: &Path) -> Result<PathBuf> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(container.to_path_buf()),
         Err(e) => Err(e).context("Cannot read index generation manifest"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publication_syncs_new_and_copied_bytes_but_reuses_durable_hardlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let mut first = Generation::new(root.path()).unwrap();
+        fs::create_dir_all(first.path.join("segments/seg_0001")).unwrap();
+        fs::write(first.path.join("segments/seg_0001/evidence"), b"original").unwrap();
+        fs::write(first.path.join("meta.json"), b"{}").unwrap();
+        first.publish().unwrap();
+        let mut next = Generation::new(root.path()).unwrap();
+        next.inherit_segments(&first.path).unwrap();
+        let inherited = next.path.join("segments/seg_0001/evidence");
+        // A platform may decline hard linking; then the copy must be synced.
+        let was_linked = next.durable_links.contains(&inherited);
+        let copied = next.path.join("segments/seg_0001/copied");
+        fs::copy(&inherited, &copied).unwrap();
+        let metadata = next.path.join("meta.json");
+        fs::write(&metadata, b"{}").unwrap();
+        let mut synced = HashSet::new();
+        sync_tree(&next.path, &next.durable_links, &mut |path| {
+            synced.insert(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(synced.contains(&inherited), !was_linked);
+        assert!(synced.contains(&copied));
+        assert!(synced.contains(&metadata));
+        assert!(synced.contains(&next.path.join("lease")));
+        assert!(
+            sync_tree(&next.path, &next.durable_links, &mut |_| anyhow::bail!(
+                "injected sync failure"
+            ))
+            .is_err()
+        );
+        assert_eq!(resolve(&next.container).unwrap(), first.path);
+        next.publish().unwrap();
+        assert_eq!(resolve(&next.container).unwrap(), next.path);
+        assert_eq!(fs::read(inherited).unwrap(), b"original");
+        drop(next);
+        drop(first);
+        crate::utils::remove_index(root.path()).unwrap();
+    }
+
+    #[test]
+    fn legacy_inheritance_does_not_assume_prior_durability() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = tempfile::tempdir().unwrap();
+        fs::create_dir_all(legacy.path().join("segments/seg_0001")).unwrap();
+        fs::write(legacy.path().join("segments/seg_0001/evidence"), b"legacy").unwrap();
+        let mut next = Generation::new(root.path()).unwrap();
+        next.inherit_segments(legacy.path()).unwrap();
+        assert!(next.durable_links.is_empty());
+        let mut synced = HashSet::new();
+        sync_tree(&next.path, &next.durable_links, &mut |path| {
+            synced.insert(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert!(synced.contains(&next.path.join("segments/seg_0001/evidence")));
     }
 }

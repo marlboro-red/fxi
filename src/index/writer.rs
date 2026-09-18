@@ -1053,7 +1053,7 @@ impl DeltaSegmentWriter {
         let existing_paths = crate::index::reader::read_paths(&index_path)?;
         let loaded = std::time::Instant::now();
 
-        let generation = crate::index::generation::Generation::new(&root_path)?;
+        let mut generation = crate::index::generation::Generation::new(&root_path)?;
         generation.inherit_segments(&index_path)?;
         let index_path = generation.path.clone();
         let inherited = std::time::Instant::now();
