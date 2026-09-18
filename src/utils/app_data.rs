@@ -121,6 +121,20 @@ fn get_indexes_dir() -> Result<PathBuf> {
     Ok(indexes_dir)
 }
 
+/// Resolve storage without creating directories (including for prune previews).
+pub(crate) fn indexes_path() -> Result<PathBuf> {
+    match env::var_os("FXI_INDEXES") {
+        Some(path) => Ok(PathBuf::from(path)),
+        None => Ok(get_app_data_path()?.join("indexes")),
+    }
+}
+
+/// Exact identity of an already-recorded root; never canonicalize a missing root.
+pub(crate) fn recorded_container_name(root: &Path) -> Result<String> {
+    anyhow::ensure!(root.to_str().is_some(), "Non-UTF-8 index root");
+    Ok(hash_path(root))
+}
+
 /// Get the index directory for a specific codebase root
 pub fn get_index_dir(root_path: &Path) -> Result<PathBuf> {
     crate::index::generation::resolve(&get_index_container(root_path)?)

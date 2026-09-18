@@ -151,6 +151,18 @@ enum Commands {
     },
     /// List all indexed codebases
     List,
+    /// Remove abandoned indexes whose recorded source directories no longer exist
+    Prune {
+        /// Preview eligible indexes without changing storage
+        #[arg(long)]
+        dry_run: bool,
+        /// Show the outcome for every storage entry
+        #[arg(long)]
+        verbose: bool,
+        /// Include legacy layouts; acknowledges all fxi readers/indexers are stopped (old readers have no leases)
+        #[arg(long)]
+        include_legacy: bool,
+    },
     /// Remove an index
     Remove {
         /// Path to the codebase to remove index for
@@ -343,6 +355,13 @@ fn run() -> Result<()> {
         }
         Some(Commands::List) => {
             index::stats::list_indexes()?;
+        }
+        Some(Commands::Prune {
+            dry_run,
+            verbose,
+            include_legacy,
+        }) => {
+            index::prune::run(dry_run, verbose, include_legacy)?;
         }
         Some(Commands::Remove { path }) => {
             let root = utils::find_codebase_root(&path)?;

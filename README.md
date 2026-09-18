@@ -222,6 +222,8 @@ fxi list
 fxi stats /path/to/project
 fxi compact /path/to/project
 fxi remove /path/to/project
+fxi prune --dry-run              # Preview indexes whose source roots disappeared
+fxi prune                        # Remove eligible abandoned indexes
 ```
 
 Indexes live outside the source tree. `FXI_INDEXES` overrides their location.
@@ -237,6 +239,25 @@ Indexes live outside the source tree. `FXI_INDEXES` overrides their location.
 Each root has a container with a `CURRENT` manifest, immutable generations,
 segment files, and a writer lock. Older generations stay leased while readers
 use them. Do not edit index files manually.
+
+`fxi prune` checks each registration independently and removes only recognized
+generation containers whose recorded absolute source root is actually missing.
+It preserves live or inaccessible roots, dangling symlinks, malformed or unknown
+layouts, and indexes held by a writer or generation reader. Stop the daemon or
+wait for active searches before retrying busy entries. Legacy and mixed layouts
+are preserved by default because old readers have no generation lease to check.
+To clean them up, stop the daemon and **all FXI readers/indexers** first, then use
+`fxi prune --dry-run --include-legacy` and `fxi prune --include-legacy`.
+The flag explicitly acknowledges that offline requirement. Known daemon-loaded
+roots are still skipped, but daemon status cannot detect standalone old readers.
+
+The default output summarizes eligible/removed counts, logical file bytes,
+preservation reasons, and errors; `--verbose` lists individual outcomes. Logical
+bytes count hard links per path and can exceed reclaimed disk space. Dry-run
+creates no directories or lock files. Sibling writer lock files remain after
+pruning so existing waiters cannot acquire a different lock inode. See
+[cleanup and recovery](docs/MIGRATION.md#cleaning-up-abandoned-registrations) for
+indexes left by older test runs.
 
 Coverage follows ignore rules and configured eligibility limits. Hidden paths,
 symlinks, common generated/dependency directories, known binary types,

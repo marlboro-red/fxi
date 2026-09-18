@@ -47,6 +47,7 @@ pub mod build;
 pub mod compact;
 pub(crate) mod generation_routing;
 pub(crate) mod negative_routing;
+pub mod prune;
 pub(crate) mod query_local;
 pub mod reader;
 pub mod segment_io;
