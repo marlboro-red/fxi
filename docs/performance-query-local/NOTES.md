@@ -44,8 +44,9 @@ both experimental flags disables timestamp-based `FXI_NEGATIVE_ROUTING` prefligh
 so that it cannot bypass the checked reader.
 
 Checksums detect accidental damage relative to publication bytes; they do not
-provide authentication against coordinated rewriting. Document/path/metadata
-validation retains its existing structural policy. Immutable published files
+provide authentication against coordinated rewriting. Ordinary reader document/path/metadata validation retains its existing structural
+policy. The checked absence preflight described below additionally binds the
+actual metadata, document and path bytes to publication hashes. Immutable published files
 remain a reader-lifetime requirement. This experiment does not claim to discover
 unindexed source changes.
 
@@ -118,3 +119,161 @@ use an independent ordered-content XXH3 digest, so a reordered filter disables
 pruning and falls back to checked pages. A regression deliberately preserves the
 legacy checksum while removing a match's probe bit and checks both reader modes.
 The legacy on-disk Bloom format remains readable.
+
+
+## Checked absence and mapped paths
+
+The next iteration adds a generation-owned `query-routing.bin`. Publication
+issues it only after strict validation of every segment and core table. It binds
+the ordered, complete segment list, metadata/document/path hashes, checked gram
+roots and strong Bloom digests. The files-only CLI preflight hashes actual content
+before accepting absence; timestamps alone are insufficient. Missing, damaged,
+unsupported or inconclusive proof falls back to the ordinary checked reader.
+
+Eligibility is deliberately narrow: a case-sensitive complete regex literal of
+at least three bytes, without filters, line breaks or extra assertions, and with
+at least one non-stop trigram. Every segment must reject the literal. Positive,
+compound and unsupported queries retain the normal execution path. This avoids
+allocating document membership and path objects for proven absence; it still
+reads and hashes the evidence and core tables. Unrelated posting payloads are
+outside this proof's dependency set, as under query-local validation generally.
+
+Both strict and experimental readers now validate the mapped path table upfront
+but allocate `PathBuf` objects only for requested paths. Bounds, UTF-8, safe
+relative components and trailing-byte checks remain eager. Shared snapshots use
+thread-safe once-only initialization. Regression tests cover complete segment
+coverage, changed core bytes, altered roots, malformed/truncated evidence,
+stop-gram-only and empty generations, CLI fallback, and concurrent path access.
+
+## Test storage review
+
+An external review correctly identified that some library integration tests
+and benchmark fixtures inherited the real app-data directory. `cfg(test)` alone
+would not fix this: integration tests link the ordinary library.
+
+The inspected local store contained 15,324 containers, 15,302 readable registered
+roots and 14,489 missing source roots. These are local observations, not the
+review's exact counts, and do not prove which historical run created each entry.
+No existing user indexes were deleted.
+
+Unit tests now automatically select private process storage. Integration library
+fixtures and Criterion fixtures explicitly initialize it; CLI fixtures pass
+private index/runtime settings. Initialization does not mutate global environment
+variables, concurrent callers share one directory, and normal process exit cleans
+only that process's owned directory. Aborts can leave temporary storage. Explicit
+`FXI_INDEXES` retains precedence, including non-UTF-8 paths.
+
+A full local `cargo test --all-targets` run passed 990 test executions with zero
+added/removed containers or changed container mtimes in real app data; see
+[test-storage-sentinel.json](test-storage-sentinel.json). This was a container
+metadata check, not a full content audit. Subsequent targeted regressions also
+passed. CI now snapshots recursive real app-data metadata around the full suite
+on all three operating systems, with `FXI_INDEXES` unset. The guard does not follow
+symlinks and has five subprocess regression tests of its own.
+
+The review's broader history claim—optimization preceded correctness—is not
+established by commit-prefix counts. The defects and fixes are documented in the
+[audit](../audit-2026-09-18/AUDIT.md); test volume or a successful audit cannot prove
+all search behavior correct. The stale blanket speed claims in `CLAUDE.md` were
+removed, and the [evidence guide](../README.md) distinguishes current summaries
+from retained historical reports. The quoted production-code/unwrap/unsafe/CI
+counts were not independently recounted as part of this storage investigation.
+
+The repo had no index at verification time. An intentional `fxi index .` now
+creates its source index. Both the installed CLI and current release binary
+returned the same 12 `RoaringBitmap` files as independent ripgrep. This is one
+explicit repository index, separate from test fixtures; stale registrations were
+left untouched.
+
+
+## Measurement provenance
+
+The `*-routing.json` campaign is the latest measured implementation: checked
+paged dictionaries, strong Bloom coverage proofs, checked absence preflight and
+lazy path materialization. It uses 65,284 files (1,311,592,608 source bytes), with
+manifest `adb3052a8f1cd3f0d7b49c7dff2cc5ad36b831da7a4c238c2f899db85ae57854`.
+Raw reports retain binary and harness hashes. These are pinned existing tool
+builds, not a survey of the latest releases of every indexing product.
+
+`*-paged.json`, `search-modes.json`, and `default-regression.json` retain the
+intermediate paged-only experiment. Files named `*-final.json` are an intermediate
+strong-Bloom-proof campaign, despite their filenames. During that campaign's
+competitor comparison, the test-pollution investigation read real app-data
+metadata; its broad-query samples may have interference. Retain them as history,
+but use the subsequent `competitors-routing.json` campaign for comparisons.
+Absolute medians across separate campaigns are not controlled causal comparisons.
+
+The experiment exchanges additional publication work and storage for lower
+standalone query validation cost. Resident API timings measure requests against
+already loaded readers; they cannot be compared directly to another tool's
+standalone process. Small sample counts do not establish tail-latency guarantees,
+and this single warm corpus does not establish a universal ranking.
+
+
+## Latest paired results
+
+Standalone files-only medians in milliseconds (21 paired samples):
+
+| Pattern | Previous strict binary | Current experimental |
+| --- | ---: | ---: |
+| `auditNonexistentSymbol94283` | 32.26 | 10.48 |
+| `folio_wait_bit_common` | 34.14 | 17.29 |
+| `struct file_operations` | 41.90 | 25.40 |
+| `return` | 108.40 | 91.81 |
+| `return.*0` | 116.85 | 100.71 |
+| `(?i)return.*0` | 162.54 | 146.67 |
+| `^static.*void` | 110.95 | 94.57 |
+
+[Raw query samples](queries-routing.json). Comparison below uses 11 randomized
+samples per tool/query, identical corpus coverage and exact ripgrep result sets.
+All entries include complete process time; source packs are enabled for FXI.
+
+| Pattern | FXI experimental packed | tgrep | csearch | Zoekt | ripgrep |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `auditNonexistentSymbol94283` | 10.86 | 17.82 | 4.47 | 56.69 | 3186.04 |
+| `folio_wait_bit_common` | 17.40 | 19.06 | 16.08 | 57.52 | 3161.89 |
+| `return.*0` | 105.17 | 2183.16 | 1789.34 | 291.14 | 3231.39 |
+
+[Full seven-mode comparison and samples](competitors-routing.json), including
+FXI full legacy and experimental lean without source-pack verification. csearch
+retains the standalone absent/selective lead. FXI wins the measured broad query
+with packs; that is a workload-specific result, not universal superiority.
+
+Three paired build medians: 3.539 → 3.940 s. Index bytes: 941,356,724 → 975,298,224. Median peak RSS: 154.4 → 173.1 MiB.
+[Raw build samples](builds-routing.json) retain all samples.
+
+Durable one-file incremental publication medians (five pairs, 4,096 source files,
+source packs disabled):
+
+| Inherited segments | Previous (ms) | Experimental (ms) |
+| --- | ---: | ---: |
+| 1 | 38.86 | 41.24 |
+| 64 | 240.27 | 256.23 |
+| 256 | 857.25 | 930.54 |
+
+[Raw publication samples](publication-routing.json). Additional generation-wide
+evidence issuance remains an update cost; this experiment does not solve it.
+
+Repeated requests (31 randomized samples per mode):
+
+| Pattern | Current standalone CLI | Current resident CLI | Current resident API | Previous resident API |
+| --- | ---: | ---: | ---: | ---: |
+| `auditNonexistentSymbol94283` | 9.720 | 4.395 | 0.372 | 0.358 |
+| `folio_wait_bit_common` | 16.790 | 4.958 | 0.776 | 0.729 |
+| `struct file_operations` | 25.785 | 9.596 | 4.799 | 4.759 |
+
+[All modes and first-request observations](search-modes-routing.json). Startup
+avoidance is the main gain; the experiment does not demonstrate a material
+improvement to already resident query execution.
+
+Default strict reader on the same legacy index (31 pairs):
+
+| Pattern | Previous (ms) | Current (ms) |
+| --- | ---: | ---: |
+| `auditNonexistentSymbol94283` | 32.72 | 30.50 |
+| `folio_wait_bit_common` | 34.42 | 32.50 |
+| `return.*0` | 118.20 | 116.86 |
+
+[Default-mode samples](default-routing.json). The experimental headline numbers
+require rebuilding and searching with `FXI_QUERY_LOCAL=1`; they are not the
+default product performance.
