@@ -145,7 +145,7 @@ fn write_certificate(index: &Path) -> Result<()> {
 /// Deliberately narrower than general regex planning: an entire exact literal
 /// (possibly captured), with no assertions, alternatives, nullable surroundings,
 /// case-folded characters, newline semantics, or additional query filters.
-fn exact_literal(query: &Query) -> Option<Vec<u8>> {
+pub(super) fn exact_literal(query: &Query) -> Option<Vec<u8>> {
     if query.options.case_insensitive || query.filters.has_any() {
         return None;
     }

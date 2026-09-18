@@ -911,11 +911,65 @@ impl DocumentLookup {
     }
 }
 
+/// Validated UTF-8 path bytes; individual owned paths are materialized only
+/// when a query needs them. Sharing retains immutable mappings across snapshots.
+struct MappedPaths {
+    data: MappedBytes,
+    ranges: Vec<std::ops::Range<usize>>,
+    decoded: Vec<OnceLock<PathBuf>>,
+}
+
+impl MappedPaths {
+    fn open(index: &Path) -> Result<Self> {
+        let data = MappedBytes::open(&index.join("paths.bin"))?;
+        let ranges = validate_path_ranges(&data)?;
+        let decoded = (0..ranges.len()).map(|_| OnceLock::new()).collect();
+        Ok(Self {
+            data,
+            ranges,
+            decoded,
+        })
+    }
+    fn get(&self, index: usize) -> Option<&PathBuf> {
+        let range = self.ranges.get(index)?;
+        Some(self.decoded[index].get_or_init(|| {
+            PathBuf::from(
+                std::str::from_utf8(&self.data[range.clone()]).expect("validated UTF-8 path"),
+            )
+        }))
+    }
+}
+
+enum PathStorage {
+    #[cfg(test)]
+    Owned(Vec<PathBuf>),
+    Mapped(MappedPaths),
+}
+impl PathStorage {
+    fn len(&self) -> usize {
+        match self {
+            #[cfg(test)]
+            Self::Owned(paths) => paths.len(),
+            Self::Mapped(paths) => paths.ranges.len(),
+        }
+    }
+    fn get(&self, index: usize) -> Option<&PathBuf> {
+        match self {
+            #[cfg(test)]
+            Self::Owned(paths) => paths.get(index),
+            Self::Mapped(paths) => paths.get(index),
+        }
+    }
+    fn iter(&self) -> impl Iterator<Item = &PathBuf> {
+        (0..self.len()).map(|index| self.get(index).expect("path index within bounds"))
+    }
+}
+
 /// The durable path table is immutable and shared by its memory snapshots.
 /// Only paths first introduced by a memory delta need cloning on the next one.
 #[derive(Clone)]
 struct PathTable {
-    base: Arc<Vec<PathBuf>>,
+    base: Arc<PathStorage>,
     base_lookup: Arc<OnceLock<BasePathLookup>>,
     appended: Vec<PathBuf>,
 }
@@ -927,12 +981,21 @@ struct BasePathLookup {
 }
 
 impl PathTable {
+    #[cfg(test)]
     fn new(paths: Vec<PathBuf>) -> Self {
         Self {
-            base: Arc::new(paths),
+            base: Arc::new(PathStorage::Owned(paths)),
             base_lookup: Arc::new(OnceLock::new()),
             appended: Vec::new(),
         }
+    }
+
+    fn open(index: &Path) -> Result<Self> {
+        Ok(Self {
+            base: Arc::new(PathStorage::Mapped(MappedPaths::open(index)?)),
+            base_lookup: Arc::new(OnceLock::new()),
+            appended: Vec::new(),
+        })
     }
 
     #[inline]
@@ -1092,10 +1155,10 @@ impl IndexReader {
         // metadata in parallel, then validate independent segments in parallel.
         let (documents, paths) = rayon::join(
             || read_documents_version(&index_path, meta.version),
-            || read_paths(&index_path),
+            || PathTable::open(&index_path),
         );
         let documents = documents?;
-        let paths = PathTable::new(paths?);
+        let paths = paths?;
         let tables_loaded = std::time::Instant::now();
         validate_document_references(&meta, &documents, paths.len())?;
         let allowed = segment_document_ids(&documents);
@@ -2106,8 +2169,19 @@ fn read_documents_version(index_path: &Path, version: u32) -> Result<Vec<Documen
 /// the immutable mapping. No temporary per-path byte buffers are required.
 pub fn read_paths(index_path: &Path) -> Result<Vec<PathBuf>> {
     let data = MappedBytes::open(&index_path.join("paths.bin"))?;
+    validate_path_ranges(&data)?
+        .into_iter()
+        .map(|range| {
+            Ok(PathBuf::from(
+                std::str::from_utf8(&data[range]).expect("validated UTF-8 path"),
+            ))
+        })
+        .collect()
+}
+
+fn validate_path_ranges(data: &[u8]) -> Result<Vec<std::ops::Range<usize>>> {
     anyhow::ensure!(data.len() >= 4, "Truncated path header");
-    let count = le32(&data) as usize;
+    let count = le32(data) as usize;
     anyhow::ensure!(
         count <= (data.len() - 4) / 4,
         "Index count exceeds file bounds"
@@ -2121,7 +2195,7 @@ pub fn read_paths(index_path: &Path) -> Result<Vec<PathBuf>> {
         let bytes = remaining[4..]
             .get(..len)
             .context("Path length exceeds file bounds")?;
-        let path = PathBuf::from(std::str::from_utf8(bytes).context("Invalid path UTF-8")?);
+        let path = Path::new(std::str::from_utf8(bytes).context("Invalid path UTF-8")?);
         anyhow::ensure!(
             !path.as_os_str().is_empty()
                 && path
@@ -2129,7 +2203,7 @@ pub fn read_paths(index_path: &Path) -> Result<Vec<PathBuf>> {
                     .all(|component| matches!(component, std::path::Component::Normal(_))),
             "Unsafe index path"
         );
-        paths.push(path);
+        paths.push(cursor + 4..cursor + 4 + len);
         cursor += 4 + len;
     }
     anyhow::ensure!(cursor == data.len(), "Trailing path bytes");
@@ -2315,6 +2389,7 @@ pub(crate) fn write_query_local_checks(index_path: &Path) -> Result<()> {
     let paths = read_paths(index_path)?;
     validate_document_references(&meta, &documents, paths.len())?;
     let allowed = segment_document_ids(&documents);
+    let mut routing = Some(Vec::new());
     for id in meta
         .base_segment
         .into_iter()
@@ -2338,8 +2413,21 @@ pub(crate) fn write_query_local_checks(index_path: &Path) -> Result<()> {
             &segment.trigram_dict.data,
             segment.bloom_filter.as_ref(),
         )?;
+        if let Some(records) = &mut routing {
+            if let Some(record) = crate::index::query_local::routing_segment(
+                &path,
+                id,
+                &segment.trigram_dict.data,
+                &segment.trigram_postings,
+                segment.bloom_filter.as_ref(),
+            )? {
+                records.push(record);
+            } else {
+                routing = None;
+            }
+        }
     }
-    Ok(())
+    crate::index::query_local::write_routing_manifest(index_path, routing)
 }
 
 /// Establish exactly the core invariants required by a files-only gram query,
@@ -2496,6 +2584,57 @@ mod tests {
         let reader = open_checked_segment(dir.path(), true).unwrap();
         assert!(reader.bloom_filter.is_none());
         assert_eq!(reader.intersect_trigrams(&[1]).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn mapped_paths_validate_all_bytes_but_materialize_only_requested_names() {
+        let dir = TempDir::new().unwrap();
+        let names = ["src/a.rs", "nested/β.rs", "last.txt"];
+        let mut bytes = 3u32.to_le_bytes().to_vec();
+        for name in names {
+            bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+        }
+        let path = dir.path().join("paths.bin");
+        fs::write(&path, &bytes).unwrap();
+        let table = PathTable::open(dir.path()).unwrap();
+        let PathStorage::Mapped(mapped) = table.base.as_ref() else {
+            panic!("mapped table expected");
+        };
+        assert!(mapped.decoded.iter().all(|path| path.get().is_none()));
+        assert_eq!(table.get(1).unwrap(), Path::new(names[1]));
+        assert_eq!(
+            mapped
+                .decoded
+                .iter()
+                .filter(|path| path.get().is_some())
+                .count(),
+            1
+        );
+        assert!(std::ptr::eq(table.get(1).unwrap(), table.get(1).unwrap()));
+        assert!(table.get(usize::MAX).is_none());
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let snapshot = table.clone();
+                std::thread::spawn(move || snapshot.get(2).unwrap() as *const PathBuf as usize)
+            })
+            .collect();
+        let pointers: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert!(pointers.iter().all(|&pointer| pointer == pointers[0]));
+        assert_eq!(
+            table.iter().cloned().collect::<Vec<_>>(),
+            read_paths(dir.path()).unwrap()
+        );
+        drop(table);
+        bytes.push(0);
+        fs::write(path, bytes).unwrap();
+        assert!(
+            PathTable::open(dir.path()).is_err(),
+            "unused trailing damage must fail at open"
+        );
     }
 
     #[test]

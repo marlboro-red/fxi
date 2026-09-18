@@ -170,3 +170,61 @@ fn timestamp_preflight_cannot_bypass_damaged_query_local_evidence() {
     assert!(!result.status.success());
     assert!(result.stdout.is_empty());
 }
+
+#[test]
+fn invalid_optional_routing_manifest_falls_back_to_checked_search() {
+    let root = tempfile::tempdir().unwrap();
+    let indexes = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("source.rs"), "needle\n").unwrap();
+    success(run(root.path(), indexes.path(), true, &["index", "."]));
+    fn find(path: &Path) -> Option<std::path::PathBuf> {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().unwrap() == "query-routing.bin" {
+                return Some(path);
+            }
+            if path.is_dir()
+                && let Some(found) = find(&path)
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+    let manifest = find(indexes.path()).expect("checked routing evidence issued");
+    fs::write(&manifest, b"damaged").unwrap();
+    for exists in [true, false] {
+        if !exists {
+            fs::remove_file(&manifest).unwrap();
+        }
+        assert!(
+            records(run(
+                root.path(),
+                indexes.path(),
+                true,
+                &["-l", "re:/zzzAbsent123/", "-p", "."]
+            ))
+            .is_empty()
+        );
+        assert_eq!(
+            records(run(
+                root.path(),
+                indexes.path(),
+                true,
+                &["-l", "re:/needle/", "-p", "."]
+            ))
+            .len(),
+            1
+        );
+        assert!(
+            !run(
+                root.path(),
+                indexes.path(),
+                true,
+                &["-l", "re:/[/", "-p", "."]
+            )
+            .status
+            .success()
+        );
+    }
+}

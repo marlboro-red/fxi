@@ -337,3 +337,284 @@ pub(crate) fn write_bloom_proof(
     std::fs::write(path.join(BLOOM_PROOF), proof)?;
     Ok(())
 }
+
+const ROUTING_NAME: &str = "query-routing.bin";
+const ROUTING_MAGIC: &[u8; 8] = b"FXIROUT1";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct RoutingSegment {
+    id: super::types::SegmentId,
+    count: usize,
+    posting_len: usize,
+    root_hash: u64,
+    bloom_hash: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RoutingManifest {
+    epoch: u32,
+    meta_hash: u64,
+    docs_hash: u64,
+    paths_hash: u64,
+    segments: Vec<RoutingSegment>,
+}
+
+pub(crate) fn routing_segment(
+    path: &Path,
+    id: super::types::SegmentId,
+    dictionary: &[u8],
+    postings: &[u8],
+    bloom: Option<&crate::utils::BloomFilter>,
+) -> Result<Option<RoutingSegment>> {
+    let Some(bloom) = bloom else {
+        return Ok(None);
+    };
+    let count = u32_at(dictionary, 0) as usize;
+    let Some(checks) = PostingChecks::open(path, dictionary, postings.len(), count)? else {
+        return Ok(None);
+    };
+    if !checks.is_paged() || !checks.proves_bloom(path, bloom) {
+        return Ok(None);
+    }
+    Ok(Some(RoutingSegment {
+        id,
+        count,
+        posting_len: postings.len(),
+        root_hash: u64_at(&checks.bytes, 8),
+        bloom_hash: bloom_digest(bloom),
+    }))
+}
+
+/// Issued after strict validation of this complete generation's core evidence.
+pub(crate) fn write_routing_manifest(
+    index: &Path,
+    segments: Option<Vec<RoutingSegment>>,
+) -> Result<()> {
+    let Some(segments) = segments else {
+        return Ok(());
+    };
+    let manifest = RoutingManifest {
+        epoch: 1,
+        meta_hash: xxh3_64(&std::fs::read(index.join("meta.json"))?),
+        docs_hash: xxh3_64(&MappedBytes::open(&index.join("docs.bin"))?),
+        paths_hash: xxh3_64(&MappedBytes::open(&index.join("paths.bin"))?),
+        segments,
+    };
+    let payload = serde_json::to_vec(&manifest)?;
+    let mut bytes = ROUTING_MAGIC.to_vec();
+    bytes.extend_from_slice(&xxh3_64(&payload).to_le_bytes());
+    bytes.extend_from_slice(&payload);
+    std::fs::write(index.join(ROUTING_NAME), bytes)?;
+    Ok(())
+}
+
+/// Narrow, optional negative proof. Invalid or missing proof falls back to the
+/// ordinary checked reader; no proof failure is interpreted as an empty answer.
+#[allow(dead_code)] // CLI entry point; also compiled into the public library.
+pub(crate) fn preflight(
+    root: &Path,
+    query: &crate::query::Query,
+) -> Option<super::types::IndexMeta> {
+    if !requested() {
+        return None;
+    }
+    let literal = super::negative_routing::exact_literal(query)?;
+    let (index, _lease) = super::generation::pin(root).ok()?;
+    prove_absent(&index, &literal).ok().flatten()
+}
+
+fn prove_absent(index: &Path, literal: &[u8]) -> Result<Option<super::types::IndexMeta>> {
+    let bytes = std::fs::read(index.join(ROUTING_NAME))?;
+    anyhow::ensure!(
+        bytes.len() >= 16 && &bytes[..8] == ROUTING_MAGIC,
+        "Invalid checked routing header"
+    );
+    anyhow::ensure!(
+        u64_at(&bytes, 8) == xxh3_64(&bytes[16..]),
+        "Checked routing checksum mismatch"
+    );
+    let manifest: RoutingManifest = serde_json::from_slice(&bytes[16..])?;
+    anyhow::ensure!(manifest.epoch == 1, "Unsupported checked routing epoch");
+    let metadata = std::fs::read(index.join("meta.json"))?;
+    anyhow::ensure!(
+        xxh3_64(&metadata) == manifest.meta_hash,
+        "Checked routing metadata changed"
+    );
+    let meta: super::types::IndexMeta = serde_json::from_slice(&metadata)?;
+    meta.validate_format()?;
+    let ids: Vec<_> = meta
+        .base_segment
+        .into_iter()
+        .chain(meta.delta_segments.iter().copied())
+        .collect();
+    anyhow::ensure!(
+        ids.iter()
+            .copied()
+            .eq(manifest.segments.iter().map(|s| s.id)),
+        "Checked routing segment coverage mismatch"
+    );
+    let stop: std::collections::HashSet<_> = meta.stop_grams.iter().copied().collect();
+    let mut grams: Vec<_> = literal
+        .windows(3)
+        .map(|g| super::types::bytes_to_trigram(g[0], g[1], g[2]))
+        .filter(|g| !stop.contains(g))
+        .collect();
+    grams.sort_unstable();
+    grams.dedup();
+    if grams.is_empty() {
+        return Ok(None);
+    }
+    for segment in manifest.segments {
+        let path = index
+            .join("segments")
+            .join(format!("seg_{:04}", segment.id));
+        let checks = MappedBytes::open(&path.join(NAME))?;
+        anyhow::ensure!(
+            checks.len() >= 8 && &checks[..8] == PAGED_MAGIC,
+            "Checked routing requires paged grams"
+        );
+        // Hash/validate the actual root, not just its stored digest field.
+        let checks = PostingChecks::open_paged(checks, segment.posting_len, segment.count)?;
+        anyhow::ensure!(
+            u64_at(&checks.bytes, 8) == segment.root_hash,
+            "Checked routing root changed"
+        );
+        let bloom = super::reader::read_bloom_filter(&path)?;
+        anyhow::ensure!(
+            bloom_digest(&bloom) == segment.bloom_hash,
+            "Checked routing Bloom changed"
+        );
+        if bloom.might_contain_all(&grams) {
+            return Ok(None);
+        }
+    }
+    anyhow::ensure!(
+        xxh3_64(&MappedBytes::open(&index.join("docs.bin"))?) == manifest.docs_hash,
+        "Checked routing documents changed"
+    );
+    anyhow::ensure!(
+        xxh3_64(&MappedBytes::open(&index.join("paths.bin"))?) == manifest.paths_hash,
+        "Checked routing paths changed"
+    );
+    Ok(Some(meta))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        for (name, text) in [
+            ("one.rs", "needle alpha\n"),
+            ("two.rs", "needle beta\n"),
+            ("three.rs", "gamma\n"),
+        ] {
+            fs::write(root.path().join(name), text).unwrap();
+        }
+        crate::index::build::build_index_with_options(root.path(), true, true, Some(1)).unwrap();
+        let index = crate::utils::get_index_dir(root.path()).unwrap();
+        super::super::reader::write_query_local_checks(&index).unwrap();
+        (root, index)
+    }
+    fn rewrite_manifest(index: &Path, edit: impl FnOnce(&mut RoutingManifest)) {
+        let bytes = fs::read(index.join(ROUTING_NAME)).unwrap();
+        let mut manifest: RoutingManifest = serde_json::from_slice(&bytes[16..]).unwrap();
+        edit(&mut manifest);
+        let payload = serde_json::to_vec(&manifest).unwrap();
+        let mut bytes = ROUTING_MAGIC.to_vec();
+        bytes.extend_from_slice(&xxh3_64(&payload).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        fs::write(index.join(ROUTING_NAME), bytes).unwrap();
+    }
+
+    #[test]
+    fn checked_absence_handles_an_empty_generation() {
+        let index = tempfile::tempdir().unwrap();
+        let meta = super::super::types::IndexMeta::default();
+        fs::write(
+            index.path().join("meta.json"),
+            serde_json::to_vec(&meta).unwrap(),
+        )
+        .unwrap();
+        for name in ["docs.bin", "paths.bin"] {
+            fs::write(index.path().join(name), 0u32.to_le_bytes()).unwrap();
+        }
+        super::super::reader::write_query_local_checks(index.path()).unwrap();
+        assert!(prove_absent(index.path(), b"absent").unwrap().is_some());
+    }
+
+    #[test]
+    fn checked_absence_binds_metadata_and_complete_segment_coverage() {
+        let (_root, index) = fixture();
+        let absent = b"zzzDefinitelyAbsent94283";
+        assert!(prove_absent(&index, absent).unwrap().is_some());
+        assert!(prove_absent(&index, b"needle").unwrap().is_none());
+        assert!(prove_absent(&index, b"ab").unwrap().is_none());
+        let original = fs::read(index.join(ROUTING_NAME)).unwrap();
+        for mutation in 0..5 {
+            rewrite_manifest(&index, |manifest| match mutation {
+                0 => {
+                    manifest.segments.pop();
+                }
+                1 => manifest.segments.swap(0, 1),
+                2 => manifest.segments[1].id = manifest.segments[0].id,
+                3 => manifest.epoch += 1,
+                _ => manifest.epoch = 0,
+            });
+            assert!(prove_absent(&index, absent).is_err(), "mutation {mutation}");
+            fs::write(index.join(ROUTING_NAME), &original).unwrap();
+        }
+        for file in ["meta.json", "docs.bin", "paths.bin"] {
+            let path = index.join(file);
+            let original = fs::read(&path).unwrap();
+            let mut changed = original.clone();
+            if file == "meta.json" {
+                changed.push(b' ');
+            } else {
+                *changed.last_mut().unwrap() ^= 1;
+            }
+            fs::write(&path, changed).unwrap();
+            assert!(prove_absent(&index, absent).is_err(), "{file}");
+            fs::write(path, original).unwrap();
+        }
+        // Stop-gram-only queries cannot establish absence.
+        let metadata = index.join("meta.json");
+        let mut meta: super::super::types::IndexMeta =
+            serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
+        meta.stop_grams = absent
+            .windows(3)
+            .map(|g| super::super::types::bytes_to_trigram(g[0], g[1], g[2]))
+            .collect();
+        fs::write(&metadata, serde_json::to_vec(&meta).unwrap()).unwrap();
+        rewrite_manifest(&index, |manifest| {
+            manifest.meta_hash = xxh3_64(&fs::read(&metadata).unwrap())
+        });
+        assert!(prove_absent(&index, absent).unwrap().is_none());
+    }
+
+    #[test]
+    fn checked_absence_hashes_actual_roots_and_blooms() {
+        let (_root, index) = fixture();
+        let absent = b"zzzDefinitelyAbsent94283";
+        let bytes = fs::read(index.join(ROUTING_NAME)).unwrap();
+        let manifest: RoutingManifest = serde_json::from_slice(&bytes[16..]).unwrap();
+        let segment = index
+            .join("segments")
+            .join(format!("seg_{:04}", manifest.segments[0].id));
+        for name in [NAME, "bloom.bin"] {
+            let path = segment.join(name);
+            let original = fs::read(&path).unwrap();
+            let mut changed = original.clone();
+            let at = if name == NAME { ROOT_HEADER } else { 11 };
+            changed[at] ^= 1;
+            fs::write(&path, changed).unwrap();
+            assert!(prove_absent(&index, absent).is_err(), "{name}");
+            fs::write(&path, &original[..original.len() - 1]).unwrap();
+            assert!(prove_absent(&index, absent).is_err(), "truncated {name}");
+            fs::write(path, original).unwrap();
+        }
+        assert!(prove_absent(&index, absent).unwrap().is_some());
+    }
+}

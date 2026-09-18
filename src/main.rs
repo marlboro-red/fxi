@@ -570,7 +570,8 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
             resolved_root: Some(root.clone()),
         };
         if opts.files_with_matches
-            && let Some(meta) = index::negative_routing::preflight(&root, &parsed)
+            && let Some(meta) = index::query_local::preflight(&root, &parsed)
+                .or_else(|| index::negative_routing::preflight(&root, &parsed))
         {
             warn_if_stale_metadata(&meta, &root);
             response.file_paths = Some(Vec::new());
