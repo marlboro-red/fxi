@@ -61,11 +61,11 @@ jobs:
           FXI_DIFF_FAILURE_DIR: ${{ github.workspace }}/target/differential-failures
         run: cargo test --all-targets
 
-      - name: Install CLI and daemon helper (macOS)
+      - name: Install single CLI (macOS)
         if: runner.os == 'macOS'
         run: cargo install --path . --locked --debug --root "${{ runner.temp }}/fxi-install"
 
-      - name: Exercise installed daemon helper (macOS)
+      - name: Exercise installed single-binary daemon (macOS)
         if: runner.os == 'macOS'
         env:
           FXI_INSTALL_BIN: ${{ runner.temp }}/fxi-install/bin
@@ -77,7 +77,8 @@ jobs:
           import tempfile
 
           binaries = Path(os.environ["FXI_INSTALL_BIN"])
-          subprocess.run([binaries / "fxid", "--version"], check=True)
+          assert sorted(path.name for path in binaries.iterdir()) == ["fxi"]
+          subprocess.run([binaries / "fxi", "--version"], check=True)
           with tempfile.TemporaryDirectory(prefix="fxi-install-", dir="/tmp") as temporary:
               base = Path(temporary)
               root = base / "repository"

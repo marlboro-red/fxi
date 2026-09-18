@@ -22,14 +22,6 @@ fxi -p /path/to/project 'error'
 For a local build without installation, run `cargo build --release` and use
 `target/release/fxi` (`target/release/fxi.exe` on Windows).
 
-On macOS, install or copy both `fxi` and `fxid` into the same directory. The
-`fxid` helper runs the daemon and native file watcher; `fxi daemon` still manages
-it. `cargo install --path .` and `cargo build --release --bins` produce both.
-Building or copying only `fxi` supports direct searches but cannot start a daemon
-on macOS. Before using `cargo run -- daemon ...` from a clean checkout on macOS,
-run `cargo build --bins` once to build the debug helper too. Linux and Windows
-continue to run the daemon inside `fxi`.
-
 `fxi index` detects the codebase root, usually the nearest Git root. A watched
 daemon loads roots as they are searched; starting it does not immediately load
 and watch every index on disk. Without the daemon, searches read the saved index.

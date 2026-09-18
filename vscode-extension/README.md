@@ -12,9 +12,6 @@ Build/install FXI from the repository root first:
 cargo install --path .
 ```
 
-On macOS, keep the installed `fxi` and `fxid` executables together. The extension
-continues to use `fxi`; that command locates its sibling daemon helper.
-
 Then package the extension:
 
 ```sh

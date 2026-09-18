@@ -57,7 +57,8 @@ def main():
         'binaries': {variant: {name: {
             'path': str(binary.parent / name),
             'sha256': hashlib.sha256((binary.parent / name).read_bytes()).hexdigest()
-        } for name in ['fxi', 'fxid']} for variant, binary in binaries.items()},
+        } for name in ['fxi', 'fxid'] if (binary.parent / name).is_file()}
+                     for variant, binary in binaries.items()},
         'samples': {'before': [], 'after': []},
     }
 

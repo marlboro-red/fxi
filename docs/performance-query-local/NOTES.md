@@ -444,7 +444,13 @@ Synthetic publication medians (five paired samples, 4,096 files):
 does not establish publication cost on the 1.3 GB Linux corpus.
 
 
-## macOS daemon-helper experiment
+## macOS daemon-helper experiment — reverted
+
+**This packaging experiment was reverted.** FXI again ships one executable on
+all supported platforms. The roughly one-millisecond gain did not justify the
+larger combined package, sibling-version dependency and platform-specific
+installation behavior. The measurements below are retained as historical evidence;
+they do not describe current packaging.
 
 The CLI now keeps daemon implementation and native FSEvents frameworks in a
 sibling `fxid` executable. `fxi daemon` remains the public interface; foreground

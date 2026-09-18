@@ -21,7 +21,6 @@ pub struct IndexLock {
 
 impl IndexLock {
     /// Attempt a mutation without blocking other roots' watcher updates.
-    #[cfg_attr(target_os = "macos", allow(dead_code))] // Used by the separate daemon executable.
     pub(crate) fn try_acquire(root: &Path) -> Result<Option<IndexLock>> {
         let lock_path = get_index_container(root)?.with_extension("lock");
         if let Some(parent) = lock_path.parent() {

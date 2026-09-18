@@ -9,7 +9,6 @@ repository = "https://github.com/marlboro-red/fxi"
 keywords = ["search", "code-search", "index", "grep", "trigram"]
 categories = ["command-line-utilities", "development-tools", "text-processing"]
 rust-version = "1.88"
-default-run = "fxi"
 
 [lib]
 name = "fxi"
@@ -18,10 +17,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "fxi"
 path = "src/main.rs"
-
-[[bin]]
-name = "fxid"
-path = "src/bin/fxid.rs"
 
 [dependencies]
 # Core
