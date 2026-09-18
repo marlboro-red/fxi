@@ -313,8 +313,20 @@ fn missing_root(root: &Path) -> Result<bool> {
     let mut prefix = PathBuf::new();
     for component in root.components() {
         prefix.push(component.as_os_str());
+        // A Windows drive/UNC prefix is not a filesystem path until its
+        // following root separator is appended (notably canonical \\?\ paths).
+        if matches!(component, Component::Prefix(_)) {
+            continue;
+        }
         match fs::symlink_metadata(&prefix) {
             Ok(metadata) if metadata.file_type().is_symlink() => return Ok(false),
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(std::io::Error::new(
+                    ErrorKind::NotADirectory,
+                    "Recorded source ancestor is not a directory",
+                )
+                .into());
+            }
             Ok(_) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(true),
             Err(error) => return Err(error).context("Cannot inspect source root ancestor"),
@@ -657,6 +669,18 @@ mod tests {
             fs::remove_file(container.join("lease")).unwrap();
             (root, container)
         }
+    }
+
+    #[test]
+    fn canonical_missing_root_requires_directory_ancestors() {
+        let fixture = Fixture::new();
+        // canonicalize supplies a verbatim drive prefix on Windows. Walk the
+        // complete root, never query the drive prefix as a standalone path.
+        assert!(missing_root(&fixture.base.join("absent/child")).unwrap());
+        assert!(!missing_root(&fixture.base).unwrap());
+        let file = fixture.base.join("file");
+        fs::write(&file, "not a directory").unwrap();
+        assert!(missing_root(&file.join("child")).is_err());
     }
 
     #[test]
