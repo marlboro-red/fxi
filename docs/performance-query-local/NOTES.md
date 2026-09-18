@@ -785,3 +785,33 @@ successful/failed neighbors, and repeated validation with caching disabled.
 All reported timing used frozen distinct release binaries, no compilation,
 paused/resumed watch daemon, and exact source-oracle checks. Publication used a
 private source copy and verified its manifest before and after the probe.
+
+
+## Refreshed single-executable comparison after cache changes
+
+The [current pinned-tool comparison](competitors-cache.json) benchmarks the frozen
+`d963590` single executable. Eleven randomized measured samples plus warm-up,
+65,284-file coverage checks, exact result sets, and before/after corpus manifests
+use the same source snapshot and prebuilt competitor indexes as earlier rounds.
+These are warm-filesystem, unlimited files-only searches on this Mac; the tools
+remain pinned versions, not a claim about latest releases or every workload.
+
+| Pattern | FXI checked packed | tgrep | csearch | Zoekt | ripgrep |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Absent identifier | 5.61 | 18.03 | 4.34 | 58.18 | 2997.39 |
+| Selective identifier | 12.37 | 19.62 | 16.17 | 59.02 | 2970.30 |
+| `return.*0` | 101.92 | 2221.26 | 1820.63 | 295.36 | 3127.56 |
+
+All values are median milliseconds. **Csearch wins absence**, by about 1.27 ms
+(FXI takes 29% more time).
+FXI leads the selective and broad cases, but its best numbers still require the
+experimental checked policy and compressed source packs. In this same campaign,
+FXI's checked lean index with packed reads disabled takes 657.29 ms for the broad
+query, losing to Zoekt; the legacy full-index fallback takes 681.32 ms. Neither
+this table nor the cache changes establishes overall/default-mode dominance.
+
+A [direct five-pair comparison of both cache changes](memory-cache-combined.json)
+against `7c6445e` confirms median selective-workload daemon footprint
+**15.6 → 12.6 MiB (19% lower)**. This corroborates the two staged measurements;
+query latency remains broadly unchanged. Both implementations passed full-suite,
+Clippy and Rust 1.88 checks (1,074 then 1,080 test executions, respectively).
