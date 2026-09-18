@@ -80,7 +80,7 @@ filters correctly derive from their own captured bytes; that is essential.
 but can miss new matches excluded by old candidate postings. A negative result
 is not necessarily an exhaustive answer about the current filesystem. Direct
 readers can also lag the watched daemon's visible snapshot.
-[Current semantics](../SEMANTICS.md#freshness-and-updates).
+[Current semantics](../SEMANTICS.md#freshness).
 
 **Proposed direction:** capture each accepted file revision once and derive its
 postings, optional byte/block evidence and optional packed bytes from that
