@@ -3,6 +3,42 @@ use fxi::query::{QueryExecutor, parse_query};
 use std::collections::BTreeSet;
 use std::fs;
 
+#[test]
+fn empty_insensitive_phrase_does_not_invent_a_line_after_final_newline() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, text) in [
+        ("lf.txt", "alpha\n"),
+        ("crlf.txt", "alpha\r\n"),
+        ("none.txt", "alpha"),
+    ] {
+        fs::write(dir.path().join(name), text).unwrap();
+    }
+    build_index_with_progress(dir.path(), true, true).unwrap();
+    let reader = IndexReader::open(dir.path()).unwrap();
+    let executor = QueryExecutor::new(&reader);
+    for insensitive in [false, true] {
+        let mut query = parse_query("\"\"");
+        query.options.case_insensitive = insensitive;
+        let hits = executor.execute_with_content(&query, 1, 1).unwrap();
+        assert_eq!(hits.len(), 3);
+        for hit in hits {
+            assert_eq!(hit.line_number, 1);
+            assert_eq!(hit.line_content, "alpha");
+            assert_eq!((hit.match_start, hit.match_end), (0, 0));
+            assert!(hit.context_before.is_empty() && hit.context_after.is_empty());
+        }
+        assert!(
+            executor
+                .execute_match_counts(&query, 0)
+                .unwrap()
+                .iter()
+                .all(|(_, count)| *count == 1)
+        );
+    }
+    drop(reader);
+    fxi::utils::remove_index(dir.path()).unwrap();
+}
+
 fn check_files(query: &str, expected: &[&str]) {
     let dir = tempfile::tempdir().unwrap();
     for (name, content) in [

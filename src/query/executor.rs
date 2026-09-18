@@ -1774,6 +1774,17 @@ impl<'a> QueryExecutor<'a> {
 
         let mut matches = Vec::new();
 
+        // Empty literals match each source line, not every byte boundary. The
+        // whole-file ASCII finder also visits EOF, which would invent a line
+        // after a terminal newline and disagree with regex/count verification.
+        if needle.is_empty() {
+            return content
+                .lines()
+                .enumerate()
+                .map(|(i, line)| ((i + 1) as u32, line.to_owned(), 0, 0))
+                .collect();
+        }
+
         if case_sensitive {
             // Case-sensitive: search directly on original bytes
             let finder = memmem::Finder::new(needle.as_bytes());
