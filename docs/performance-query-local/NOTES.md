@@ -32,7 +32,7 @@ accessed page and complete posting is checksummed before decoding, including
 before an intersection can stop early. Count, ordering and document membership
 are validated on access unless the complete content-bound generation certificate
 authorizes reuse of publication's validation, as described below. Successful checks are cached within that immutable
-reader using one byte per posting plus small page state; failures remain errors.
+reader using one bit per posting plus small page state; failures remain errors.
 Missing sidecars use the legacy eager path; malformed roots fail at open and
 malformed dependent pages fail on use. Public eager opening and compaction
 validate every page and posting, including checksums when evidence exists.
@@ -747,3 +747,41 @@ Every timed query matches the independent source scan. Frozen copied binaries
 were used with no compilation during the reported runs, and the watch daemon
 was paused/resumed. An accidentally premature run started before the release
 build finished; it was discarded in full and is not included in these reports.
+
+
+## Compact successful-posting validation caches
+
+Baseline `95d9731`, after the paged path cache. Successful posting checks now use
+atomic bitmap words rather than one atomic byte per posting. Strict scans and
+routing publication allocate no posting-success cache: they do not reuse it.
+The actual posting count remains separate, so padding in the final bitmap word
+cannot authorize an out-of-range posting. Atomic OR retains concurrent adjacent
+successes, and failures never set a bit. Integrity checks and on-disk formats are
+unchanged, including complete payload hashing before certified reuse.
+
+[31 paired experimental searches](queries-posting-cache.json):
+
+| Pattern | Before (ms) | Bitmap cache (ms) |
+| --- | ---: | ---: |
+| Absent identifier | 4.291 | 4.297 |
+| Selective identifier | 11.317 | 11.222 |
+| `struct file_operations` | 19.982 | 19.733 |
+| `return.*0` | 96.370 | 95.649 |
+
+[Default legacy-index controls](default-posting-cache.json) remain close to
+baseline. A [strict scan of the checked index](strict-checked-posting-cache.json)
+measures selective search at 38.006 → 37.911 ms. The [seven-pair one-file Linux
+publication check](publication-posting-cache.json) measures 420.684 → 416.801 ms.
+None of these small differences establishes a substantial latency improvement.
+
+The [five-pair resident check](memory-posting-cache.json) measures physical
+footprint **13.7 → 12.6 MiB (8% lower)**. This is a measured resident reduction,
+not an inference from the eightfold reduction in logical cache storage: demand
+paging and allocator behavior mean those ratios differ.
+
+New tests cover both checked-dictionary formats, empty and 63/64/65/513-entry
+boundaries, exact-count rejection beyond the final bitmap word, concurrent
+successful/failed neighbors, and repeated validation with caching disabled.
+All reported timing used frozen distinct release binaries, no compilation,
+paused/resumed watch daemon, and exact source-oracle checks. Publication used a
+private source copy and verified its manifest before and after the probe.

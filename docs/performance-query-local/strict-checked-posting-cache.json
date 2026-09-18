@@ -1,0 +1,114 @@
+{
+  "harness_sha256": "8d3b8f90edea816bf5c19243c5fde68c42660ec34a586e990807c462472f443a",
+  "candidate_indexes": null,
+  "rayon_threads": {
+    "before": null,
+    "after": null
+  },
+  "search_parallelism": {
+    "before": null,
+    "after": null
+  },
+  "corpus": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "indexes": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-build-comparison-1pjosre6/2-after",
+  "mode": "direct",
+  "output_mode": "files",
+  "query_syntax": "regex",
+  "candidate_query_local": false,
+  "baseline_query_local": false,
+  "generation_routing": {
+    "before": false,
+    "after": false
+  },
+  "binaries": {
+    "before": {
+      "path": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-path-cache-candidate-ny_2bevr/fxi",
+      "sha256": "e1d2144e749bd91a9d7a36ecdca6205a83241ac084ded43a51e687d922d8421c"
+    },
+    "after": {
+      "path": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-posting-cache-candidate-4q8y2crq/fxi",
+      "sha256": "96af701a480faccea458819e4b27c4b4226e1b44150055151c9e61d563c13f33"
+    }
+  },
+  "rows": [
+    {
+      "query": "folio_wait_bit_common",
+      "pattern": "folio_wait_bit_common",
+      "files": 1,
+      "tools": {
+        "before": {
+          "median_ms": 38.005625,
+          "samples_ms": [
+            38.369542,
+            37.722333,
+            37.890375,
+            38.191958,
+            37.817834,
+            38.645542,
+            38.008125,
+            38.976417,
+            37.566208,
+            38.900792,
+            38.924334,
+            38.412167,
+            38.048541,
+            37.420625,
+            39.507791,
+            37.607,
+            37.930333,
+            37.730916,
+            37.934291,
+            37.695167,
+            37.701375,
+            38.802791,
+            38.132208,
+            38.075083,
+            37.976083,
+            37.512291,
+            38.005625,
+            37.784416,
+            38.526041,
+            37.82725,
+            38.741416
+          ]
+        },
+        "after": {
+          "median_ms": 37.911167,
+          "samples_ms": [
+            37.882125,
+            37.297792,
+            37.383375,
+            36.968667,
+            38.511209,
+            37.911167,
+            38.0945,
+            38.064459,
+            38.220625,
+            38.2825,
+            37.693667,
+            37.25775,
+            37.770875,
+            37.102833,
+            37.838167,
+            38.151375,
+            37.493166,
+            37.575458,
+            37.451834,
+            38.220458,
+            37.618666,
+            38.032375,
+            38.001292,
+            38.09175,
+            37.477541,
+            39.199333,
+            37.615708,
+            38.286833,
+            38.688833,
+            38.153625,
+            38.63725
+          ]
+        }
+      }
+    }
+  ]
+}

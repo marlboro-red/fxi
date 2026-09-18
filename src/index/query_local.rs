@@ -6,7 +6,7 @@
 use super::reader::MappedBytes;
 use anyhow::{Context, Result};
 use std::path::Path;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use xxhash_rust::xxh3::xxh3_64;
 
 const NAME: &str = "grams.checks";
@@ -40,9 +40,15 @@ pub(crate) struct PostingChecks {
     bytes: MappedBytes,
     hashes_offset: usize,
     pages: Option<Vec<Page>>,
+    count: usize,
     // Only successful checks are cached. Invalid payloads stay errors; concurrent
     // first readers may duplicate validation rather than synchronizing a lock.
-    validated: Vec<AtomicU8>,
+    // Strict scans and routing publication never reuse this cache, so omit it.
+    validated: Option<Vec<AtomicU64>>,
+}
+
+fn success_cache(count: usize, enabled: bool) -> Option<Vec<AtomicU64>> {
+    enabled.then(|| (0..count.div_ceil(64)).map(|_| AtomicU64::new(0)).collect())
 }
 
 // Validate routing evidence without allocating per-posting or page cache state.
@@ -84,6 +90,7 @@ impl PostingChecks {
         dictionary: &[u8],
         posting_len: usize,
         count: usize,
+        cache_successes: bool,
     ) -> Result<Option<Self>> {
         let name = path.join(NAME);
         let bytes = match MappedBytes::open(&name) {
@@ -98,7 +105,7 @@ impl PostingChecks {
             Err(error) => return Err(error),
         };
         if bytes.len() >= 8 && &bytes[..8] == PAGED_MAGIC {
-            return Self::open_paged(bytes, posting_len, count).map(Some);
+            return Self::open_paged(bytes, posting_len, count, cache_successes).map(Some);
         }
         anyhow::ensure!(
             bytes.len() >= HEADER && &bytes[..8] == MAGIC,
@@ -127,11 +134,17 @@ impl PostingChecks {
             bytes,
             hashes_offset: HEADER,
             pages: None,
-            validated: (0..count).map(|_| AtomicU8::new(0)).collect(),
+            count,
+            validated: success_cache(count, cache_successes),
         }))
     }
 
-    fn open_paged(bytes: MappedBytes, posting_len: usize, count: usize) -> Result<Self> {
+    fn open_paged(
+        bytes: MappedBytes,
+        posting_len: usize,
+        count: usize,
+        cache_successes: bool,
+    ) -> Result<Self> {
         let root_end = checked_root(&bytes, posting_len, count)?;
         let pages = bytes[ROOT_HEADER..root_end]
             .as_chunks::<PAGE_RECORD>()
@@ -149,7 +162,8 @@ impl PostingChecks {
             bytes,
             hashes_offset: root_end,
             pages: Some(pages),
-            validated: (0..count).map(|_| AtomicU8::new(0)).collect(),
+            count,
+            validated: success_cache(count, cache_successes),
         })
     }
 
@@ -165,7 +179,7 @@ impl PostingChecks {
     ) -> Result<std::ops::Range<usize>> {
         let page = &self.pages.as_ref().expect("paged checks")[page_index];
         let start = page_index * PAGE_ENTRIES;
-        let end = (start + PAGE_ENTRIES).min(self.validated.len());
+        let end = (start + PAGE_ENTRIES).min(self.count);
         if page.validated.load(Ordering::Acquire) != 0 {
             return Ok(start..end);
         }
@@ -211,7 +225,7 @@ impl PostingChecks {
         posting_len: usize,
     ) -> Result<std::ops::Range<usize>> {
         let Some(pages) = &self.pages else {
-            return Ok(0..self.validated.len());
+            return Ok(0..self.count);
         };
         let index = pages.partition_point(|page| page.last < gram);
         if index == pages.len() || gram < pages[index].first {
@@ -236,14 +250,14 @@ impl PostingChecks {
         frequency: u32,
         validator: &crate::utils::encoding::DocumentPostingsValidator<'_>,
     ) -> Result<()> {
-        if self.validated[index].load(Ordering::Acquire) != 0 {
+        if self.was_validated(index)? {
             return Ok(());
         }
         let at = self.hashes_offset + index * 8;
         let expected = u64::from_le_bytes(self.bytes[at..at + 8].try_into().unwrap());
         anyhow::ensure!(xxh3_64(bytes) == expected, "Gram posting checksum mismatch");
         validator.validate(bytes, frequency)?;
-        self.validated[index].store(1, Ordering::Release);
+        self.mark_validated(index);
         Ok(())
     }
 
@@ -256,6 +270,9 @@ impl PostingChecks {
         bytes: &[u8],
         certificate: &CertifiedSegment,
     ) -> Result<()> {
+        // Check against the exact count, including the padded final cache word,
+        // before indexing either the page directory or its posting hashes.
+        anyhow::ensure!(index < self.count, "Gram posting index out of bounds");
         anyhow::ensure!(
             self.pages.is_some() && u64_at(&self.bytes, 8) == certificate.root_hash,
             "Gram validation certificate root mismatch"
@@ -267,13 +284,28 @@ impl PostingChecks {
                 != 0,
             "Gram validation requires a checked dictionary/hash page"
         );
-        if self.validated[index].load(Ordering::Acquire) != 0 {
+        if self.was_validated(index)? {
             return Ok(());
         }
         let expected = u64_at(&self.bytes, self.hashes_offset + index * 8);
         anyhow::ensure!(xxh3_64(bytes) == expected, "Gram posting checksum mismatch");
-        self.validated[index].store(1, Ordering::Release);
+        self.mark_validated(index);
         Ok(())
+    }
+
+    fn was_validated(&self, index: usize) -> Result<bool> {
+        anyhow::ensure!(index < self.count, "Gram posting index out of bounds");
+        Ok(self.validated.as_ref().is_some_and(|words| {
+            words[index / 64].load(Ordering::Acquire) & (1u64 << (index % 64)) != 0
+        }))
+    }
+
+    fn mark_validated(&self, index: usize) {
+        if let Some(words) = &self.validated {
+            // Successful checks of adjacent postings may race on the same word;
+            // atomic OR retains every success without marking a failed neighbor.
+            words[index / 64].fetch_or(1u64 << (index % 64), Ordering::Release);
+        }
     }
 }
 
@@ -480,7 +512,7 @@ impl CertifiedGeneration {
         // its count/length to the opened dictionary and posting mappings.
         (checks.is_paged()
             && segment.root_hash == u64_at(&checks.bytes, 8)
-            && segment.count == checks.validated.len()
+            && segment.count == checks.count
             && segment.posting_len as u64 == u64_at(&checks.bytes, 16))
         .then_some(CertifiedSegment {
             root_hash: segment.root_hash,
@@ -499,7 +531,7 @@ pub(crate) fn routing_segment(
         return Ok(None);
     };
     let count = u32_at(dictionary, 0) as usize;
-    let Some(checks) = PostingChecks::open(path, dictionary, postings.len(), count)? else {
+    let Some(checks) = PostingChecks::open(path, dictionary, postings.len(), count, false)? else {
         return Ok(None);
     };
     if !checks.is_paged() || !checks.proves_bloom(path, bloom) {
@@ -666,6 +698,104 @@ fn prove_absent(index: &Path, literal: &[u8]) -> Result<Option<super::types::Ind
 mod tests {
     use super::*;
     use std::fs;
+
+    fn posting_checks_fixture(
+        count: usize,
+        cache: bool,
+        paged: bool,
+    ) -> (tempfile::TempDir, PostingChecks) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut dictionary = (count as u32).to_le_bytes().to_vec();
+        for gram in 0..count {
+            dictionary.extend_from_slice(&(gram as u32).to_le_bytes());
+            dictionary.extend_from_slice(&0u64.to_le_bytes());
+            dictionary.extend_from_slice(&1u32.to_le_bytes());
+            dictionary.extend_from_slice(&1u32.to_le_bytes());
+        }
+        if paged {
+            write(directory.path(), &dictionary, &[1]).unwrap();
+        } else {
+            let mut bytes = MAGIC.to_vec();
+            bytes.extend_from_slice(&0u64.to_le_bytes());
+            bytes.extend_from_slice(&xxh3_64(&dictionary).to_le_bytes());
+            bytes.extend_from_slice(&1u64.to_le_bytes());
+            bytes.extend_from_slice(&(count as u64).to_le_bytes());
+            for _ in 0..count {
+                bytes.extend_from_slice(&xxh3_64(&[1]).to_le_bytes());
+            }
+            let checksum = xxh3_64(&bytes[16..]);
+            bytes[8..16].copy_from_slice(&checksum.to_le_bytes());
+            fs::write(directory.path().join(NAME), bytes).unwrap();
+        }
+        let checks = PostingChecks::open(directory.path(), &dictionary, 1, count, cache)
+            .unwrap()
+            .unwrap();
+        checks.validate_directory(&dictionary, 1).unwrap();
+        (directory, checks)
+    }
+
+    #[test]
+    fn posting_success_cache_checks_word_boundaries_and_exact_count_in_both_formats() {
+        let allowed = [1].into_iter().collect();
+        let validator = crate::utils::encoding::DocumentPostingsValidator::new(&allowed);
+        for paged in [false, true] {
+            for count in [0usize, 1, 63, 64, 65, 513] {
+                let (_directory, checks) = posting_checks_fixture(count, true, paged);
+                for index in 0..count {
+                    assert!(checks.validate(index, &[2], 1, &validator).is_err());
+                    assert!(checks.validate(index, &[1], 2, &validator).is_err());
+                    assert!(!checks.was_validated(index).unwrap());
+                    checks.validate(index, &[1], 1, &validator).unwrap();
+                    assert!(checks.was_validated(index).unwrap());
+                }
+                for index in [count, count.saturating_add(63), usize::MAX] {
+                    assert!(checks.validate(index, &[1], 1, &validator).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_posting_successes_do_not_cache_failed_neighbors() {
+        let (_directory, checks) = posting_checks_fixture(65, true, true);
+        let allowed = [1].into_iter().collect();
+        let validator = crate::utils::encoding::DocumentPostingsValidator::new(&allowed);
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                let checks = &checks;
+                let validator = &validator;
+                scope.spawn(move || {
+                    for index in (worker..65).step_by(8) {
+                        if index != 31 {
+                            checks.validate(index, &[1], 1, validator).unwrap();
+                        }
+                        assert!(checks.validate(31, &[2], 1, validator).is_err());
+                    }
+                });
+            }
+        });
+        for index in 0..65 {
+            assert_eq!(checks.was_validated(index).unwrap(), index != 31);
+        }
+        assert!(checks.validate(31, &[2], 1, &validator).is_err());
+        checks.validate(31, &[1], 1, &validator).unwrap();
+    }
+
+    #[test]
+    fn uncached_posting_checks_revalidate_every_call() {
+        let allowed = [1].into_iter().collect();
+        let validator = crate::utils::encoding::DocumentPostingsValidator::new(&allowed);
+        for paged in [false, true] {
+            let (_directory, checks) = posting_checks_fixture(65, false, paged);
+            assert!(checks.validated.is_none());
+            for index in 0..65 {
+                checks.validate(index, &[1], 1, &validator).unwrap();
+                assert!(!checks.was_validated(index).unwrap());
+                assert!(checks.validate(index, &[2], 1, &validator).is_err());
+                assert!(checks.validate(index, &[1], 2, &validator).is_err());
+            }
+        }
+    }
 
     fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
         let root = tempfile::tempdir().unwrap();

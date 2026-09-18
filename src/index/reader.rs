@@ -442,6 +442,7 @@ impl SegmentReader {
             &trigram_dict.data,
             trigram_postings.len(),
             trigram_dict.count,
+            query_local,
         )?;
         let lazy = query_local && gram_checks.is_some();
         let certified_grams = if lazy {
