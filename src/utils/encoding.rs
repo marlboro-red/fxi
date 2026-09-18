@@ -364,6 +364,9 @@ pub(crate) fn validate_document_postings(
         .min()
         .zip(allowed.max())
         .filter(|&(first, last)| u64::from(last) - u64::from(first) + 1 == allowed.len());
+    if let Some((first, last)) = contiguous {
+        return validate_contiguous_document_postings(bytes, expected_count, first, last);
+    }
     let mut cursor = 0;
     let mut previous = 0u32;
     let mut count = 0usize;
@@ -374,14 +377,69 @@ pub(crate) fn validate_document_postings(
         previous = previous
             .checked_add(delta)
             .ok_or_else(|| anyhow::anyhow!("Document posting overflow"))?;
-        let exists = contiguous.map_or_else(
-            || allowed.contains(previous),
-            |(first, last)| previous >= first && previous <= last,
+        anyhow::ensure!(
+            allowed.contains(previous),
+            "Posting references an unknown segment document"
         );
-        anyhow::ensure!(exists, "Posting references an unknown segment document");
         cursor += consumed;
         count += 1;
     }
+    anyhow::ensure!(
+        count == expected_count as usize,
+        "Posting frequency does not match payload"
+    );
+    Ok(())
+}
+
+fn validate_contiguous_document_postings(
+    bytes: &[u8],
+    expected_count: u32,
+    first_allowed: u32,
+    last_allowed: u32,
+) -> anyhow::Result<()> {
+    let mut cursor = 0;
+    let mut previous = 0u32;
+    let mut first_document = None;
+    let mut count = 0usize;
+    while cursor < bytes.len() {
+        if bytes.len() - cursor >= 8 {
+            let word = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
+            const HIGH: u64 = 0x8080_8080_8080_8080;
+            if word & HIGH == 0 {
+                // Eight complete one-byte varints. Detect a zero byte before
+                // batching: strictly positive deltas prove strict ID order.
+                let zero = word.wrapping_sub(0x0101_0101_0101_0101) & !word & HIGH;
+                anyhow::ensure!(zero == 0, "Unsorted or duplicate document postings");
+                first_document.get_or_insert((word & 0xff) as u32);
+                // Sum without byte-lane overflow (the total can exceed 255).
+                let pairs = (word & 0x00ff_00ff_00ff_00ff) + ((word >> 8) & 0x00ff_00ff_00ff_00ff);
+                let halves =
+                    (pairs & 0x0000_ffff_0000_ffff) + ((pairs >> 16) & 0x0000_ffff_0000_ffff);
+                let sum = halves as u32 + (halves >> 32) as u32;
+                previous = previous
+                    .checked_add(sum)
+                    .ok_or_else(|| anyhow::anyhow!("Document posting overflow"))?;
+                cursor += 8;
+                count += 8;
+                continue;
+            }
+        }
+        let (delta, consumed) = decode_varint(&bytes[cursor..])
+            .ok_or_else(|| anyhow::anyhow!("Malformed document posting"))?;
+        anyhow::ensure!(delta > 0, "Unsorted or duplicate document postings");
+        previous = previous
+            .checked_add(delta)
+            .ok_or_else(|| anyhow::anyhow!("Document posting overflow"))?;
+        first_document.get_or_insert(previous);
+        cursor += consumed;
+        count += 1;
+    }
+    // Positive deltas and checked cumulative addition prove that every ID
+    // lies between the first and last, so interval membership needs two checks.
+    anyhow::ensure!(
+        first_document.is_none_or(|id| id >= first_allowed) && previous <= last_allowed,
+        "Posting references an unknown segment document"
+    );
     anyhow::ensure!(
         count == expected_count as usize,
         "Posting frequency does not match payload"
@@ -633,5 +691,124 @@ mod corruption_tests {
             decode_position_postings_filtered(&bytes, &filter),
             vec![(1, vec![])]
         );
+    }
+}
+
+#[cfg(test)]
+mod document_validation_differential_tests {
+    use super::*;
+
+    fn reference(bytes: &[u8], expected: u32, allowed: &roaring::RoaringBitmap) -> bool {
+        let mut cursor = 0;
+        let mut previous = 0u32;
+        let mut count = 0u32;
+        while cursor < bytes.len() {
+            let Some((delta, consumed)) = decode_varint(&bytes[cursor..]) else {
+                return false;
+            };
+            if delta == 0 {
+                return false;
+            }
+            let Some(id) = previous.checked_add(delta) else {
+                return false;
+            };
+            if !allowed.contains(id) {
+                return false;
+            }
+            previous = id;
+            count += 1;
+            cursor += consumed;
+        }
+        count == expected
+    }
+    fn check(bytes: &[u8], expected: u32, allowed: &roaring::RoaringBitmap) {
+        assert_eq!(
+            validate_document_postings(bytes, expected, allowed).is_ok(),
+            reference(bytes, expected, allowed),
+            "bytes={bytes:?} expected={expected}"
+        );
+    }
+    #[test]
+    fn all_short_byte_streams_match_scalar_validation() {
+        for allowed in [
+            (1..=512).collect(),
+            [1, 3, 17, 128, 255, 256, 511].into_iter().collect(),
+        ] {
+            for expected in 0..=2 {
+                check(&[], expected, &allowed);
+                for first in 0..=255u8 {
+                    check(&[first], expected, &allowed);
+                    for second in 0..=255u8 {
+                        check(&[first, second], expected, &allowed);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn every_byte_lane_and_mixed_varint_stream_matches_scalar_validation() {
+        let allowed: roaring::RoaringBitmap = (1..=2048).collect();
+        for lane in 0..16 {
+            for value in 0..=255u8 {
+                let mut bytes = [1; 16];
+                bytes[lane] = value;
+                for len in [7, 8, 9, 15, 16] {
+                    check(&bytes[..len], len as u32, &allowed);
+                    check(&bytes[..len], len as u32 - 1, &allowed);
+                }
+            }
+        }
+        // Legal overlong varints remain accepted; a zero byte inside such a
+        // varint must not be mistaken for a zero one-byte delta.
+        for prefix in [vec![0x81, 0x00], vec![0x81, 0x80, 0x80, 0x80, 0x00]] {
+            for tail in 0..=24 {
+                let mut bytes = prefix.clone();
+                bytes.extend(std::iter::repeat_n(1, tail));
+                check(&bytes, 1 + tail as u32, &allowed);
+            }
+        }
+        let mut random = 0x1949_2026_0918u64;
+        for round in 0..4096 {
+            let mut bytes = Vec::new();
+            let count = round % 70;
+            for _ in 0..count {
+                random ^= random << 13;
+                random ^= random >> 7;
+                random ^= random << 17;
+                encode_varint((random % 130) as u32, &mut bytes);
+            }
+            check(&bytes, count as u32, &allowed);
+            if !bytes.is_empty() {
+                let last = bytes.len() - 1;
+                bytes[last] |= 0x80;
+                check(&bytes, count as u32, &allowed);
+            }
+        }
+    }
+    #[test]
+    fn interval_endpoints_full_byte_sums_and_overflow_match_scalar_validation() {
+        for bound in [1015, 1016, 2031, 2032] {
+            let allowed: roaring::RoaringBitmap = (1..=bound).collect();
+            check(&[127; 8], 8, &allowed);
+            check(&[127; 16], 16, &allowed);
+        }
+        for allowed in [
+            (100..=120).collect(),
+            (u32::MAX - 16..=u32::MAX).collect(),
+            roaring::RoaringBitmap::new(),
+        ] {
+            for start in [1, 99, 100, 119, 120, u32::MAX - 16, u32::MAX - 8, u32::MAX] {
+                for delta in [1u8, 63, 127] {
+                    let mut bytes = Vec::new();
+                    encode_varint(start, &mut bytes);
+                    bytes.extend_from_slice(&[delta; 16]);
+                    for len in 0..=16 {
+                        check(&bytes[..bytes.len() - 16 + len], 1 + len as u32, &allowed);
+                    }
+                }
+            }
+            check(&[], 0, &allowed);
+            check(&[127; 16], 16, &allowed);
+        }
     }
 }
