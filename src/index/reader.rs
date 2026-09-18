@@ -920,9 +920,10 @@ struct MappedPaths {
 }
 
 impl MappedPaths {
-    fn open(index: &Path) -> Result<Self> {
+    fn open(index: &Path, query_local: bool) -> Result<Self> {
         let data = MappedBytes::open(&index.join("paths.bin"))?;
-        let ranges = validate_path_ranges(&data)?;
+        let certified = query_local && crate::index::query_local::certifies_paths(index, &data);
+        let ranges = path_ranges(&data, !certified)?;
         let decoded = (0..ranges.len()).map(|_| OnceLock::new()).collect();
         Ok(Self {
             data,
@@ -990,9 +991,9 @@ impl PathTable {
         }
     }
 
-    fn open(index: &Path) -> Result<Self> {
+    fn open(index: &Path, query_local: bool) -> Result<Self> {
         Ok(Self {
-            base: Arc::new(PathStorage::Mapped(MappedPaths::open(index)?)),
+            base: Arc::new(PathStorage::Mapped(MappedPaths::open(index, query_local)?)),
             base_lookup: Arc::new(OnceLock::new()),
             appended: Vec::new(),
         })
@@ -1142,6 +1143,9 @@ impl IndexReader {
         let meta_file = File::open(&meta_path).context("Failed to open meta.json")?;
         let meta: IndexMeta = serde_json::from_reader(meta_file)?;
         meta.validate_format()?;
+        if !query_local {
+            crate::index::generation_routing::validate(&index_path)?;
+        }
 
         // Collect all segment IDs to load
         let mut segment_ids: Vec<SegmentId> = Vec::new();
@@ -1155,7 +1159,7 @@ impl IndexReader {
         // metadata in parallel, then validate independent segments in parallel.
         let (documents, paths) = rayon::join(
             || read_documents_version(&index_path, meta.version),
-            || PathTable::open(&index_path),
+            || PathTable::open(&index_path, query_local),
         );
         let documents = documents?;
         let paths = paths?;
@@ -2180,6 +2184,10 @@ pub fn read_paths(index_path: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn validate_path_ranges(data: &[u8]) -> Result<Vec<std::ops::Range<usize>>> {
+    path_ranges(data, true)
+}
+
+fn path_ranges(data: &[u8], validate_content: bool) -> Result<Vec<std::ops::Range<usize>>> {
     anyhow::ensure!(data.len() >= 4, "Truncated path header");
     let count = le32(data) as usize;
     anyhow::ensure!(
@@ -2195,14 +2203,16 @@ fn validate_path_ranges(data: &[u8]) -> Result<Vec<std::ops::Range<usize>>> {
         let bytes = remaining[4..]
             .get(..len)
             .context("Path length exceeds file bounds")?;
-        let path = Path::new(std::str::from_utf8(bytes).context("Invalid path UTF-8")?);
-        anyhow::ensure!(
-            !path.as_os_str().is_empty()
-                && path
-                    .components()
-                    .all(|component| matches!(component, std::path::Component::Normal(_))),
-            "Unsafe index path"
-        );
+        if validate_content {
+            let path = Path::new(std::str::from_utf8(bytes).context("Invalid path UTF-8")?);
+            anyhow::ensure!(
+                !path.as_os_str().is_empty()
+                    && path
+                        .components()
+                        .all(|component| matches!(component, std::path::Component::Normal(_))),
+                "Unsafe index path"
+            );
+        }
         paths.push(cursor + 4..cursor + 4 + len);
         cursor += 4 + len;
     }
@@ -2390,11 +2400,15 @@ pub(crate) fn write_query_local_checks(index_path: &Path) -> Result<()> {
     validate_document_references(&meta, &documents, paths.len())?;
     let allowed = segment_document_ids(&documents);
     let mut routing = Some(Vec::new());
-    for id in meta
+    let ids: Vec<_> = meta
         .base_segment
         .into_iter()
         .chain(meta.delta_segments.iter().copied())
-    {
+        .collect();
+    let mut generation_routing = crate::index::generation_routing::requested()
+        .then(|| crate::index::generation_routing::Builder::new(&ids))
+        .transpose()?;
+    for id in ids {
         let path = index_path.join("segments").join(format!("seg_{id:04}"));
         let segment = SegmentReader::open(
             &path,
@@ -2403,6 +2417,9 @@ pub(crate) fn write_query_local_checks(index_path: &Path) -> Result<()> {
             false,
             allowed.get(&id).cloned().unwrap_or_default(),
         )?;
+        if let Some(builder) = &mut generation_routing {
+            builder.add(id, &segment.trigram_dict.data)?;
+        }
         crate::index::query_local::write(
             &path,
             &segment.trigram_dict.data,
@@ -2427,7 +2444,11 @@ pub(crate) fn write_query_local_checks(index_path: &Path) -> Result<()> {
             }
         }
     }
-    crate::index::query_local::write_routing_manifest(index_path, routing)
+    crate::index::query_local::write_routing_manifest(index_path, routing)?;
+    if let Some(builder) = generation_routing {
+        builder.write(index_path)?;
+    }
+    Ok(())
 }
 
 /// Establish exactly the core invariants required by a files-only gram query,
@@ -2587,6 +2608,20 @@ mod tests {
     }
 
     #[test]
+    fn mapped_paths_without_certificate_reject_unsafe_contents_in_both_policies() {
+        let dir = TempDir::new().unwrap();
+        for name in [b"../escape".as_slice(), b"", b"/absolute", b"bad\xff"] {
+            let mut bytes = 1u32.to_le_bytes().to_vec();
+            bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(name);
+            fs::write(dir.path().join("paths.bin"), bytes).unwrap();
+            for query_local in [false, true] {
+                assert!(PathTable::open(dir.path(), query_local).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn mapped_paths_validate_all_bytes_but_materialize_only_requested_names() {
         let dir = TempDir::new().unwrap();
         let names = ["src/a.rs", "nested/β.rs", "last.txt"];
@@ -2597,7 +2632,7 @@ mod tests {
         }
         let path = dir.path().join("paths.bin");
         fs::write(&path, &bytes).unwrap();
-        let table = PathTable::open(dir.path()).unwrap();
+        let table = PathTable::open(dir.path(), false).unwrap();
         let PathStorage::Mapped(mapped) = table.base.as_ref() else {
             panic!("mapped table expected");
         };
@@ -2632,7 +2667,7 @@ mod tests {
         bytes.push(0);
         fs::write(path, bytes).unwrap();
         assert!(
-            PathTable::open(dir.path()).is_err(),
+            PathTable::open(dir.path(), false).is_err(),
             "unused trailing damage must fail at open"
         );
     }

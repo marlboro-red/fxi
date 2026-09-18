@@ -420,6 +420,34 @@ pub(crate) fn write_routing_manifest(
     Ok(())
 }
 
+/// Reuse publication's path-content validation only for byte-identical paths.
+/// Missing/damaged evidence declines the optimization; callers validate normally.
+/// As with posting checks, this is accidental-corruption evidence, not issuer
+/// authentication. The publisher must have strictly validated the whole table.
+pub(crate) fn certifies_paths(index: &Path, paths: &[u8]) -> bool {
+    // Epoch 1 does not encode the publisher's path-component semantics. Unix
+    // path validation is also satisfied by Windows-safe relative paths, but the
+    // reverse is false (e.g. a Unix filename can contain a Windows drive prefix).
+    // Windows therefore retains its platform-specific content checks.
+    if cfg!(windows) {
+        return false;
+    }
+    (|| -> Result<bool> {
+        let bytes = std::fs::read(index.join(ROUTING_NAME))?;
+        anyhow::ensure!(
+            bytes.len() >= 16 && &bytes[..8] == ROUTING_MAGIC,
+            "Invalid routing header"
+        );
+        anyhow::ensure!(
+            u64_at(&bytes, 8) == xxh3_64(&bytes[16..]),
+            "Routing checksum mismatch"
+        );
+        let manifest: RoutingManifest = serde_json::from_slice(&bytes[16..])?;
+        Ok(manifest.epoch == 1 && manifest.paths_hash == xxh3_64(paths))
+    })()
+    .unwrap_or(false)
+}
+
 /// Narrow, optional negative proof. Invalid or missing proof falls back to the
 /// ordinary checked reader; no proof failure is interpreted as an empty answer.
 #[allow(dead_code)] // CLI entry point; also compiled into the public library.
@@ -545,6 +573,28 @@ mod tests {
         bytes.extend_from_slice(&xxh3_64(&payload).to_le_bytes());
         bytes.extend_from_slice(&payload);
         fs::write(index.join(ROUTING_NAME), bytes).unwrap();
+    }
+
+    #[test]
+    fn path_certificate_requires_unchanged_content_and_valid_evidence() {
+        let (_root, index) = fixture();
+        let paths = fs::read(index.join("paths.bin")).unwrap();
+        assert_eq!(certifies_paths(&index, &paths), !cfg!(windows));
+        for at in 0..paths.len() {
+            let mut changed = paths.clone();
+            changed[at] ^= 1;
+            assert!(!certifies_paths(&index, &changed));
+        }
+        let proof = fs::read(index.join(ROUTING_NAME)).unwrap();
+        for end in [0, 8, 15, proof.len() - 1] {
+            fs::write(index.join(ROUTING_NAME), &proof[..end]).unwrap();
+            assert!(!certifies_paths(&index, &paths));
+        }
+        fs::write(index.join(ROUTING_NAME), &proof).unwrap();
+        rewrite_manifest(&index, |manifest| manifest.epoch += 1);
+        assert!(!certifies_paths(&index, &paths));
+        fs::remove_file(index.join(ROUTING_NAME)).unwrap();
+        assert!(!certifies_paths(&index, &paths));
     }
 
     #[test]

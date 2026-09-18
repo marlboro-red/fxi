@@ -3,6 +3,15 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 fn run(root: &Path, indexes: &Path, enabled: bool, args: &[&str]) -> Output {
+    run_with_routing(root, indexes, enabled, false, args)
+}
+fn run_with_routing(
+    root: &Path,
+    indexes: &Path,
+    enabled: bool,
+    routing: bool,
+    args: &[&str],
+) -> Output {
     Command::new(env!("CARGO_BIN_EXE_fxi"))
         .args(args)
         .current_dir(root)
@@ -11,6 +20,7 @@ fn run(root: &Path, indexes: &Path, enabled: bool, args: &[&str]) -> Output {
         .env("FXI_SOCKET", indexes.join("unused.sock"))
         .env("XDG_RUNTIME_DIR", indexes)
         .env("FXI_QUERY_LOCAL", if enabled { "1" } else { "0" })
+        .env("FXI_GENERATION_ROUTING", if routing { "1" } else { "0" })
         .env("FXI_NEGATIVE_ROUTING", "0")
         .output()
         .unwrap()
@@ -228,5 +238,76 @@ fn invalid_optional_routing_manifest_falls_back_to_checked_search() {
             .status
             .success()
         );
+    }
+}
+
+#[test]
+fn generation_routes_match_strict_and_fall_back_after_damage_updates_and_compaction() {
+    for profile in ["lean", "full"] {
+        let root = tempfile::tempdir().unwrap();
+        let indexes = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("one.rs"), "rareNeedle alpha beta\n").unwrap();
+        fs::write(root.path().join("two.rs"), "other text K\n").unwrap();
+        let run = |args: &[&str]| run_with_routing(root.path(), indexes.path(), true, true, args);
+        success(run(&[
+            "index",
+            ".",
+            "--force",
+            "--profile",
+            profile,
+            "--chunk-size",
+            "1",
+        ]));
+        for step in 0..3 {
+            for query in [
+                "re:/rareNeedle/",
+                "re:/absentSymbol94283/",
+                "re:/alpha|other/",
+                "re:/(?i)rareneedle/",
+                "re:/rareNeedle/ ext:rs",
+                "alpha beta",
+            ] {
+                for mode in ["-l", "-c"] {
+                    let args = [mode, query, "-p", "."];
+                    assert_eq!(
+                        records(run(&args)),
+                        records(run_with_routing(
+                            root.path(),
+                            indexes.path(),
+                            false,
+                            false,
+                            &args
+                        )),
+                        "{profile} step{step} {query}"
+                    );
+                }
+            }
+            if step == 0 {
+                fs::write(root.path().join("two.rs"), "rareNeedle modified\n").unwrap();
+                fs::remove_file(root.path().join("one.rs")).unwrap();
+                success(run(&["index", "."]));
+            } else if step == 1 {
+                success(run(&["compact", "."]));
+            }
+        }
+        let container = fs::read_dir(indexes.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.join("CURRENT").is_file())
+            .unwrap();
+        let current = fs::read_to_string(container.join("CURRENT")).unwrap();
+        let index = container.join("generations").join(current.trim());
+        let route = index.join("generation-routing.bin");
+        assert!(route.is_file());
+        fs::write(&route, b"damaged").unwrap();
+        assert_eq!(records(run(&["-l", "re:/rareNeedle/", "-p", "."])).len(), 1);
+        assert!(records(run(&["-l", "re:/absentSymbol94283/", "-p", "."])).is_empty());
+        assert!(
+            !run(&["stats", "."]).status.success(),
+            "strict integrity check must reject damaged router"
+        );
+        fs::remove_file(route).unwrap();
+        assert_eq!(records(run(&["-l", "re:/rareNeedle/", "-p", "."])).len(), 1);
     }
 }
