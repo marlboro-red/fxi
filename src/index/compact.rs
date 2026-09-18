@@ -199,9 +199,11 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
         rejected_files: meta.rejected_files,
     };
     write_meta_atomic(&generation.path, &new_meta)?;
-    crate::index::source_pack::write_missing(
-        &generation.path,
-        &root,
+    crate::index::source_pack::merge_captured(
+        &index_path,
+        &new_segment_path,
+        validated.documents(),
+        &read_paths(&index_path)?,
         &remapping.valid_docs,
         &remapping.valid_paths,
         crate::index::source_pack::requested() || crate::index::source_pack::present(&index_path),

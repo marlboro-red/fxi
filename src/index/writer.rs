@@ -404,21 +404,23 @@ impl ChunkedIndexWriter {
         segment_id: SegmentId,
         processed_files: Vec<ProcessedFile>,
     ) -> Result<()> {
-        self.write_chunk_impl(segment_id, processed_files)
+        self.write_chunk_impl(segment_id, processed_files, None)
     }
 
     pub(crate) fn write_packed_chunk(
         &mut self,
         segment_id: SegmentId,
         processed_files: Vec<ProcessedFile<crate::utils::PackedTokens>>,
+        capture: Option<crate::index::source_pack::CaptureWriter>,
     ) -> Result<()> {
-        self.write_chunk_impl(segment_id, processed_files)
+        self.write_chunk_impl(segment_id, processed_files, capture)
     }
 
     fn write_chunk_impl<T: Into<crate::utils::PackedTokens>>(
         &mut self,
         segment_id: SegmentId,
         processed_files: Vec<ProcessedFile<T>>,
+        capture: Option<crate::index::source_pack::CaptureWriter>,
     ) -> Result<()> {
         if processed_files.is_empty() {
             return Ok(());
@@ -429,6 +431,7 @@ impl ChunkedIndexWriter {
         // Assign IDs and build documents synchronously (fast - just ID assignment)
         let mut assigned_files = Vec::with_capacity(processed_files.len());
 
+        let document_start = self.all_documents.len();
         for processed in processed_files {
             let doc_id = self.next_doc_id;
             self.next_doc_id = self
@@ -460,6 +463,17 @@ impl ChunkedIndexWriter {
             });
         }
 
+        if let Some(capture) = capture {
+            let directory = self
+                .index_path
+                .join("segments")
+                .join(format!("seg_{segment_id:04}"));
+            capture.finish(
+                &self.all_documents[document_start..],
+                &self.all_paths,
+                &directory,
+            )?;
+        }
         // Dispatch all heavy work to background thread
         if let Some(ref sender) = self.write_sender {
             let segment_name = format!("seg_{:04}", segment_id);
@@ -882,13 +896,6 @@ impl ChunkedIndexWriter {
 
         // Write metadata
         self.write_meta(&stop_grams)?;
-        crate::index::source_pack::write_missing(
-            &self.index_path,
-            &self.root_path,
-            &self.all_documents,
-            &self.all_paths,
-            crate::index::source_pack::requested(),
-        )?;
         self.generation.publish()?;
 
         Ok(())
@@ -1009,7 +1016,6 @@ impl ChunkedIndexWriter {
 pub struct DeltaSegmentWriter {
     generation: crate::index::generation::Generation,
     #[allow(dead_code)]
-    root_path: PathBuf,
     index_path: PathBuf,
     segment_id: SegmentId,
 
@@ -1079,7 +1085,6 @@ impl DeltaSegmentWriter {
 
         Ok(Self {
             generation,
-            root_path,
             index_path,
             segment_id,
             existing_documents,
@@ -1189,7 +1194,15 @@ impl DeltaSegmentWriter {
 
     /// Finalize the delta segment - write all data atomically.
     /// Returns the updated IndexMeta.
-    pub fn finalize(mut self, meta: &mut IndexMeta) -> Result<()> {
+    #[allow(dead_code)] // Public ingestion API; CLI supplies its captured source separately.
+    pub fn finalize(self, meta: &mut IndexMeta) -> Result<()> {
+        self.finalize_with_capture(meta, None)
+    }
+    pub(crate) fn finalize_with_capture(
+        mut self,
+        meta: &mut IndexMeta,
+        capture: Option<crate::index::source_pack::CaptureWriter>,
+    ) -> Result<()> {
         let trace = std::env::var_os("FXI_TRACE_UPDATES").is_some_and(|v| v == "1");
         let start = std::time::Instant::now();
         // Create segment directory if we have new documents
@@ -1255,14 +1268,19 @@ impl DeltaSegmentWriter {
 
         // Write meta.json atomically (commits the transaction)
         write_meta_atomic(&self.index_path, meta)?;
-        crate::index::source_pack::write_missing(
-            &self.index_path,
-            &self.root_path,
-            &all_documents,
-            &all_paths,
-            crate::index::source_pack::requested()
-                || crate::index::source_pack::present(&self.index_path),
-        )?;
+        if has_new_documents && let Some(capture) = capture {
+            let directory = self
+                .index_path
+                .join("segments")
+                .join(format!("seg_{:04}", self.segment_id));
+            capture.finish(
+                all_documents
+                    .iter()
+                    .filter(|doc| doc.segment_id == self.segment_id),
+                &all_paths,
+                &directory,
+            )?;
+        }
         let written = std::time::Instant::now();
         self.generation.publish()?;
         if trace {

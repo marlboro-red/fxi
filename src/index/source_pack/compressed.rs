@@ -1,18 +1,25 @@
 //! Experimental independently compressed source blocks. Filters describe the
 //! same captured source bytes, not the earlier tokenization snapshot.
 use super::{BLOCK_BYTES, DATA, TABLE, path_hash, stamp};
-use crate::index::types::{DocId, Document};
+use crate::index::types::DocId;
+#[cfg(test)]
+use crate::index::types::Document;
 use anyhow::{Result, ensure};
 use memmap2::Mmap;
+#[cfg(test)]
 use rayon::prelude::*;
+#[cfg(test)]
+use std::io::{BufWriter, Write};
 use std::{
     fs::{self, File},
-    io::{BufWriter, Read, Write},
-    path::{Path, PathBuf},
+    path::Path,
 };
+#[cfg(test)]
+use std::{io::Read, path::PathBuf};
 use xxhash_rust::xxh3::xxh3_64;
 
 pub(super) const MAGIC: &[u8; 8] = b"FXISRC03";
+pub(super) const BOUND_MAGIC: &[u8; 8] = b"FXISRC05";
 const WORDS: usize = 14;
 const RECORD: usize = WORDS * 8;
 // offset, stored length, raw length, raw checksum, then 2048 filter bits.
@@ -37,11 +44,12 @@ fn push_word(out: &mut Vec<u8>, n: u64) {
     out.extend_from_slice(&n.to_le_bytes());
 }
 
-struct Encoded {
-    record: [u64; WORDS],
-    descriptors: Vec<u8>,
-    payload: Vec<u8>,
+pub(super) struct Encoded {
+    pub record: [u64; WORDS],
+    pub descriptors: Vec<u8>,
+    pub payload: Vec<u8>,
 }
+#[cfg(test)]
 fn encode_document(root: &Path, doc: &Document, paths: &[PathBuf]) -> Option<Encoded> {
     let relative = paths.get(doc.path_id as usize)?;
     let Ok(mut file) = File::open(root.join(relative)) else {
@@ -64,7 +72,9 @@ fn encode_document(root: &Path, doc: &Document, paths: &[PathBuf]) -> Option<Enc
     {
         return None;
     }
-    let bytes = text.as_bytes();
+    Some(encode(relative, text.as_bytes(), before))
+}
+pub(super) fn encode(relative: &Path, bytes: &[u8], before: [u64; 7]) -> Encoded {
     let mut descriptors = Vec::new();
     let mut payload = Vec::new();
     for (number, block) in bytes.chunks(BLOCK_BYTES).enumerate() {
@@ -90,10 +100,10 @@ fn encode_document(root: &Path, doc: &Document, paths: &[PathBuf]) -> Option<Enc
     }
     let length = (descriptors.len() + payload.len()) as u64;
     let record = [
-        u64::from(doc.doc_id),
+        0,
         path_hash(relative),
         0,
-        text.len() as u64,
+        bytes.len() as u64,
         xxh3_64(bytes),
         before[0],
         before[1],
@@ -105,12 +115,13 @@ fn encode_document(root: &Path, doc: &Document, paths: &[PathBuf]) -> Option<Enc
         length,
         xxh3_64(&descriptors),
     ];
-    Some(Encoded {
+    Encoded {
         record,
         descriptors,
         payload,
-    })
+    }
 }
+#[cfg(test)]
 pub(super) fn write_segment(
     directory: &Path,
     root: &Path,
@@ -136,7 +147,12 @@ pub(super) fn write_segment(
         }
         let encoded: Vec<_> = remaining[..count]
             .par_iter()
-            .map(|doc| encode_document(root, doc, paths))
+            .map(|doc| {
+                encode_document(root, doc, paths).map(|mut entry| {
+                    entry.record[0] = u64::from(doc.doc_id);
+                    entry
+                })
+            })
             .collect();
         for mut entry in encoded.into_iter().flatten() {
             entry.record[2] = offset;
@@ -161,6 +177,7 @@ pub(super) fn write_segment(
     Ok(())
 }
 pub(crate) struct CompressedPack {
+    bound: bool,
     records: Vec<[u64; WORDS]>,
     data: Option<Mmap>,
 }
@@ -220,7 +237,7 @@ impl CompressedPack {
         ensure!(cfg!(unix), "source pack metadata validation requires Unix");
         let table = fs::read(directory.join(TABLE))?;
         ensure!(
-            table.len() >= 24 && &table[..8] == MAGIC,
+            table.len() >= 24 && (&table[..8] == MAGIC || &table[..8] == BOUND_MAGIC),
             "invalid compressed source header"
         );
         let count = word(&table[8..]).unwrap();
@@ -262,16 +279,25 @@ impl CompressedPack {
         } else {
             Some(unsafe { Mmap::map(&file)? })
         };
-        Ok(Self { records, data })
+        Ok(Self {
+            records,
+            data,
+            bound: &table[..8] == BOUND_MAGIC,
+        })
     }
     fn source(&self, id: DocId, relative: &Path, path: &Path) -> Option<Source<'_>> {
+        let source = self.stored_source(id, relative)?;
+        if stamp(&fs::metadata(path).ok()?)?.as_slice() != &source.record[5..12] {
+            return None;
+        }
+        Some(source)
+    }
+    fn stored_source(&self, id: DocId, relative: &Path) -> Option<Source<'_>> {
         let record = &self.records[self
             .records
             .binary_search_by_key(&u64::from(id), |r| r[0])
             .ok()?];
-        if record[1] != path_hash(relative)
-            || stamp(&fs::metadata(path).ok()?)?.as_slice() != &record[5..12]
-        {
+        if record[1] != path_hash(relative) {
             return None;
         }
         let start = usize::try_from(record[2]).ok()?;
@@ -298,6 +324,25 @@ impl CompressedPack {
     }
     pub(super) fn read(&self, id: DocId, relative: &Path, path: &Path) -> Option<String> {
         let source = self.source(id, relative, path)?;
+        Self::decode_source(source)
+    }
+    pub(super) fn captured(
+        &self,
+        id: DocId,
+        relative: &Path,
+        size: u64,
+    ) -> Option<(String, [u64; 7])> {
+        if !self.bound {
+            return None;
+        }
+        let source = self.stored_source(id, relative)?;
+        if source.record[3] != size {
+            return None;
+        }
+        let stamp = source.record[5..12].try_into().ok()?;
+        Some((Self::decode_source(source)?, stamp))
+    }
+    fn decode_source(source: Source<'_>) -> Option<String> {
         let mut result = Vec::new();
         let mut scratch = Vec::new();
         for n in 0..source.blocks() {

@@ -80,7 +80,7 @@ fn balance_chunks<T: Ord>(mut entries: Vec<(u64, T)>, max_files: usize) -> Vec<V
 /// Read from the same handle used for metadata, retaining owned bytes and
 /// enforcing the size limit even if the file grows after its metadata check.
 fn read_index_source(
-    file: File,
+    file: impl Read,
     expected_size: u64,
     max_size: u64,
 ) -> std::io::Result<Option<Vec<u8>>> {
@@ -95,6 +95,31 @@ fn read_index_source(
     file.take(max_size.saturating_add(1))
         .read_to_end(&mut content)?;
     Ok((!content.is_empty() && content.len() as u64 <= max_size).then_some(content))
+}
+
+/// Retain one owned capture and reject detectable writes during the read.
+/// Unix stamps also detect restored mtimes and inode metadata changes. Other
+/// platforms retain the existing size/mtime checks; packs remain Unix-only.
+fn read_stable_index_source(
+    mut file: File,
+    before: &fs::Metadata,
+    max_size: u64,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let content = read_index_source(&mut file, before.len(), max_size)?;
+    let after = file.metadata()?;
+    if before.len() != after.len()
+        || before.modified()? != after.modified()?
+        || crate::index::source_pack::stamp(before) != crate::index::source_pack::stamp(&after)
+        || content
+            .as_ref()
+            .is_some_and(|bytes| bytes.len() as u64 != before.len())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "Source changed during indexing capture",
+        ));
+    }
+    Ok(content)
 }
 
 /// Result of processing a single file (computed in parallel)
@@ -472,6 +497,13 @@ pub fn build_index_with_profile(
         let total_processed_clone = total_processed.clone();
         let rejected_files_clone = rejected_files.clone();
 
+        let source_capture = crate::index::source_pack::CaptureWriter::new(
+            &chunked_writer
+                .index_path()
+                .join("segments")
+                .join(format!("seg_{segment_id:04}")),
+            crate::index::source_pack::requested(),
+        )?;
         // Process chunk files in parallel
         let processed_files: Vec<ProcessedFile<crate::utils::PackedTokens>> = chunk
             .par_iter()
@@ -530,7 +562,7 @@ pub fn build_index_with_profile(
                 // Source files are mutable; own their bytes before validating
                 // UTF-8 or extracting tokens so external writes cannot change
                 // the memory behind those borrows.
-                let content = match read_index_source(file, file_size, max_file_size) {
+                let content = match read_stable_index_source(file, &metadata, max_file_size) {
                     Ok(Some(content)) => content,
                     Ok(None) => {
                         if let Some(ref pb) = pb_clone {
@@ -568,6 +600,18 @@ pub fn build_index_with_profile(
                         }
                     });
 
+                if result.is_some()
+                    && let Some(capture) = &source_capture
+                    && let Err(error) = capture.capture(
+                        rel_path,
+                        std::str::from_utf8(&content).expect("processed UTF-8"),
+                        &metadata,
+                    )
+                {
+                    eprintln!("Cannot capture {}: {error:#}", rel_path.display());
+                    error_count_clone.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
                 if result.is_some() {
                     total_processed_clone.fetch_add(1, Ordering::Relaxed);
                 } else {
@@ -603,7 +647,7 @@ pub fn build_index_with_profile(
         }
 
         // Write this chunk as a segment
-        chunked_writer.write_packed_chunk(segment_id, processed_files)?;
+        chunked_writer.write_packed_chunk(segment_id, processed_files, source_capture)?;
 
         // Memory freed here - processed_files dropped
     }
@@ -612,7 +656,7 @@ pub fn build_index_with_profile(
         return Err(SourceReadError {
             path: root.clone(),
             source: std::io::Error::other(format!(
-                "{} source files could not be read; previous index retained",
+                "{} source files could not be read or captured; previous index retained",
                 error_count.load(Ordering::Relaxed)
             )),
         }
@@ -1276,6 +1320,7 @@ fn process_file_for_update(
     rel_path: &Path,
     max_file_size: u64,
     profile: IndexProfile,
+    capture: Option<&crate::index::source_pack::CaptureWriter>,
 ) -> Result<Option<ProcessedFile>> {
     anyhow::ensure!(
         rel_path.to_str().is_some(),
@@ -1301,8 +1346,11 @@ fn process_file_for_update(
         .unwrap_or_default()
         .as_nanos()
         .min(u64::MAX as u128) as u64;
-    let content = read_index_source(file, metadata.len(), max_file_size).map_err(read_error)?;
-    Ok(content.and_then(|content| {
+    let content = read_stable_index_source(file, &metadata, max_file_size).map_err(read_error)?;
+    let Some(content) = content else {
+        return Ok(None);
+    };
+    let processed = {
         process_file_content_with(rel_path.to_path_buf(), &content, mtime, profile, |text| {
             if profile == IndexProfile::Full {
                 extract_tokens_and_positions(text)
@@ -1310,7 +1358,17 @@ fn process_file_for_update(
                 (Vec::new(), Vec::new())
             }
         })
-    }))
+    };
+    if processed.is_some()
+        && let Some(capture) = capture
+    {
+        capture.capture(
+            rel_path,
+            std::str::from_utf8(&content).expect("processed UTF-8"),
+            &metadata,
+        )?;
+    }
+    Ok(processed)
 }
 
 /// Perform incremental update by writing the diff as a delta segment:
@@ -1357,11 +1415,22 @@ fn perform_incremental_update_visible(
         .chain(diff.modified_files.iter().map(|(full, rel, _)| (full, rel)))
         .collect();
 
+    let source_capture = crate::index::source_pack::CaptureWriter::temporary(
+        root,
+        crate::index::source_pack::requested()
+            || crate::index::source_pack::present(&get_index_dir(root)?),
+    )?;
     let outcomes: Vec<Result<ProcessedFile, (PathBuf, u64)>> = to_index
         .par_iter()
         .map(|(full, rel)| {
             Ok(
-                match process_file_for_update(full, rel, config.max_file_size, meta.profile)? {
+                match process_file_for_update(
+                    full,
+                    rel,
+                    config.max_file_size,
+                    meta.profile,
+                    source_capture.as_ref(),
+                )? {
                     Some(p) => Ok(p),
                     None => {
                         // Rejected (binary sniff etc.): remember it with its
@@ -1446,14 +1515,14 @@ fn perform_incremental_update_visible(
         // Nothing indexable, but the rejected-file list may have grown (e.g.
         // newly seen binaries): persist it so the next scan skips them
         if meta.rejected_files != old_rejected_files {
-            writer.finalize(&mut meta)?;
+            writer.finalize_with_capture(&mut meta, source_capture)?;
         }
         println!("No indexable changes to apply.");
         return Ok(false);
     }
 
     // Commits segment -> docs.bin -> paths.bin -> meta.json atomically
-    writer.finalize(&mut meta)?;
+    writer.finalize_with_capture(&mut meta, source_capture)?;
     println!(
         "Wrote delta segment seg_{:04}: {} files indexed, {} tombstones",
         next_segment_id,
@@ -1503,6 +1572,148 @@ pub fn build_index_auto(start_path: &Path, force: bool, chunk_size: Option<usize
 #[cfg(test)]
 mod encoding_tests {
     use super::*;
+
+    #[test]
+    fn stable_capture_rejects_changes_since_metadata_observation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("a.txt");
+        fs::write(&path, "alpha needle\n").unwrap();
+        let file = File::open(&path).unwrap();
+        let before = file.metadata().unwrap();
+        fs::write(&path, "omega marker\n").unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_modified(before.modified().unwrap() + std::time::Duration::from_secs(2)),
+            )
+            .unwrap();
+        #[cfg(unix)]
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        let error = read_stable_index_source(file, &before, 1024).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn postings_and_packs_keep_one_capture_through_publication_and_compaction() {
+        use crate::index::source_pack::{CaptureWriter, SourcePack};
+        for compressed in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            fs::create_dir(root.join(".git")).unwrap();
+            let path = root.join("a.txt");
+            fs::write(&path, "alpha needle\n").unwrap();
+            let mut writer = ChunkedIndexWriter::new(
+                &root,
+                IndexConfig {
+                    profile: IndexProfile::Lean,
+                    ..IndexConfig::default()
+                },
+            )
+            .unwrap();
+            let directory = writer.index_path().join("segments/seg_0001");
+            let capture = CaptureWriter::with_compression(&directory, true, compressed)
+                .unwrap()
+                .unwrap();
+            let processed = process_file_for_update(
+                &path,
+                Path::new("a.txt"),
+                1024,
+                IndexProfile::Lean,
+                Some(&capture),
+            )
+            .unwrap()
+            .unwrap();
+            // Same-size replacement between extraction and publication must not
+            // become the pack associated with the earlier postings.
+            fs::write(&path, "omega marker\n").unwrap();
+            let processed = ProcessedFile {
+                rel_path: processed.rel_path,
+                mtime: processed.mtime,
+                size: processed.size,
+                language: processed.language,
+                flags: processed.flags,
+                trigrams: processed.trigrams,
+                tokens: processed.tokens.into(),
+                line_offsets: processed.line_offsets,
+                token_positions: processed.token_positions,
+            };
+            writer
+                .write_packed_chunk(1, vec![processed], Some(capture))
+                .unwrap();
+            writer.finalize().unwrap();
+            let reader = IndexReader::open(&root).unwrap();
+            let pack = SourcePack::open(&directory).unwrap();
+            assert_eq!(
+                pack.captured(1, Path::new("a.txt"), 13).unwrap().0,
+                "alpha needle\n"
+            );
+            assert!(pack.read(1, Path::new("a.txt"), &path).is_none());
+            assert!(
+                reader
+                    .get_trigram_docs(crate::index::types::bytes_to_trigram(b'a', b'l', b'p'))
+                    .contains(1)
+            );
+            assert!(
+                reader
+                    .get_trigram_docs(crate::index::types::bytes_to_trigram(b'o', b'm', b'e'))
+                    .is_empty()
+            );
+            drop((pack, reader, writer));
+
+            // A captured delta also must not reopen its file at finalization.
+            let base = IndexReader::open(&root).unwrap();
+            let mut meta = base.meta.clone();
+            let mut delta = crate::index::writer::DeltaSegmentWriter::new(&root, 2).unwrap();
+            let staged = crate::index::generation::Generation::new(&root).unwrap();
+            let capture =
+                CaptureWriter::with_compression(&staged.path.join("capture"), true, compressed)
+                    .unwrap()
+                    .unwrap();
+            let processed = process_file_for_update(
+                &path,
+                Path::new("a.txt"),
+                1024,
+                IndexProfile::Lean,
+                Some(&capture),
+            )
+            .unwrap()
+            .unwrap();
+            fs::write(&path, "sigma changed\n").unwrap();
+            delta.mark_tombstone(Path::new("a.txt"));
+            delta.add_file(processed).unwrap();
+            delta
+                .finalize_with_capture(&mut meta, Some(capture))
+                .unwrap();
+            drop((staged, base));
+            let generation = get_index_dir(&root).unwrap();
+            let pack = SourcePack::open(&generation.join("segments/seg_0002")).unwrap();
+            assert_eq!(
+                pack.captured(2, Path::new("a.txt"), 13).unwrap().0,
+                "omega marker\n"
+            );
+            assert!(pack.read(2, Path::new("a.txt"), &path).is_none());
+            drop(pack);
+            crate::index::compact::merge_segments(&root).unwrap();
+            let generation = get_index_dir(&root).unwrap();
+            let pack = SourcePack::open(&generation.join("segments/seg_0001")).unwrap();
+            assert_eq!(
+                pack.captured(1, Path::new("a.txt"), 13).unwrap().0,
+                "omega marker\n"
+            );
+            assert!(pack.read(1, Path::new("a.txt"), &path).is_none());
+            drop(pack);
+            crate::utils::remove_index(&root).unwrap();
+        }
+    }
 
     #[test]
     fn lean_preview_preserves_capabilities_and_searches_new_content() {

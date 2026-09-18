@@ -141,14 +141,14 @@ fn packed_cli_matches_live_files_after_edits_corruption_compaction_and_rebuild_c
 }
 
 #[test]
-fn delta_and_compaction_preserve_pinned_pack_bytes_and_repair_orphan_links() {
-    delta_and_compaction_preserve_pinned_pack_bytes_and_repair_orphan_links_case(false);
+fn delta_and_compaction_preserve_pinned_pack_bytes_and_leave_orphan_links() {
+    delta_and_compaction_preserve_pinned_pack_bytes_and_leave_orphan_links_case(false);
 }
 #[test]
-fn compressed_delta_and_compaction_preserve_pinned_pack_bytes_and_repair_orphan_links() {
-    delta_and_compaction_preserve_pinned_pack_bytes_and_repair_orphan_links_case(true);
+fn compressed_delta_and_compaction_preserve_pinned_pack_bytes_and_leave_orphan_links() {
+    delta_and_compaction_preserve_pinned_pack_bytes_and_leave_orphan_links_case(true);
 }
-fn delta_and_compaction_preserve_pinned_pack_bytes_and_repair_orphan_links_case(compression: bool) {
+fn delta_and_compaction_preserve_pinned_pack_bytes_and_leave_orphan_links_case(compression: bool) {
     let run =
         |root: &Path, indexes: &Path, args: &[&str]| run_codec(root, indexes, args, compression);
     use std::os::unix::fs::MetadataExt;
@@ -200,8 +200,8 @@ fn delta_and_compaction_preserve_pinned_pack_bytes_and_repair_orphan_links_case(
         .parent()
         .unwrap();
     // Simulate a missing accelerator table while an older reader still has its
-    // source bytes mapped. The inherited data link must be replaced, not opened
-    // with truncation, when the next generation reconstructs this table.
+    // source bytes mapped. Updates must leave this orphan unchanged, rather
+    // than recapture live bytes against the inherited segment's old postings.
     fs::remove_file(orphan.join("source.table")).unwrap();
     fs::write(
         root.path().join("a.txt"),
@@ -217,14 +217,14 @@ fn delta_and_compaction_preserve_pinned_pack_bytes_and_repair_orphan_links_case(
         serde_json::from_slice(&fs::read(delta.join("meta.json")).unwrap()).unwrap();
     assert_eq!(meta["tombstone_count"], 2);
     assert_eq!(meta["segment_count"], 4);
-    assert_eq!(files(&delta, "source.table").len(), 4);
+    assert_eq!(files(&delta, "source.table").len(), 3);
     for (old_path, bytes, map) in &snapshots {
         let inherited = delta.join(old_path.strip_prefix(&original).unwrap());
         assert_eq!(fs::read(old_path).unwrap(), *bytes);
         assert_eq!(&map[..], bytes);
         let same_inode =
             fs::metadata(old_path).unwrap().ino() == fs::metadata(inherited).unwrap().ino();
-        assert_eq!(same_inode, old_path.parent().unwrap() != orphan);
+        assert!(same_inode, "inherited source bytes must remain untouched");
     }
     let search = || {
         let output = run(
@@ -266,7 +266,7 @@ fn delta_and_compaction_preserve_pinned_pack_bytes_and_repair_orphan_links_case(
 }
 
 #[test]
-fn mixed_raw_and_compressed_generations_match_live_cli_modes() {
+fn legacy_raw_and_captured_compressed_generations_match_live_cli_modes() {
     let root = tempfile::tempdir().unwrap();
     let indexes = tempfile::tempdir().unwrap();
     for n in 0..130 {
@@ -286,6 +286,14 @@ fn mixed_raw_and_compressed_generations_match_live_cli_modes() {
         &["index", "--force", "."],
         false,
     );
+    // Legacy packs remain readable, but cannot establish posting provenance
+    // when compaction constructs a new revision-bound pack.
+    for path in files(indexes.path(), "source.table") {
+        let mut bytes = fs::read(&path).unwrap();
+        assert_eq!(&bytes[..8], b"FXISRC04");
+        bytes[..8].copy_from_slice(b"FXISRC02");
+        fs::write(path, bytes).unwrap();
+    }
     fs::write(
         root.path().join("new.txt"),
         format!("{}\nneedle suffix\n{}", "z".repeat(8190), "q".repeat(9000)),
@@ -297,7 +305,7 @@ fn mixed_raw_and_compressed_generations_match_live_cli_modes() {
         .map(|p| fs::read(p).unwrap()[..8].to_vec())
         .collect();
     assert!(headers.iter().any(|h| h == b"FXISRC02"));
-    assert!(headers.iter().any(|h| h == b"FXISRC03"));
+    assert!(headers.iter().any(|h| h == b"FXISRC05"));
     for args in [
         vec!["-l", "-F", "needle", "."],
         vec!["-l", "re:/need.e/", "-p", "."],

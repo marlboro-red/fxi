@@ -45,3 +45,34 @@ legacy version 1 remains readable. Readers validate the version/profile pair.
 This ensures pre-profile readers reject lean generations before interpreting
 missing evidence, rather than allowing old maintenance paths to lose the
 capability declaration. Explicit conversion to full rebuilds version 2 data.
+
+## Single-capture source packs
+
+Full builds and incremental processing now stream optional pack payloads from
+exactly the owned bytes used for gram/token extraction. Payloads are written
+into unpublished storage immediately; only per-file records and raw block hashes
+survive the worker. Delta staging holds a generation lease and is removed on
+failure or when a preview does not proceed to durable publication. Retained
+source/encoding memory scales with extraction workers and the file-size limit,
+not total corpus bytes. Existing posting buffers remain a separate memory cost.
+
+The indexing read checks metadata before and after reading. A detected size,
+mtime or Unix stamp change aborts the capture and preserves the published index.
+Unix stamps include device/inode and ctime; other platforms use size/mtime checks.
+This is not a filesystem snapshot or a guarantee of current membership after
+publication. Source can still change after capture, and live stamp checks remain
+required when reading packs.
+
+New raw/compressed pack headers (`FXISRC04`/`FXISRC05`) distinguish evidence built
+from the indexing capture. Legacy packs remain readable accelerators. Compaction
+copies only revision-bound, checksum-validated captured content and retains its
+original source stamp while remapping document IDs. Missing, corrupt or legacy
+pack evidence is omitted instead of reconstructed from current source against
+old postings. A full rebuild restores complete optional pack coverage. Inherited
+orphan data files remain untouched, including while old readers have them mapped.
+
+Tests cover same-size replacement after extraction but before full/delta
+publication, restored mtimes during the metadata/read window, stale captures
+through compaction, legacy/current pack mixtures and existing CLI output oracles.
+Public writers accepting caller-supplied `ProcessedFile` values no longer reread
+live files to manufacture optional packs without provenance.

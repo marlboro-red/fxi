@@ -19,10 +19,44 @@ impl SourcePack {
     pub(crate) fn open(directory: &Path) -> Result<Self> {
         let mut header = [0; 8];
         File::open(directory.join(TABLE))?.read_exact(&mut header)?;
-        if &header == compressed::MAGIC {
+        if &header == compressed::MAGIC || &header == compressed::BOUND_MAGIC {
             compressed::CompressedPack::open(directory).map(Self::Compressed)
         } else {
             RawSourcePack::open(directory).map(Self::Raw)
+        }
+    }
+    pub(crate) fn captured(
+        &self,
+        id: DocId,
+        relative: &Path,
+        size: u64,
+    ) -> Option<(std::borrow::Cow<'_, str>, [u64; 7])> {
+        match self {
+            Self::Compressed(pack) => pack
+                .captured(id, relative, size)
+                .map(|(text, stamp)| (text.into(), stamp)),
+            Self::Raw(pack) => {
+                if !pack.bound {
+                    return None;
+                }
+                let record = &pack.records[pack
+                    .records
+                    .binary_search_by_key(&u64::from(id), |r| r[0])
+                    .ok()?];
+                if record[1] != path_hash(relative) || record[3] != size {
+                    return None;
+                }
+                let start = usize::try_from(record[2]).ok()?;
+                let end = start.checked_add(usize::try_from(size).ok()?)?;
+                let bytes = pack.data.as_deref().unwrap_or(&[]).get(start..end)?;
+                if xxh3_64(bytes) != record[4] {
+                    return None;
+                }
+                Some((
+                    std::str::from_utf8(bytes).ok()?.into(),
+                    record[5..12].try_into().ok()?,
+                ))
+            }
         }
     }
     pub(crate) fn read(
@@ -63,13 +97,14 @@ impl SourcePack {
 }
 
 const MAGIC: &[u8; 8] = b"FXISRC02";
+const BOUND_MAGIC: &[u8; 8] = b"FXISRC04";
 const WORDS: usize = 13;
 const BLOCK_BYTES: usize = 4096;
 const RECORD_BYTES: usize = WORDS * 8;
 const TABLE: &str = "source.table";
 const DATA: &str = "source.data";
 
-fn stamp(_metadata: &Metadata) -> Option<[u64; 7]> {
+pub(crate) fn stamp(_metadata: &Metadata) -> Option<[u64; 7]> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -103,8 +138,225 @@ pub(crate) fn present(index: &Path) -> bool {
     })
 }
 
+/// Streams bytes from the indexing read into an unpublished segment. Only the
+/// per-file descriptors are retained; source payloads never accumulate by chunk.
+pub(crate) struct CaptureWriter {
+    directory: PathBuf,
+    compressed: bool,
+    state: std::sync::Mutex<CaptureState>,
+    // Delta capture can precede construction of its durable generation. The
+    // staging lease protects it from concurrent generation collection.
+    _staging: Option<crate::index::generation::Generation>,
+}
+struct CaptureState {
+    output: BufWriter<File>,
+    offset: u64,
+    entries: BTreeMap<PathBuf, CapturedEntry>,
+}
+struct CapturedEntry {
+    record: Vec<u64>,
+    hashes: Vec<u8>,
+}
+impl CaptureWriter {
+    pub(crate) fn new(directory: &Path, enabled: bool) -> Result<Option<Self>> {
+        Self::with_compression(
+            directory,
+            enabled,
+            std::env::var_os("FXI_SOURCE_PACK_COMPRESSION").is_some_and(|v| v == "1"),
+        )
+    }
+    pub(crate) fn with_compression(
+        directory: &Path,
+        enabled: bool,
+        compressed: bool,
+    ) -> Result<Option<Self>> {
+        if !enabled || !cfg!(unix) {
+            return Ok(None);
+        }
+        fs::create_dir_all(directory)?;
+        Ok(Some(Self {
+            directory: directory.to_path_buf(),
+            compressed,
+            state: std::sync::Mutex::new(CaptureState {
+                output: BufWriter::new(File::create_new(directory.join(DATA))?),
+                offset: 0,
+                entries: BTreeMap::new(),
+            }),
+            _staging: None,
+        }))
+    }
+    pub(crate) fn temporary(root: &Path, enabled: bool) -> Result<Option<Self>> {
+        if !enabled || !cfg!(unix) {
+            return Ok(None);
+        }
+        let staging = crate::index::generation::Generation::new(root)?;
+        let mut writer = Self::new(&staging.path.join("capture"), true)?.unwrap();
+        writer._staging = Some(staging);
+        Ok(Some(writer))
+    }
+    pub(crate) fn capture(&self, relative: &Path, text: &str, metadata: &Metadata) -> Result<()> {
+        let stamp = stamp(metadata)
+            .ok_or_else(|| anyhow::anyhow!("Source capture requires a strong file stamp"))?;
+        self.capture_bytes(relative, text.as_bytes(), stamp)
+    }
+    fn capture_bytes(&self, relative: &Path, bytes: &[u8], stamp: [u64; 7]) -> Result<()> {
+        ensure!(
+            bytes.len() as u64 == stamp[0],
+            "Captured source size changed"
+        );
+        // Compression and block hashing run on the existing extraction workers,
+        // before the short append lock. At most one source/encoding per worker.
+        let encoded = self
+            .compressed
+            .then(|| compressed::encode(relative, bytes, stamp));
+        let hashes = if self.compressed {
+            Vec::new()
+        } else {
+            bytes
+                .chunks(BLOCK_BYTES)
+                .flat_map(|block| xxh3_64(block).to_le_bytes())
+                .collect()
+        };
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Source capture writer poisoned"))?;
+        ensure!(
+            !state.entries.contains_key(relative),
+            "Duplicate captured source path"
+        );
+        let mut record = if let Some(encoded) = encoded {
+            state.output.write_all(&encoded.descriptors)?;
+            state.output.write_all(&encoded.payload)?;
+            encoded.record.to_vec()
+        } else {
+            state.output.write_all(bytes)?;
+            let mut record = vec![
+                0,
+                path_hash(relative),
+                0,
+                bytes.len() as u64,
+                xxh3_64(bytes),
+            ];
+            record.extend_from_slice(&stamp);
+            record.push(0); // assigned block-hash base at finalization
+            record
+        };
+        record[2] = state.offset;
+        let written = if self.compressed {
+            record[12]
+        } else {
+            record[3]
+        };
+        state.offset = state
+            .offset
+            .checked_add(written)
+            .ok_or_else(|| anyhow::anyhow!("Source capture offset overflow"))?;
+        state
+            .entries
+            .insert(relative.to_path_buf(), CapturedEntry { record, hashes });
+        Ok(())
+    }
+    pub(crate) fn finish<'a>(
+        self,
+        documents: impl IntoIterator<Item = &'a Document>,
+        paths: &[PathBuf],
+        destination: &Path,
+    ) -> Result<()> {
+        let mut state = self
+            .state
+            .into_inner()
+            .map_err(|_| anyhow::anyhow!("Source capture writer poisoned"))?;
+        state.output.flush()?;
+        drop(state.output);
+        let mut documents: Vec<_> = documents.into_iter().filter(|doc| doc.is_valid()).collect();
+        documents.sort_unstable_by_key(|doc| doc.doc_id);
+        let mut records = Vec::new();
+        let mut hashes = Vec::new();
+        let mut count = 0u64;
+        for doc in documents {
+            let path = paths
+                .get(doc.path_id as usize)
+                .ok_or_else(|| anyhow::anyhow!("Captured source path missing"))?;
+            let Some(mut entry) = state.entries.remove(path) else {
+                continue;
+            };
+            ensure!(
+                entry.record[3] == doc.size,
+                "Captured source does not match indexed document size"
+            );
+            entry.record[0] = u64::from(doc.doc_id);
+            if !self.compressed {
+                entry.record[12] = hashes.len() as u64 / 8;
+                hashes.extend_from_slice(&entry.hashes);
+            }
+            for word in entry.record {
+                records.extend_from_slice(&word.to_le_bytes());
+            }
+            count += 1;
+        }
+        ensure!(
+            state.entries.is_empty(),
+            "Captured source has no indexed document"
+        );
+        records.extend_from_slice(&hashes);
+        fs::create_dir_all(destination)?;
+        if destination != self.directory {
+            fs::rename(self.directory.join(DATA), destination.join(DATA))?;
+        }
+        let mut table = BufWriter::new(File::create_new(destination.join(TABLE))?);
+        table.write_all(if self.compressed {
+            compressed::BOUND_MAGIC
+        } else {
+            BOUND_MAGIC
+        })?;
+        table.write_all(&count.to_le_bytes())?;
+        table.write_all(&xxh3_64(&records).to_le_bytes())?;
+        table.write_all(&records)?;
+        table.flush()?;
+        Ok(())
+    }
+}
+
+/// Preserve revision-bound packs during compaction. Legacy, missing or corrupt
+/// optional evidence is omitted; compaction must never recapture live source
+/// against postings extracted at an earlier revision.
+pub(crate) fn merge_captured(
+    old_index: &Path,
+    destination: &Path,
+    old_docs: &[Document],
+    old_paths: &[PathBuf],
+    new_docs: &[Document],
+    new_paths: &[PathBuf],
+    enabled: bool,
+) -> Result<()> {
+    let Some(writer) = CaptureWriter::new(destination, enabled)? else {
+        return Ok(());
+    };
+    let mut segments = BTreeMap::<_, Vec<&Document>>::new();
+    for doc in old_docs.iter().filter(|doc| doc.is_valid()) {
+        segments.entry(doc.segment_id).or_default().push(doc);
+    }
+    for (segment, docs) in segments {
+        let directory = old_index.join("segments").join(format!("seg_{segment:04}"));
+        let Ok(pack) = SourcePack::open(&directory) else {
+            continue;
+        };
+        for doc in docs {
+            let Some(relative) = old_paths.get(doc.path_id as usize) else {
+                continue;
+            };
+            if let Some((text, stamp)) = pack.captured(doc.doc_id, relative, doc.size) {
+                writer.capture_bytes(relative, text.as_bytes(), stamp)?;
+            }
+        }
+    }
+    writer.finish(new_docs, new_paths, destination)
+}
+
 /// Write only new segments, never mutate inherited hard-linked files. Generation
 /// publication syncs both files before making the new generation visible.
+#[cfg(test)]
 pub(crate) fn write_missing(
     index: &Path,
     root: &Path,
@@ -203,6 +455,7 @@ pub(crate) fn write_missing(
 }
 
 pub(crate) struct RawSourcePack {
+    bound: bool,
     records: Vec<[u64; WORDS]>,
     block_hashes: Vec<u64>,
     data: Option<Mmap>,
@@ -212,7 +465,7 @@ impl RawSourcePack {
         ensure!(cfg!(unix), "source pack metadata validation requires Unix");
         let table = fs::read(directory.join(TABLE))?;
         ensure!(
-            table.len() >= 24 && &table[..8] == MAGIC,
+            table.len() >= 24 && (&table[..8] == MAGIC || &table[..8] == BOUND_MAGIC),
             "invalid source table header"
         );
         let word = |bytes: &[u8]| u64::from_le_bytes(bytes.try_into().unwrap());
@@ -264,6 +517,7 @@ impl RawSourcePack {
             Some(unsafe { Mmap::map(&file)? })
         };
         Ok(Self {
+            bound: &table[..8] == BOUND_MAGIC,
             records,
             block_hashes,
             data,
