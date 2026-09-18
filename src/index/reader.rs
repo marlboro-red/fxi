@@ -1042,15 +1042,22 @@ impl DocumentLookup {
 struct MappedPaths {
     data: MappedBytes,
     ranges: Vec<std::ops::Range<usize>>,
-    decoded: Vec<OnceLock<PathBuf>>,
+    decoded: Vec<OnceLock<Box<[OnceLock<PathBuf>]>>>,
 }
 
 impl MappedPaths {
+    // Avoid reserving a PathBuf-sized cache slot for every file at open. A
+    // selective query allocates only the pages containing paths it actually
+    // needs; populated slots still have stable addresses across snapshots.
+    const CACHE_PAGE_SIZE: usize = 128;
+
     fn open(index: &Path, query_local: bool) -> Result<Self> {
         let data = MappedBytes::open(&index.join("paths.bin"))?;
         let certified = query_local && crate::index::query_local::certifies_paths(index, &data);
         let ranges = path_ranges(&data, !certified)?;
-        let decoded = (0..ranges.len()).map(|_| OnceLock::new()).collect();
+        let decoded = (0..ranges.len().div_ceil(Self::CACHE_PAGE_SIZE))
+            .map(|_| OnceLock::new())
+            .collect();
         Ok(Self {
             data,
             ranges,
@@ -1059,7 +1066,13 @@ impl MappedPaths {
     }
     fn get(&self, index: usize) -> Option<&PathBuf> {
         let range = self.ranges.get(index)?;
-        Some(self.decoded[index].get_or_init(|| {
+        let page_index = index / Self::CACHE_PAGE_SIZE;
+        let page = self.decoded[page_index].get_or_init(|| {
+            let length =
+                (self.ranges.len() - page_index * Self::CACHE_PAGE_SIZE).min(Self::CACHE_PAGE_SIZE);
+            (0..length).map(|_| OnceLock::new()).collect()
+        });
+        Some(page[index % Self::CACHE_PAGE_SIZE].get_or_init(|| {
             PathBuf::from(
                 std::str::from_utf8(&self.data[range.clone()]).expect("validated UTF-8 path"),
             )
@@ -3285,6 +3298,7 @@ mod tests {
             mapped
                 .decoded
                 .iter()
+                .flat_map(|page| page.get().into_iter().flatten())
                 .filter(|path| path.get().is_some())
                 .count(),
             1
@@ -3313,6 +3327,51 @@ mod tests {
             PathTable::open(dir.path(), false).is_err(),
             "unused trailing damage must fail at open"
         );
+    }
+
+    #[test]
+    fn mapped_path_cache_pages_preserve_boundaries_and_shared_snapshots() {
+        for count in [0usize, 1, 127, 128, 129, 257] {
+            let dir = TempDir::new().unwrap();
+            let names: Vec<_> = (0..count).map(|i| format!("src/β-{i}.rs")).collect();
+            let mut bytes = (count as u32).to_le_bytes().to_vec();
+            for name in &names {
+                bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+                bytes.extend_from_slice(name.as_bytes());
+            }
+            fs::write(dir.path().join("paths.bin"), bytes).unwrap();
+            let table = PathTable::open(dir.path(), false).unwrap();
+            let PathStorage::Mapped(mapped) = table.base.as_ref() else {
+                panic!("mapped table expected");
+            };
+            assert!(mapped.decoded.iter().all(|page| page.get().is_none()));
+            assert!(table.get(count).is_none());
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    let snapshot = table.clone();
+                    let expected = names.clone();
+                    std::thread::spawn(move || {
+                        // Traverse in reverse so the partial final page is first.
+                        for index in (0..expected.len()).rev() {
+                            assert_eq!(snapshot.get(index).unwrap(), Path::new(&expected[index]));
+                        }
+                        snapshot
+                            .get(expected.len().saturating_sub(1))
+                            .map(|path| path as *const PathBuf as usize)
+                    })
+                })
+                .collect();
+            let pointers: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+            assert!(pointers.iter().all(|pointer| pointer == &pointers[0]));
+            assert_eq!(
+                table.iter().cloned().collect::<Vec<_>>(),
+                read_paths(dir.path()).unwrap()
+            );
+            let mut snapshot = table.clone();
+            snapshot.push(PathBuf::from("new.rs"));
+            assert_eq!(snapshot.get(count).unwrap(), Path::new("new.rs"));
+            assert!(table.get(count).is_none());
+        }
     }
 
     #[test]

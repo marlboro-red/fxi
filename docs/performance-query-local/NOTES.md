@@ -713,3 +713,37 @@ and a private installed-directory smoke test containing only `fxi`, covering
 indexing, native watch, search, shutdown and persisted updates. GitHub CI for
 commit `9e37ede` passed. The accepted tradeoff is approximately one millisecond
 on short commands in exchange for simpler installation and maintenance.
+
+
+## Allocate decoded path caches only on demand
+
+Baseline `7c6445e`, single-executable release builds. Mapped path tables previously
+reserved one `OnceLock<PathBuf>` per file before any path was requested. The cache
+now allocates pages of at most 128 slots on first access; snapshots share the
+same immutable mappings and stable cached path addresses. Path-byte validation,
+path ranges, formats and query semantics are unchanged. This applies to both
+strict and query-local readers.
+
+[31 paired experimental searches](queries-path-cache.json):
+
+| Pattern | Before (ms) | Paged cache (ms) |
+| --- | ---: | ---: |
+| Absent identifier | 4.320 | 4.259 |
+| Selective identifier | 11.440 | 11.294 |
+| `struct file_operations` | 19.937 | 19.885 |
+| `return.*0` | 95.017 | 95.777 |
+
+The [strict-mode control](default-path-cache.json) is likewise essentially
+unchanged: absent 30.524 → 30.540 ms, selective 32.075 → 32.184 ms, broad
+116.691 → 116.895 ms. These small differences do not establish a speed win.
+The [five-pair fresh-daemon check](memory-path-cache.json) measures median physical
+footprint **15.6 → 13.7 MiB (12% lower)** on the selective API workload. This
+memory reduction, rather than latency, is the reason to retain the change.
+
+Tests exercise empty and partial pages, 127/128/129/257-path boundaries, Unicode,
+concurrent initialization, stable shared snapshot references, independently
+appended paths and all existing strict/missing-certificate rejection checks.
+Every timed query matches the independent source scan. Frozen copied binaries
+were used with no compilation during the reported runs, and the watch daemon
+was paused/resumed. An accidentally premature run started before the release
+build finished; it was discarded in full and is not included in these reports.
