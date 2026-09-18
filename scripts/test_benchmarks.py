@@ -48,6 +48,21 @@ def load_harness(name):
 
 
 class IndexerHarnessTests(unittest.TestCase):
+    def test_build_manifest_detects_same_size_source_edits_and_newline_paths(self):
+        harness = load_harness('compare-index-builds')
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'a.txt').write_text('alpha')
+            (root / 'line\nbreak.txt').write_text('beta')
+            before = harness.corpus_manifest(root)
+            self.assertEqual(before['files'], 2)
+            self.assertEqual(before['source_bytes'], 9)
+            self.assertEqual(before, harness.corpus_manifest(root))
+            (root / 'a.txt').write_text('gamma')
+            after = harness.corpus_manifest(root)
+            self.assertEqual(before['source_bytes'], after['source_bytes'])
+            self.assertNotEqual(before['sha256'], after['sha256'])
+
     def test_path_normalization_rejects_duplicate_aliases_and_outside_paths(self):
         harness = load_harness('compare-indexers')
         root = Path('/benchmark/corpus')
