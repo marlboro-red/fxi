@@ -247,7 +247,8 @@ Performance depends on query shape, output mode, corpus, cache state and platfor
 FXI is not the best tool on every measured workload. The reports retain losing
 cases as well as wins:
 
-- [After-audit comparison](docs/performance-after-audit/NOTES.md): fixed FXI versus tgrep, csearch, Zoekt and ripgrep, including default/packed reads and warm APIs.
+- [Core and usability follow-up](docs/performance-core-followup/NOTES.md): measured daemon startup/memory improvements, prepared phrase searches, CLI fixes and remaining structural costs.
+- [After-audit comparison](docs/performance-after-audit/NOTES.md): the preceding fixed FXI baseline versus tgrep, csearch, Zoekt and ripgrep, including default/packed reads and warm APIs.
 - [Update visibility](docs/performance-round7/NOTES.md): short saves, atomic replacement and bursts on macOS.
 - [Source packs and common-tool comparisons](docs/performance-round6/NOTES.md): build cost, disk/RSS, cold-process and warm-server results; remaining phrase and absence gaps.
 - [Earlier verification and cache experiments](docs/performance-round5/NOTES.md).
