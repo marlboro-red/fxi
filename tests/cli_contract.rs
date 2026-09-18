@@ -398,5 +398,8 @@ fn missing_index_error_explains_how_to_create_it() {
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("fxi index"), "{error}");
-    assert!(error.contains(f.root.to_str().unwrap()), "{error}");
+    // Diagnostics use the resolved root. On Windows, canonicalization also
+    // expands short path names and adds the verbatim-path prefix.
+    let resolved_root = f.root.canonicalize().unwrap();
+    assert!(error.contains(resolved_root.to_str().unwrap()), "{error}");
 }
