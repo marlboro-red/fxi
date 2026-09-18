@@ -4,6 +4,7 @@
 //! pipelining), and delegates every request to
 //! [`IndexServer::handle_request`] in `daemon_core`.
 
+use crate::server::admission::{self, Admission, Permit};
 use crate::server::daemon_core::IndexServer;
 use crate::server::protocol::{Request, Response, read_message_with_id, write_message_with_id};
 use crate::server::{get_pid_path, get_socket_path};
@@ -32,6 +33,7 @@ fn max_pipelined() -> usize {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_MAX_PIPELINED)
+        .clamp(1, 256)
 }
 
 impl IndexServer {
@@ -163,26 +165,27 @@ impl IndexServer {
     }
 
     fn handle_connection_with_timeout(&self, stream: UnixStream, timeout: Duration) -> Result<()> {
+        self.handle_connection_with_admission(stream, timeout, admission::searches())
+    }
+
+    fn handle_connection_with_admission(
+        &self,
+        stream: UnixStream,
+        timeout: Duration,
+        search_admission: &Admission,
+    ) -> Result<()> {
         let reader_stream = stream.try_clone()?;
         let _ = reader_stream.set_read_timeout(Some(timeout));
         let _ = stream.set_write_timeout(Some(timeout));
 
-        let (tx, rx) = std::sync::mpsc::channel::<(Response, Option<String>)>();
-        let max_handlers = max_pipelined();
-        let active = std::sync::atomic::AtomicUsize::new(0);
+        let per_connection = Admission::new(max_pipelined());
+        let controls = Admission::new(4);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<PendingResponse<'_>>(max_pipelined() + 4);
 
         let mut saw_shutdown = false;
         std::thread::scope(|s| {
             // Writer thread: drains the channel and writes responses
-            s.spawn(move || {
-                let mut writer = BufWriter::new(stream);
-                while let Ok((response, request_id)) = rx.recv() {
-                    if write_response(&mut writer, &response, request_id.as_deref()).is_err() {
-                        let _ = writer.get_ref().shutdown(std::net::Shutdown::Both);
-                        break;
-                    }
-                }
-            });
+            s.spawn(move || drain_responses(stream, rx));
 
             // Reader loop: reads requests and spawns handler threads
             let mut reader = BufReader::new(reader_stream);
@@ -191,37 +194,54 @@ impl IndexServer {
                     Ok(r) => r,
                     Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                     Err(e) => {
-                        let _ = tx.send((
+                        let _ = tx.try_send((
                             Response::Error {
                                 message: format!("Invalid request: {}", e),
                             },
+                            None,
+                            None,
                             None,
                         ));
                         break; // Framing state is lost after partial reads or oversized frames.
                     }
                 };
 
-                // Concurrency limit
-                if active.fetch_add(1, Ordering::Relaxed) >= max_handlers {
-                    active.fetch_sub(1, Ordering::Relaxed);
-                    let _ = tx.send((
+                // Search saturation must not consume control/status capacity.
+                let searching = admission::is_search(&request);
+                let search_permit = if searching {
+                    search_admission.try_acquire()
+                } else {
+                    None
+                };
+                let connection_permit = if searching {
+                    per_connection.try_acquire()
+                } else {
+                    controls.try_acquire()
+                };
+                if (searching && search_permit.is_none()) || connection_permit.is_none() {
+                    let response = if searching {
+                        admission::overloaded()
+                    } else {
                         Response::Error {
-                            message: "Too many concurrent requests".into(),
-                        },
-                        request_id,
-                    ));
+                            message: "Too many concurrent control requests".into(),
+                        }
+                    };
+                    // A client that floods requests without reading cannot grow
+                    // the error queue indefinitely. Close it when that queue fills.
+                    if tx.try_send((response, request_id, None, None)).is_err() {
+                        let _ = reader.get_ref().shutdown(std::net::Shutdown::Both);
+                        break;
+                    }
                     continue;
                 }
 
                 let is_shutdown = matches!(request, Request::Shutdown);
                 saw_shutdown |= is_shutdown;
                 let tx = tx.clone();
-                let active = &active;
 
                 s.spawn(move || {
                     let response = self.handle_request(request);
-                    let _ = tx.send((response, request_id));
-                    active.fetch_sub(1, Ordering::Relaxed);
+                    let _ = tx.send((response, request_id, search_permit, connection_permit));
                 });
 
                 if is_shutdown {
@@ -237,6 +257,24 @@ impl IndexServer {
         }
         Ok(())
     }
+}
+
+type PendingResponse<'a> = (
+    Response,
+    Option<String>,
+    Option<Permit<'a>>,
+    Option<Permit<'a>>,
+);
+
+fn drain_responses(stream: UnixStream, rx: std::sync::mpsc::Receiver<PendingResponse<'_>>) {
+    let mut writer = BufWriter::new(stream);
+    while let Ok((response, request_id, _search_permit, _connection_permit)) = rx.recv() {
+        if write_response(&mut writer, &response, request_id.as_deref()).is_err() {
+            let _ = writer.get_ref().shutdown(std::net::Shutdown::Both);
+            break;
+        }
+    }
+    // Dropping the receiver also releases permits on queued responses.
 }
 
 /// Serialization failures occur before any frame bytes are written, so a small
@@ -385,6 +423,113 @@ mod tests {
     use std::io::{Read, Write};
 
     #[test]
+    fn saturated_searches_preserve_control_requests_and_recover_after_errors() {
+        let admission = Admission::new(1);
+        let held = admission.try_acquire().unwrap();
+        let server = IndexServer::new(false);
+        let (stream, mut client) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                server
+                    .handle_connection_with_admission(stream, Duration::from_secs(2), &admission)
+                    .unwrap()
+            });
+            for (number, request) in [
+                Request::Search {
+                    query: "alpha".into(),
+                    root_path: None,
+                    limit: 1,
+                },
+                Request::ContentSearch {
+                    pattern: "alpha".into(),
+                    root_path: None,
+                    limit: 1,
+                    options: Default::default(),
+                },
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let id = format!("overloaded-{number}");
+                write_message_with_id(&mut client, &request, Some(&id)).unwrap();
+                let (response, actual_id): (Response, _) =
+                    read_message_with_id(&mut client).unwrap();
+                assert_eq!(actual_id.as_deref(), Some(id.as_str()));
+                assert!(
+                    matches!(response, Response::Error { message } if message.contains("capacity exhausted"))
+                );
+            }
+            for request in [Request::Ping, Request::Status] {
+                write_message_with_id(&mut client, &request, Some("control")).unwrap();
+                let (response, id): (Response, _) = read_message_with_id(&mut client).unwrap();
+                assert_eq!(id.as_deref(), Some("control"));
+                assert!(!matches!(response, Response::Error { .. }));
+            }
+            drop(held);
+            write_message_with_id(
+                &mut client,
+                &Request::Search {
+                    query: "alpha".into(),
+                    root_path: None,
+                    limit: 1,
+                },
+                Some("admitted"),
+            )
+            .unwrap();
+            let (response, id): (Response, _) = read_message_with_id(&mut client).unwrap();
+            assert_eq!(id.as_deref(), Some("admitted"));
+            assert!(
+                matches!(response, Response::Error { message } if !message.contains("capacity exhausted"))
+            );
+            // No index is loaded: error responses must return their permit too.
+            drop(client);
+        });
+        assert!(admission.try_acquire().is_some());
+    }
+
+    #[test]
+    fn slow_or_disconnected_readers_release_writing_and_queued_permits() {
+        for disconnect in [false, true] {
+            let admission = Admission::new(2);
+            let (server, client) = UnixStream::pair().unwrap();
+            server
+                .set_write_timeout(Some(Duration::from_millis(30)))
+                .unwrap();
+            let (tx, rx) = std::sync::mpsc::sync_channel(2);
+            for _ in 0..2 {
+                tx.send((
+                    Response::Error {
+                        message: "x".repeat(2 * 1024 * 1024),
+                    },
+                    None,
+                    admission.try_acquire(),
+                    None,
+                ))
+                .unwrap();
+            }
+            assert!(admission.try_acquire().is_none());
+            drop(tx);
+            let client = if disconnect {
+                drop(client);
+                None
+            } else {
+                Some(client)
+            };
+            thread::scope(|scope| {
+                scope.spawn(|| drain_responses(server, rx)).join().unwrap();
+            });
+            drop(client);
+            let first = admission.try_acquire().unwrap();
+            let second = admission.try_acquire().unwrap();
+            assert!(admission.try_acquire().is_none());
+            drop((first, second));
+        }
+    }
+
+    #[test]
     fn encoding_failure_returns_correlated_error_instead_of_empty_response() {
         use crate::server::protocol::{SearchMatchData, SearchResponse};
         use std::os::unix::ffi::OsStringExt;
@@ -409,6 +554,23 @@ mod tests {
             read_message_with_id(&mut std::io::Cursor::new(wire)).unwrap();
         assert!(matches!(error, Response::Error { .. }));
         assert_eq!(id.as_deref(), Some("query-1"));
+
+        let admission = Admission::new(1);
+        let (stream, mut client) = UnixStream::pair().unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tx.send((
+            response,
+            Some("query-2".into()),
+            admission.try_acquire(),
+            None,
+        ))
+        .unwrap();
+        drop(tx);
+        drain_responses(stream, rx);
+        let (error, id): (Response, _) = read_message_with_id(&mut client).unwrap();
+        assert!(matches!(error, Response::Error { .. }));
+        assert_eq!(id.as_deref(), Some("query-2"));
+        assert!(admission.try_acquire().is_some());
     }
 
     #[test]

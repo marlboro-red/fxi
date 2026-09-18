@@ -7,6 +7,7 @@
 //! WriteFile on one handle, so requests on a connection are processed
 //! sequentially (no pipelining); request IDs are still echoed back.
 
+use crate::server::admission;
 use crate::server::daemon_core::IndexServer;
 use crate::server::protocol::{Request, Response, read_message_with_id, write_message_with_id};
 use crate::server::{get_pid_path, get_pipe_name};
@@ -419,7 +420,17 @@ impl IndexServer {
             };
 
             let is_shutdown = matches!(request, Request::Shutdown);
-            let response = self.handle_request(request);
+            let searching = admission::is_search(&request);
+            let _search_permit = if searching {
+                admission::searches().try_acquire()
+            } else {
+                None
+            };
+            let response = if searching && _search_permit.is_none() {
+                admission::overloaded()
+            } else {
+                self.handle_request(request)
+            };
 
             let written =
                 with_write_timeout(Duration::from_millis(CONNECTION_TIMEOUT_MS as u64), || {

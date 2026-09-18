@@ -539,6 +539,7 @@ fn handle_grep_command(opts: GrepOptions) -> Result<()> {
     let daemon_response = if let Some(mut client) = server::IndexClient::connect() {
         match client.content_search(&combined_pattern, Some(&requested), opts.max_count, options) {
             Ok(response) => Some(response),
+            Err(error) if error.is_overloaded() => return Err(error.into()),
             Err(error) => {
                 eprintln!("Daemon search failed, falling back to direct search: {error}");
                 None

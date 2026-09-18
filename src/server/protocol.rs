@@ -13,6 +13,10 @@ use std::path::PathBuf;
 /// Adding new optional fields or new request types does NOT require a bump.
 pub const PROTOCOL_VERSION: u32 = 2;
 
+/// Reserved error-message discriminator, preserving the existing Error wire
+/// shape for older clients. New clients must not bypass admission via fallback.
+pub const SEARCH_OVERLOADED_PREFIX: &str = "[FXI_SEARCH_OVERLOADED] ";
+
 /// Options for content search
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContentSearchOptions {

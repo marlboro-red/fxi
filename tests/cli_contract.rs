@@ -403,3 +403,42 @@ fn missing_index_error_explains_how_to_create_it() {
     let resolved_root = f.root.canonicalize().unwrap();
     assert!(error.contains(resolved_root.to_str().unwrap()), "{error}");
 }
+
+#[cfg(unix)]
+#[test]
+fn daemon_overload_never_bypasses_admission_with_direct_fallback() {
+    use fxi::server::protocol::{
+        Request, Response, SEARCH_OVERLOADED_PREFIX, read_message_with_id, write_message_with_id,
+    };
+    use std::os::unix::net::UnixListener;
+    let fixture = Fixture::new();
+    let listener = UnixListener::bind(fixture.dir.path().join("isolated.sock")).unwrap();
+    let responder = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let (request, id): (Request, _) = read_message_with_id(&mut stream).unwrap();
+        assert!(matches!(request, Request::ContentSearch { .. }));
+        write_message_with_id(
+            &mut stream,
+            &Response::Error {
+                message: format!(
+                    "{SEARCH_OVERLOADED_PREFIX}Daemon search capacity exhausted; retry later"
+                ),
+            },
+            id.as_deref(),
+        )
+        .unwrap();
+    });
+    let output = fixture.run(&["alpha", "--json"]);
+    responder.join().unwrap();
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "direct fallback would return matching indexed lines"
+    );
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("capacity exhausted"), "{error}");
+    assert!(!error.contains("falling back"), "{error}");
+}

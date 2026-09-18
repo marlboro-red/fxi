@@ -264,6 +264,19 @@ limit. Index metadata, active results, positions and build/update work add memor
 `FXI_SEARCH_PARALLELISM` adjusts verification task count; benchmark your workload
 before tuning it.
 
+Daemon searches also have a process-wide admission cap. Set
+`FXI_MAX_ACTIVE_SEARCHES` before starting the daemon (default: available CPUs,
+up to 8; accepted range 1–256, out-of-range integers are clamped). The cap includes
+responses still being delivered to clients. Excess searches receive an explicit
+capacity error immediately; they do not wait in a search queue, and the CLI does
+not bypass overload by falling back to a direct search. Ping, status and
+other control requests use separate admission capacity. On Unix,
+`FXI_MAX_PIPELINED` additionally caps searches per connection (default 32,
+clamped to 1–256); response queues are bounded and clients that flood a full queue
+are disconnected. Slow/disconnected clients release permits after the transport
+write timeout or failure. These limits bound request concurrency, not total memory
+or the duration of an executing search; they do not cancel searches on disconnect.
+
 Optional Unix source packs (`FXI_SOURCE_PACK=1 fxi index --force PATH`) trade extra
 disk/build work for faster broad one-shot files-only searches. They are not enabled
 by default. [Round six](docs/performance-round6/NOTES.md) describes this tradeoff

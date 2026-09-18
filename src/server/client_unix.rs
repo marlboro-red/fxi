@@ -27,6 +27,8 @@ pub enum ClientError {
     IoError(std::io::Error),
     /// Server returned an error
     ServerError(String),
+    /// Search admission rejected the request; do not retry through direct mode.
+    Overloaded(String),
     /// Invalid response
     InvalidResponse,
     /// Protocol version mismatch
@@ -43,6 +45,7 @@ impl std::fmt::Display for ClientError {
             ClientError::NotRunning => write!(f, "Index server is not running"),
             ClientError::IoError(e) => write!(f, "I/O error: {}", e),
             ClientError::ServerError(msg) => write!(f, "Server error: {}", msg),
+            ClientError::Overloaded(msg) => write!(f, "{}", msg),
             ClientError::InvalidResponse => write!(f, "Invalid response from server"),
             ClientError::VersionMismatch {
                 client_version,
@@ -53,6 +56,20 @@ impl std::fmt::Display for ClientError {
                 client_version, server_version
             ),
         }
+    }
+}
+
+impl ClientError {
+    fn from_server_message(message: String) -> Self {
+        if let Some(message) = message.strip_prefix(super::protocol::SEARCH_OVERLOADED_PREFIX) {
+            Self::Overloaded(message.to_owned())
+        } else {
+            Self::ServerError(message)
+        }
+    }
+
+    pub fn is_overloaded(&self) -> bool {
+        matches!(self, Self::Overloaded(_))
     }
 }
 
@@ -157,7 +174,7 @@ impl IndexClient {
                 duration_ms: sr.duration_ms,
                 cached: sr.cached,
             }),
-            Response::Error { message } => Err(ClientError::ServerError(message)),
+            Response::Error { message } => Err(ClientError::from_server_message(message)),
             _ => Err(ClientError::InvalidResponse),
         }
     }
@@ -181,7 +198,7 @@ impl IndexClient {
 
         match response {
             Response::ContentSearch(sr) => Ok(sr),
-            Response::Error { message } => Err(ClientError::ServerError(message)),
+            Response::Error { message } => Err(ClientError::from_server_message(message)),
             _ => Err(ClientError::InvalidResponse),
         }
     }
@@ -192,7 +209,7 @@ impl IndexClient {
 
         match response {
             Response::Status(status) => Ok(status),
-            Response::Error { message } => Err(ClientError::ServerError(message)),
+            Response::Error { message } => Err(ClientError::from_server_message(message)),
             _ => Err(ClientError::InvalidResponse),
         }
     }
@@ -209,7 +226,7 @@ impl IndexClient {
             Response::Reloaded {
                 success, message, ..
             } => Ok((success, message)),
-            Response::Error { message } => Err(ClientError::ServerError(message)),
+            Response::Error { message } => Err(ClientError::from_server_message(message)),
             _ => Err(ClientError::InvalidResponse),
         }
     }
@@ -230,7 +247,7 @@ impl IndexClient {
                 pending_changes,
                 ..
             } => Ok((watching, pending_changes)),
-            Response::Error { message } => Err(ClientError::ServerError(message)),
+            Response::Error { message } => Err(ClientError::from_server_message(message)),
             _ => Err(ClientError::InvalidResponse),
         }
     }
@@ -242,7 +259,7 @@ impl IndexClient {
         })? {
             Response::Reloaded { success: true, .. } => Ok(()),
             Response::Reloaded { message, .. } | Response::Error { message } => {
-                Err(ClientError::ServerError(message))
+                Err(ClientError::from_server_message(message))
             }
             _ => Err(ClientError::InvalidResponse),
         }
@@ -254,7 +271,7 @@ impl IndexClient {
 
         match response {
             Response::ShuttingDown => Ok(()),
-            Response::Error { message } => Err(ClientError::ServerError(message)),
+            Response::Error { message } => Err(ClientError::from_server_message(message)),
             _ => Err(ClientError::InvalidResponse),
         }
     }
@@ -293,7 +310,7 @@ impl IndexClient {
 
         match response {
             Response::Pong => Ok(()),
-            Response::Error { message } => Err(ClientError::ServerError(message)),
+            Response::Error { message } => Err(ClientError::from_server_message(message)),
             _ => Err(ClientError::InvalidResponse),
         }
     }
@@ -318,6 +335,22 @@ pub struct SearchResult {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn overload_is_typed_without_changing_legacy_error_messages() {
+        use super::ClientError;
+        let overloaded = ClientError::from_server_message(format!(
+            "{}capacity exhausted",
+            crate::server::protocol::SEARCH_OVERLOADED_PREFIX
+        ));
+        assert!(overloaded.is_overloaded());
+        assert_eq!(overloaded.to_string(), "capacity exhausted");
+        let ordinary = ClientError::from_server_message("unrelated failure".into());
+        assert!(!ordinary.is_overloaded());
+        assert!(
+            matches!(ordinary, ClientError::ServerError(message) if message == "unrelated failure")
+        );
+    }
+
     use super::*;
 
     #[test]
