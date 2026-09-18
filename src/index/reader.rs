@@ -297,6 +297,7 @@ impl SegmentReader {
         // Validate every payload before exposing the segment. Large segments
         // use the existing Rayon pool so a single base segment does not serialize
         // validation; small segments avoid scheduling overhead.
+        let validator = crate::utils::encoding::DocumentPostingsValidator::new(&allowed_docs);
         let validate_entry = |index: usize| -> Result<()> {
             let entry = trigram_dict.entry(index);
             anyhow::ensure!(
@@ -309,11 +310,7 @@ impl SegmentReader {
             );
             let bytes = &trigram_postings
                 [entry.offset as usize..entry.offset as usize + entry.length as usize];
-            crate::utils::encoding::validate_document_postings(
-                bytes,
-                entry.doc_freq,
-                &allowed_docs,
-            )?;
+            validator.validate(bytes, entry.doc_freq)?;
             Ok(())
         };
         if trigram_postings.len() >= 1024 * 1024 && trigram_dict.count >= 512 {
@@ -2011,6 +2008,7 @@ fn read_token_dict(
     let mut offsets = Vec::with_capacity(header.count);
     let mut cursor = header.start;
     let mut previous_token = None;
+    let validator = crate::utils::encoding::DocumentPostingsValidator::new(allowed_docs);
     for _ in 0..header.count {
         let (entry, consumed) =
             super::token_dictionary::entry(&data[cursor..], header.compact, has_positions)?;
@@ -2024,10 +2022,9 @@ fn read_token_dict(
             "Truncated token postings"
         );
         let start = entry.offset as usize;
-        crate::utils::encoding::validate_document_postings(
+        validator.validate(
             &postings[start..start + entry.length as usize],
             entry.doc_freq,
-            allowed_docs,
         )?;
         if let Some(positions) = positions {
             anyhow::ensure!(

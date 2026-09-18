@@ -353,42 +353,60 @@ pub fn decode_position_postings_filtered(
     result
 }
 
-/// Establish the invariants required by the allocation-free query decoders.
-/// A contiguous segment uses two comparisons instead of one bitmap lookup per ID.
-pub(crate) fn validate_document_postings(
+/// Segment membership is immutable. Determine interval membership once per
+/// segment, rather than recomputing bitmap cardinality for every dictionary term.
+pub(crate) struct DocumentPostingsValidator<'a> {
+    allowed: &'a roaring::RoaringBitmap,
+    contiguous: Option<(u32, u32)>,
+}
+impl<'a> DocumentPostingsValidator<'a> {
+    pub(crate) fn new(allowed: &'a roaring::RoaringBitmap) -> Self {
+        let contiguous = allowed
+            .min()
+            .zip(allowed.max())
+            .filter(|&(first, last)| u64::from(last) - u64::from(first) + 1 == allowed.len());
+        Self {
+            allowed,
+            contiguous,
+        }
+    }
+    /// Establish all invariants required by the allocation-free query decoders.
+    pub(crate) fn validate(&self, bytes: &[u8], expected_count: u32) -> anyhow::Result<()> {
+        if let Some((first, last)) = self.contiguous {
+            return validate_contiguous_document_postings(bytes, expected_count, first, last);
+        }
+        let mut cursor = 0;
+        let mut previous = 0u32;
+        let mut count = 0usize;
+        while cursor < bytes.len() {
+            let (delta, consumed) = decode_varint(&bytes[cursor..])
+                .ok_or_else(|| anyhow::anyhow!("Malformed document posting"))?;
+            anyhow::ensure!(delta > 0, "Unsorted or duplicate document postings");
+            previous = previous
+                .checked_add(delta)
+                .ok_or_else(|| anyhow::anyhow!("Document posting overflow"))?;
+            anyhow::ensure!(
+                self.allowed.contains(previous),
+                "Posting references an unknown segment document"
+            );
+            cursor += consumed;
+            count += 1;
+        }
+        anyhow::ensure!(
+            count == expected_count as usize,
+            "Posting frequency does not match payload"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn validate_document_postings(
     bytes: &[u8],
-    expected_count: u32,
+    expected: u32,
     allowed: &roaring::RoaringBitmap,
 ) -> anyhow::Result<()> {
-    let contiguous = allowed
-        .min()
-        .zip(allowed.max())
-        .filter(|&(first, last)| u64::from(last) - u64::from(first) + 1 == allowed.len());
-    if let Some((first, last)) = contiguous {
-        return validate_contiguous_document_postings(bytes, expected_count, first, last);
-    }
-    let mut cursor = 0;
-    let mut previous = 0u32;
-    let mut count = 0usize;
-    while cursor < bytes.len() {
-        let (delta, consumed) = decode_varint(&bytes[cursor..])
-            .ok_or_else(|| anyhow::anyhow!("Malformed document posting"))?;
-        anyhow::ensure!(delta > 0, "Unsorted or duplicate document postings");
-        previous = previous
-            .checked_add(delta)
-            .ok_or_else(|| anyhow::anyhow!("Document posting overflow"))?;
-        anyhow::ensure!(
-            allowed.contains(previous),
-            "Posting references an unknown segment document"
-        );
-        cursor += consumed;
-        count += 1;
-    }
-    anyhow::ensure!(
-        count == expected_count as usize,
-        "Posting frequency does not match payload"
-    );
-    Ok(())
+    DocumentPostingsValidator::new(allowed).validate(bytes, expected)
 }
 
 fn validate_contiguous_document_postings(
@@ -406,6 +424,34 @@ fn validate_contiguous_document_postings(
             let word = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
             const HIGH: u64 = 0x8080_8080_8080_8080;
             if word & HIGH == 0 {
+                if bytes.len() - cursor >= 32 {
+                    let words = [
+                        word,
+                        u64::from_le_bytes(bytes[cursor + 8..cursor + 16].try_into().unwrap()),
+                        u64::from_le_bytes(bytes[cursor + 16..cursor + 24].try_into().unwrap()),
+                        u64::from_le_bytes(bytes[cursor + 24..cursor + 32].try_into().unwrap()),
+                    ];
+                    if words.iter().fold(0, |all, word| all | word) & HIGH == 0 {
+                        let mut zero = 0;
+                        let mut sum = 0u32;
+                        for word in words {
+                            zero |= word.wrapping_sub(0x0101_0101_0101_0101) & !word & HIGH;
+                            let pairs = (word & 0x00ff_00ff_00ff_00ff)
+                                + ((word >> 8) & 0x00ff_00ff_00ff_00ff);
+                            let halves = (pairs & 0x0000_ffff_0000_ffff)
+                                + ((pairs >> 16) & 0x0000_ffff_0000_ffff);
+                            sum += halves as u32 + (halves >> 32) as u32;
+                        }
+                        anyhow::ensure!(zero == 0, "Unsorted or duplicate document postings");
+                        first_document.get_or_insert((word & 0xff) as u32);
+                        previous = previous
+                            .checked_add(sum)
+                            .ok_or_else(|| anyhow::anyhow!("Document posting overflow"))?;
+                        cursor += 32;
+                        count += 32;
+                        continue;
+                    }
+                }
                 // Eight complete one-byte varints. Detect a zero byte before
                 // batching: strictly positive deltas prove strict ID order.
                 let zero = word.wrapping_sub(0x0101_0101_0101_0101) & !word & HIGH;
@@ -789,11 +835,11 @@ mod document_validation_differential_tests {
     #[test]
     fn every_byte_lane_and_mixed_varint_stream_matches_scalar_validation() {
         let allowed: roaring::RoaringBitmap = (1..=2048).collect();
-        for lane in 0..16 {
+        for lane in 0..64 {
             for value in 0..=255u8 {
-                let mut bytes = [1; 16];
+                let mut bytes = [1; 64];
                 bytes[lane] = value;
-                for len in [7, 8, 9, 15, 16] {
+                for len in [7, 8, 9, 15, 16, 31, 32, 33, 63, 64] {
                     check(&bytes[..len], len as u32, &allowed);
                     check(&bytes[..len], len as u32 - 1, &allowed);
                 }
