@@ -1,0 +1,23 @@
+{
+  "seed": 51966,
+  "case_number": 69,
+  "case": {
+    "expression": {
+      "Phrase": ""
+    },
+    "filters": [],
+    "insensitive": true,
+    "word": false,
+    "scope": null,
+    "limit": 1,
+    "before": 1,
+    "after": 2
+  },
+  "documents": [
+    {
+      "path": "tests/d071.py",
+      "text": "alpha\nfoo\nfoo-bar foo/bar\nbar\nalpha\n",
+      "mtime": 1600000710
+    }
+  ]
+}

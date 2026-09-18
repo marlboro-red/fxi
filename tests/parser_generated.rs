@@ -80,9 +80,9 @@ mod generated {
             "foo-bar",
             "foo::bar",
             "https://example.test/a",
-            "foo^inf",
-            "foo^-NaN",
-            "foo^1e999",
+            "^inf:foo",
+            "^-NaN:foo",
+            "^1e999:foo",
             "\"a\\\"b\"",
             "re:/[/",
             "re:/[()/]/",
@@ -112,10 +112,10 @@ mod generated {
         }
         for count in [31, 32, 33, 96, 1024, 10_000] {
             assert_parser_contract(&format!("{}λ{}", "(".repeat(count), ")".repeat(count)));
-            assert_parser_contract(&format!("{}foo", "NOT ".repeat(count)));
+            assert_parser_contract(&format!("{}foo{}", "-(".repeat(count), ")".repeat(count)));
         }
         for count in [1023, 1024, 1025] {
-            assert_parser_contract(&vec!["λ"; count].join(" OR "));
+            assert_parser_contract(&vec!["λ"; count].join(" | "));
         }
         for count in [MAX_QUERY_BYTES - 1, MAX_QUERY_BYTES, MAX_QUERY_BYTES + 1] {
             assert_parser_contract(&"x".repeat(count));
@@ -128,12 +128,22 @@ mod generated {
             "foo", "bar", "東京", "Kelvin", "é", "e\u{301}", "🦀", "a.b", "x-y",
         ];
         let pieces = [
-            "(", ")", "NOT ", " OR ", " AND ", " ", "\"", "\\", ":", "^", "\t", "\n", "re:/", "/",
+            "(", ")", "-", " | ", " OR ", " ", "\"", "\\", ":", "^", "\t", "\n", "re:/", "/",
             "ext:rs ", "top:5 ",
         ];
         // Fixed seeds keep failures reproducible on every platform, without RNG dependencies.
-        for seed in 0..512u64 {
-            let mut state = seed + 1;
+        let seeds = std::env::var("FXI_PARSER_SEED")
+            .map(|s| vec![s.parse::<u64>().unwrap()])
+            .unwrap_or_else(|_| (0..512).collect());
+        for seed in seeds {
+            let mut state = seed.wrapping_add(1).max(1);
+            let check = |input: &str| {
+                if std::panic::catch_unwind(|| assert_parser_contract(input)).is_err() {
+                    panic!(
+                        "parser seed={seed}, input={input:?}; replay with FXI_PARSER_SEED={seed}"
+                    );
+                }
+            };
             let mut next = || {
                 state ^= state << 13;
                 state ^= state >> 7;
@@ -143,14 +153,14 @@ mod generated {
             let a = atoms[next() % atoms.len()];
             let b = atoms[next() % atoms.len()];
             for input in [
-                format!("({a} OR {b}) AND NOT absent"),
-                format!("ext:rs ({a} OR \"{b}\") top:5"),
+                format!("({a} | {b}) -(absent)"),
+                format!("ext:rs ({a} | \"{b}\") top:5"),
                 format!("\"{a} {b}\""),
                 format!("re:/(?:{a}|{b})/"),
-                format!("{a} NEAR/{} {b}", next() % 8),
-                format!("{a}^{}", next() % 20),
+                format!("near:{a},{b},{}", next() % 8),
+                format!("^{}:{a}", next() % 20),
             ] {
-                assert_parser_contract(&input);
+                check(&input);
             }
             let mut mutated = String::new();
             for _ in 0..32 {
@@ -160,7 +170,7 @@ mod generated {
                     mutated.push_str(pieces[next() % pieces.len()]);
                 }
             }
-            assert_parser_contract(&mutated);
+            check(&mutated);
         }
     }
 }
