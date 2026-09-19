@@ -196,11 +196,14 @@ issued after export. The existing durability barriers and reader leases remain.
 
 No inherited object is modified to add missing proofs. Enabling checked mode on
 an existing strict stable index leaves old proof-less objects intact; posting
-validation falls back until compaction or a forced rebuild creates new objects
-with proofs. Generation-wide absence evidence can still be issued independently.
-Malformed existing evidence is rejected, not silently rewritten or recertified.
-Stable references also avoid the hard-link count changes that can invalidate
-Unix stamp-based negative certificates during legacy generation cleanup.
+validation falls back until compaction that actually rewrites segments, or a
+forced rebuild, creates new objects with proofs. A no-op compaction adds nothing. Generation-wide absence evidence can still be issued independently.
+Malformed mandatory evidence prevents publication; invalid optional certificates
+remain ineligible rather than being rewritten inside inherited objects. Steady-state
+stable references avoid hard-link count changes that invalidate Unix stamp-based
+negative certificates. Migration can retain legacy hard links temporarily: retiring
+that legacy generation can change object ctime once and cause safe negative-proof
+fallback. Byte-hash checked/generation certificates are unaffected.
 
 To build and search with the combined experiment on Unix, keep these options in
 the environment for indexing, updates, compaction, and searches:
@@ -229,3 +232,88 @@ packs and negative routing. Certificates are checked against final metadata hash
 so an invalid certificate followed by a correct slow fallback cannot mask an
 issuance-order bug. Generated CLI tests add 128 cases per checked stable profile.
 The process-kill matrix now covers strict and checked publication: 164 scenarios.
+
+
+### Combined-mode measurements
+
+The same frozen candidate executable is used for both layouts, isolating storage
+layout from binary changes (SHA-256
+`4052b0b9f1a02d5cd9f07d176de90377606e71363ec1b31444e483894179745a`).
+Each arm builds its own checked index with generation routing enabled. The
+publication harness asserts legacy versions 2/3 versus stable versions 4/5 before
+measurement; candidate flags must not accidentally configure the legacy control.
+Source-pack settings are explicit in both arms and regression-tested.
+
+Eleven alternating update pairs per fixture, warm filesystem on the same Mac,
+no compilation/tests during timing, and the unrelated watch daemon paused with a
+`finally` resume guard. Every update verifies exact old/new matching-file sets
+against source expectations, document/segment counts, and the corpus manifest.
+
+| Fixture | Checked legacy ms | Checked stable ms | Stable faster pairs |
+| --- | ---: | ---: | ---: |
+| 1 segment / 4,096 files, full, no packs | 37.37 | 43.18 | 0/11 |
+| 64 segments / 4,096 files, full, no packs | 249.80 | 61.79 | 11/11 |
+| 256 segments / 4,096 files, full, no packs | 913.28 | 137.85 | 11/11 |
+| 32 segments / 65,287 Linux files, lean, compressed packs | 504.64 | 466.21 | 9/11 |
+
+[Raw synthetic samples](checked-publication-small.json) and
+[raw Linux samples](checked-publication-linux.json). The fragmented cases improve
+4.0x and 6.6x; Linux improves 7.6%. The one-segment case regresses 15.5%, so the
+combined experiment still does not justify default promotion on performance alone.
+The Linux fixture contains all 65,287 source files, not the 65,284-file common
+subset used in earlier competitor tables. These are FXI layout comparisons,
+not a fresh competitor ranking or cross-platform performance evidence.
+
+[31-pair search controls](checked-queries-linux.json), complete case-sensitive
+regex files-only results, checked against ripgrep on every sample:
+
+| Query | Checked packed legacy ms | Checked packed stable ms |
+| --- | ---: | ---: |
+| Absent identifier | 4.256 | 4.228 |
+| Selective identifier | 11.026 | 10.795 |
+| `return.*0` | 97.421 | 96.959 |
+
+The query medians are effectively unchanged: the combined layout retains the
+fast search path while reducing fragmented publication work. Small differences
+are not established search speedups. The corpus manifest was rechecked before
+and after the query campaign, and private retained indexes/source copies were
+removed after measurement. Eleven update samples do not establish p99 latency.
+
+
+### Combined-mode correctness validation
+
+The final frozen candidate passed the [checked, compressed-packed lifecycle
+campaign](checked-lifecycle.json.gz): 1,000 updates per profile, 40 explicit
+compactions total, and 5,786 independent source-oracle queries comparing 1,166,220
+matching rows. Each profile peaked at 15 segment objects and ended with exactly
+the two objects referenced by CURRENT, with zero unreachable objects. The two
+final reclamation updates are additional to the 2,000 history updates. This is
+small-corpus sustained validation, not a large-corpus throughput benchmark.
+
+The [process-kill report](checked-crash-matrix.json.gz) records 164 scenarios and
+1,160 source-oracle checks across strict/checked full/lean publication. These are
+process terminations, not power-loss simulations. Local validation passed 1,141
+all-target Rust test executions, Clippy with warnings denied, Rust 1.88, rustfmt,
+and 21 Python harness tests. Real production registry entries remained unchanged
+at 19,881, and the unrelated watcher was resumed after measurement.
+
+Reproduce the layout comparison using the same frozen executable for both arms:
+
+```sh
+python3 scripts/compare-publication.py --baseline /path/to/fxi --candidate /path/to/fxi \
+  --baseline-query-local --candidate-query-local \
+  --baseline-generation-routing --candidate-generation-routing \
+  --candidate-stable-segments --repetitions 11 --output /tmp/checked-small.json
+```
+
+Add `--corpus /path/to/linux-source --source-pack --keep-fixture` for the large
+compressed-packed run. The report records the retained baseline/candidate indexes;
+pass those to `scripts/compare-startup.py` with both checked and generation-routing
+flags, the same binary, 31 repetitions, and patterns `auditNonexistentSymbol94283`,
+`folio_wait_bit_common`, and `return.*0`. Enable `FXI_SOURCE_PACK=1`, use private
+application data/socket settings, verify the source manifest again after querying,
+and remove only the experiment's retained fixture afterward.
+
+The combined mode is useful and remains opt-in. It resolves compatibility between
+these experiments; it does not establish default-mode superiority, newest-version
+competitor rankings, native cross-platform speed, or bounded update tail latency.

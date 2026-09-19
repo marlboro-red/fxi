@@ -6,7 +6,7 @@ answer different questions; historical measurements are not current guarantees.
 | Question | Report |
 | --- | --- |
 | How does the stable-object experiment survive interrupted publication and sustained updates? | [Lifecycle validation](validation-stable-segments/NOTES.md) |
-| What does immutable segment storage improve, and where does it lose? | [Stable segment experiment](performance-stable-segments/NOTES.md) |
+| Can checked search and immutable storage work together, and where do they lose? | [Stable segment experiment](performance-stable-segments/NOTES.md) |
 | What is the selective/absent-search experiment, and what integrity policy does it use? | [Query-local validation](performance-query-local/NOTES.md) |
 | What did the preceding production architecture changes achieve? | [Architecture follow-up](performance-architecture-next/NOTES.md) |
 | What structural weaknesses remain? | [Architecture critique](architecture-review/CRITIQUE.md) and [implementation status](architecture-review/IMPLEMENTATION.md) |
