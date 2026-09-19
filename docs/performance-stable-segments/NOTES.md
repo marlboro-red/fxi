@@ -317,3 +317,41 @@ and remove only the experiment's retained fixture afterward.
 The combined mode is useful and remains opt-in. It resolves compatibility between
 these experiments; it does not establish default-mode superiority, newest-version
 competitor rankings, native cross-platform speed, or bounded update tail latency.
+
+### Rejected: per-object publication validation records
+
+A subsequent prototype wrote a 48-byte `publication.check` into each new checked
+stable object after strict validation. It bound the dictionary, complete posting
+bytes, query-check bytes and exact document-ID membership. Later publications
+hashed their actual dependencies before reusing validation; missing/damaged proof
+fell back to the strict reader. It never modified inherited objects. Targeted
+full/lean integration tests passed, including same-length posting damage with its
+mtime restored, optional-proof fallback and unchanged CURRENT on failure.
+
+The frozen prototype and previous combined-mode binary each prepared their own
+stable checked indexes. Eleven alternating pairs, the same corpus identities,
+compressed packs for Linux, exact source-result checks and explicit watcher
+pause/resume produced these whole-update medians:
+
+| Fixture | Previous stable ms | Prototype ms | Prototype faster pairs |
+| --- | ---: | ---: | ---: |
+| 1 segment / 4,096 files | 46.34 | 44.78 | 8/11 |
+| 64 segments / 4,096 files | 65.32 | 68.95 | 3/11 |
+| 256 segments / 4,096 files | 139.50 | 150.25 | 1/11 |
+| 32 segments / 65,287 Linux files | 398.34 | 403.47 | 4/11 |
+
+Raw samples: [small](rejected-reuse-small.json), [Linux](rejected-reuse-linux.json).
+The [prototype patch](rejected-publication-reuse.patch) applies to `d936d28`;
+benchmark binary hashes are in the reports. The harness now supports stable
+layout on both arms, with regression coverage, to isolate implementation changes
+instead of comparing different layouts.
+
+The optimization worked mechanically: diagnostic segment traces showed inherited
+posting decoding skipped after content hashes matched. But large-tree publication
+medians improved only 142.31 to 138.49 ms, and total update latency did not improve.
+Reconciliation alone was 185.03/188.10 ms. Small fragmented indexes regressed, and
+one extra filesystem allocation and durability flush per new object is a poor
+trade for this result. **The production changes were reverted.** This is evidence
+against this specific implementation, not evidence that validation reuse can never
+help. In-process reuse or embedding evidence in an existing manifest could avoid
+its per-object I/O cost, but need separate correctness and performance validation.

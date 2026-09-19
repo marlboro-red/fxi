@@ -116,6 +116,21 @@ class IndexerHarnessTests(unittest.TestCase):
             import shutil
             shutil.rmtree(report['base'])
 
+            log.unlink()
+            subprocess.run([sys.executable, str(Path(__file__).with_name('compare-publication.py')),
+                            '--corpus', str(corpus), '--baseline', str(binary), '--candidate', str(binary),
+                            '--baseline-stable-segments', '--candidate-stable-segments',
+                            '--baseline-query-local', '--candidate-query-local',
+                            '--repetitions', '1', '--output', str(output)],
+                           env={**os.environ, 'BENCH_TEST_LOG': str(log)}, check=True,
+                           capture_output=True, timeout=30)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertTrue(all(c['stable'] == '1' for c in calls))
+            report = json.loads(output.read_text())
+            self.assertTrue(report['baseline_stable_segments'])
+            self.assertEqual(report['rows'][0]['prepared_versions'], {'before': 5, 'after': 5})
+            shutil.rmtree(report['base'])
+
     def test_focused_open_probe_uses_each_index_and_stops_after_measurement(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

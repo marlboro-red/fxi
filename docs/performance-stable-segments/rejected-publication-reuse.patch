@@ -1,0 +1,288 @@
+diff --git a/src/index/mod.rs b/src/index/mod.rs
+index b5c9193..a0bcc85 100644
+--- a/src/index/mod.rs
++++ b/src/index/mod.rs
+@@ -48,6 +48,7 @@ pub mod compact;
+ pub(crate) mod generation_routing;
+ pub(crate) mod negative_routing;
+ pub mod prune;
++pub(crate) mod publication_checks;
+ pub(crate) mod query_local;
+ pub mod reader;
+ pub mod segment_io;
+diff --git a/src/index/reader.rs b/src/index/reader.rs
+index 91c89c6..df70f08 100644
+--- a/src/index/reader.rs
++++ b/src/index/reader.rs
+@@ -432,6 +432,27 @@ impl SegmentReader {
+         query_local: bool,
+         certification: Option<&crate::index::query_local::CertifiedGeneration>,
+     ) -> Result<Self> {
++        Self::open_with_validation(
++            segment_path,
++            segment_id,
++            required_positions,
++            load_tokens,
++            membership,
++            (query_local, false),
++            certification,
++        )
++    }
++
++    fn open_with_validation(
++        segment_path: &Path,
++        segment_id: SegmentId,
++        required_positions: bool,
++        load_tokens: bool,
++        membership: SegmentMembership,
++        policy: (bool, bool),
++        certification: Option<&crate::index::query_local::CertifiedGeneration>,
++    ) -> Result<Self> {
++        let (query_local, reuse_publication) = policy;
+         let started = std::time::Instant::now();
+         // Read trigram dictionary (already sorted from BTreeMap write)
+         let trigram_dict = read_trigram_dict(segment_path)?;
+@@ -453,6 +474,13 @@ impl SegmentReader {
+         } else {
+             None
+         };
++        let reused = reuse_publication
++            && crate::index::publication_checks::certifies(
++                segment_path,
++                &trigram_dict.data,
++                &trigram_postings,
++                membership.disk_ids()?,
++            );
+         let mapped = std::time::Instant::now();
+         // Validate every payload before exposing the segment. Large segments
+         // use the existing Rayon pool so a single base segment does not serialize
+@@ -494,10 +522,13 @@ impl SegmentReader {
+             }
+             Ok(())
+         };
+-        if !lazy && let Some(checks) = &gram_checks {
++        if !lazy
++            && !reused
++            && let Some(checks) = &gram_checks
++        {
+             checks.validate_directory(&trigram_dict.data, trigram_postings.len())?;
+         }
+-        if lazy && gram_checks.as_ref().is_some_and(|checks| checks.is_paged()) {
++        if reused || (lazy && gram_checks.as_ref().is_some_and(|checks| checks.is_paged())) {
+             // The checked root establishes page coverage and boundaries. Page
+             // hashes, order and posting ranges are checked at lookup time.
+         } else if trigram_postings.len() >= 1024 * 1024 && trigram_dict.count >= 512 {
+@@ -2751,12 +2782,15 @@ pub(crate) fn prepare_query_local_checks(
+             meta.segment_path(index_path, id)?
+         };
+         let writable = inherited_name.is_none() && meta.version < 4;
+-        let segment = SegmentReader::open(
++        let membership = allowed.get(&id).cloned().unwrap_or_default();
++        let segment = SegmentReader::open_with_validation(
+             &path,
+             id,
+             meta.has_positions,
+             false,
+-            allowed.get(&id).cloned().unwrap_or_default(),
++            SegmentMembership::Eager(Arc::clone(&membership)),
++            (false, inherited_name.is_some()),
++            None,
+         )?;
+         if let Some(builder) = &mut generation_routing {
+             builder.add(id, &segment.trigram_dict.data)?;
+@@ -2768,6 +2802,14 @@ pub(crate) fn prepare_query_local_checks(
+                 &segment.trigram_postings,
+             )?;
+         }
++        if writable && inherited.is_some() {
++            crate::index::publication_checks::write(
++                &path,
++                &segment.trigram_dict.data,
++                &segment.trigram_postings,
++                &membership,
++            )?;
++        }
+         let bloom = segment
+             .bloom_filter
+             .as_ref()
+diff --git a/tests/stable_segments.rs b/tests/stable_segments.rs
+index f50d82d..37c966c 100644
+--- a/tests/stable_segments.rs
++++ b/tests/stable_segments.rs
+@@ -617,6 +617,63 @@ fn missing_checked_sidecars_fall_back_without_mutating_inherited_objects() {
+     }
+ }
+ 
++#[test]
++fn publication_proof_fallback_preserves_objects_and_rejects_hidden_payload_damage() {
++    for profile in ["full", "lean"] {
++        for missing in [false, true] {
++            let f = Fixture::new();
++            let mode = CheckedMode::Generation;
++            f.checked_ok(
++                true,
++                mode,
++                &["index", "--profile", profile, "--chunk-size", "8"],
++            );
++            let object = f.object_paths().remove(0);
++            let proof = object.join("publication.check");
++            assert_eq!(fs::metadata(&proof).unwrap().len(), 48);
++            if missing {
++                fs::remove_file(&proof).unwrap();
++            } else {
++                fs::write(&proof, b"invalid optional proof").unwrap();
++            }
++            let objects = f.snapshot_objects();
++            fs::write(f.root.join("new.rs"), "newMarker shared\n").unwrap();
++            f.checked_ok(false, mode, &["index"]);
++            assert_objects_unchanged(&objects);
++            f.assert_source_queries(mode);
++        }
++
++        let f = Fixture::new();
++        let mode = CheckedMode::Generation;
++        f.checked_ok(
++            true,
++            mode,
++            &["index", "--profile", profile, "--chunk-size", "8"],
++        );
++        let current = fs::read(f.container().join("CURRENT")).unwrap();
++        let object = f.object_paths().remove(0);
++        let postings = object.join("grams.postings");
++        let modified = fs::metadata(&postings).unwrap().modified().unwrap();
++        let mut bytes = fs::read(&postings).unwrap();
++        bytes[0] ^= 1;
++        fs::write(&postings, bytes).unwrap();
++        fs::OpenOptions::new()
++            .write(true)
++            .open(&postings)
++            .unwrap()
++            .set_modified(modified)
++            .unwrap();
++        fs::write(f.root.join("new.rs"), "newMarker shared\n").unwrap();
++        let result = f
++            .checked_command(false, mode)
++            .arg("index")
++            .output()
++            .unwrap();
++        assert!(!result.status.success(), "{profile}");
++        assert_eq!(fs::read(f.container().join("CURRENT")).unwrap(), current);
++    }
++}
++
+ #[test]
+ fn corrupt_checked_stable_evidence_fails_without_changing_current() {
+     for profile in ["full", "lean"] {
+diff --git a/src/index/publication_checks.rs b/src/index/publication_checks.rs
+new file mode 100644
+index 0000000..f83d1ca
+--- /dev/null
++++ b/src/index/publication_checks.rs
+@@ -0,0 +1,107 @@
++//! Optional reuse of strict publication validation for immutable segments.
++//!
++//! Bind the actual dictionary, posting bytes, existing query checks, and exact
++//! document membership. Hashing all dependencies still detects same-length edits
++//! with restored timestamps. This shares the query-check accidental-corruption
++//! model, not authentication against a party able to rewrite checks coherently.
++use super::reader::MappedBytes;
++use anyhow::Result;
++use roaring::RoaringBitmap;
++use std::path::Path;
++use xxhash_rust::xxh3::{Xxh3, xxh3_64};
++
++const NAME: &str = "publication.check";
++const MAGIC: &[u8; 8] = b"FXIPUB01";
++
++fn membership_hash(ids: &RoaringBitmap) -> u64 {
++    let mut hash = Xxh3::new();
++    for id in ids {
++        hash.update(&id.to_le_bytes());
++    }
++    hash.digest()
++}
++
++fn evidence(
++    path: &Path,
++    dictionary: &[u8],
++    postings: &[u8],
++    ids: &RoaringBitmap,
++) -> Result<Vec<u8>> {
++    let checks = MappedBytes::open(&path.join("grams.checks"))?;
++    let mut bytes = MAGIC.to_vec();
++    for hash in [
++        xxh3_64(dictionary),
++        xxh3_64(postings),
++        xxh3_64(&checks),
++        membership_hash(ids),
++    ] {
++        bytes.extend_from_slice(&hash.to_le_bytes());
++    }
++    bytes.extend_from_slice(&xxh3_64(&bytes).to_le_bytes());
++    Ok(bytes)
++}
++
++/// Only call after strict validation, while the segment is private. Never
++/// retrofit evidence into an already published object.
++pub(crate) fn write(
++    path: &Path,
++    dictionary: &[u8],
++    postings: &[u8],
++    ids: &RoaringBitmap,
++) -> Result<()> {
++    std::fs::write(path.join(NAME), evidence(path, dictionary, postings, ids)?)?;
++    Ok(())
++}
++
++/// Invalid/missing optional evidence declines reuse; the caller must validate.
++pub(crate) fn certifies(
++    path: &Path,
++    dictionary: &[u8],
++    postings: &[u8],
++    ids: &RoaringBitmap,
++) -> bool {
++    (|| -> Result<bool> {
++        let bytes = std::fs::read(path.join(NAME))?;
++        if bytes.len() != 48 || &bytes[..8] != MAGIC {
++            return Ok(false);
++        }
++        Ok(bytes == evidence(path, dictionary, postings, ids)?)
++    })()
++    .unwrap_or(false)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn binds_every_dependency_and_declines_damaged_optional_evidence() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path();
++        let ids: RoaringBitmap = [1, 3, 7].into_iter().collect();
++        std::fs::write(path.join("grams.checks"), b"checks").unwrap();
++        assert!(!certifies(path, b"dict", b"postings", &ids));
++        write(path, b"dict", b"postings", &ids).unwrap();
++        assert!(certifies(path, b"dict", b"postings", &ids));
++        assert!(!certifies(path, b"Dict", b"postings", &ids));
++        assert!(!certifies(path, b"dict", b"PostingS", &ids));
++        assert!(!certifies(
++            path,
++            b"dict",
++            b"postings",
++            &[1, 3, 8].into_iter().collect()
++        ));
++        std::fs::write(path.join("grams.checks"), b"Checks").unwrap();
++        assert!(!certifies(path, b"dict", b"postings", &ids));
++        std::fs::write(path.join("grams.checks"), b"checks").unwrap();
++        let original = std::fs::read(path.join(NAME)).unwrap();
++        for i in 0..original.len() {
++            let mut damaged = original.clone();
++            damaged[i] ^= 1;
++            std::fs::write(path.join(NAME), damaged).unwrap();
++            assert!(!certifies(path, b"dict", b"postings", &ids));
++        }
++        std::fs::remove_file(path.join(NAME)).unwrap();
++        assert!(!certifies(path, b"dict", b"postings", &ids));
++    }
++}

@@ -25,6 +25,7 @@ def main():
     p.add_argument('--baseline-query-local', action='store_true')
     p.add_argument('--candidate-generation-routing', action='store_true')
     p.add_argument('--baseline-generation-routing', action='store_true')
+    p.add_argument('--baseline-stable-segments', action='store_true', help='Prepare and update baseline using stable segment objects')
     p.add_argument('--candidate-stable-segments', action='store_true', help='Prepare and update candidate using experimental stable segment objects')
     p.add_argument('--source-pack', action='store_true', help='Enable compressed source packs for both layouts')
     p.add_argument('--corpus', type=Path, help='Copy an existing corpus for a realistic one-file update; never modifies the supplied source')
@@ -61,9 +62,9 @@ def main():
            'FXI_SOURCE_PACK': '1' if args.source_pack else '0', 'FXI_SOURCE_PACK_COMPRESSION': '1' if args.source_pack else '0', 'FXI_TRACE_UPDATES': '1', 'FXI_APP_DATA': str(base / 'app-data')}
     def run(command, indexes, variant):
         query_local, generation_routing = policies[variant]
-        return sp.run([str(x) for x in command], cwd=root, env={**env, 'FXI_INDEXES': str(indexes), 'FXI_QUERY_LOCAL': '1' if query_local else '0', 'FXI_GENERATION_ROUTING': '1' if generation_routing else '0', 'FXI_STABLE_SEGMENTS': '1' if variant == 'after' and args.candidate_stable_segments else '0', 'FXI_NEGATIVE_ROUTING': '0'},
+        return sp.run([str(x) for x in command], cwd=root, env={**env, 'FXI_INDEXES': str(indexes), 'FXI_QUERY_LOCAL': '1' if query_local else '0', 'FXI_GENERATION_ROUTING': '1' if generation_routing else '0', 'FXI_STABLE_SEGMENTS': '1' if (args.candidate_stable_segments if variant == 'after' else args.baseline_stable_segments) else '0', 'FXI_NEGATIVE_ROUTING': '0'},
                       capture_output=True, text=True, check=True, timeout=120)
-    result = {'candidate_stable_segments': args.candidate_stable_segments, 'base': str(base), 'source_corpus': str(args.corpus.resolve()) if args.corpus else None, 'files': None if args.corpus else 4096, 'profile': 'lean' if args.corpus else 'full', 'source_pack': args.source_pack, 'candidate_query_local': args.candidate_query_local, 'baseline_query_local': args.baseline_query_local, 'candidate_generation_routing': args.candidate_generation_routing, 'baseline_generation_routing': args.baseline_generation_routing,
+    result = {'baseline_stable_segments': args.baseline_stable_segments, 'candidate_stable_segments': args.candidate_stable_segments, 'base': str(base), 'source_corpus': str(args.corpus.resolve()) if args.corpus else None, 'files': None if args.corpus else 4096, 'profile': 'lean' if args.corpus else 'full', 'source_pack': args.source_pack, 'candidate_query_local': args.candidate_query_local, 'baseline_query_local': args.baseline_query_local, 'candidate_generation_routing': args.candidate_generation_routing, 'baseline_generation_routing': args.baseline_generation_routing,
               'harness_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'manifest_helper_sha256': hashlib.sha256(manifest_helper.read_bytes()).hexdigest(), 'corpus_manifest': manifest,
               'binaries': {v: {'path': str(b), 'sha256': hashlib.sha256(b.read_bytes()).hexdigest()} for v, b in binaries.items()},
@@ -89,7 +90,7 @@ def main():
         candidate_generation = candidate_current.parent / 'generations' / candidate_current.read_text().strip()
         candidate_meta = json.loads((candidate_generation / 'meta.json').read_text())
         legacy_version = 3 if result['profile'] == 'lean' else 2
-        assert original['version'] == legacy_version, 'Baseline must use the legacy layout'
+        assert original['version'] == (legacy_version + 2 if args.baseline_stable_segments else legacy_version)
         assert candidate_meta['version'] == (legacy_version + 2 if args.candidate_stable_segments else legacy_version)
         assert candidate_meta['segment_count'] == segments and candidate_meta['doc_count'] == files
         assert files >= 16, 'Use at least 16 indexed files so adding one does not trigger a full rebuild'
