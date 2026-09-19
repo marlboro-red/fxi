@@ -61,6 +61,13 @@ jobs:
           FXI_DIFF_FAILURE_DIR: ${{ github.workspace }}/target/differential-failures
         run: cargo test --all-targets
 
+      - name: Validate stable segment lifecycle
+        run: python scripts/validate-stable-lifecycle.py --binary target/debug/fxi${{ runner.os == 'Windows' && '.exe' || '' }} --steps 20 --compact-every 5 --audit-every 5 --output target/stable-lifecycle.json
+
+      - name: Validate packed stable segment lifecycle
+        if: runner.os != 'Windows'
+        run: python scripts/validate-stable-lifecycle.py --binary target/debug/fxi --steps 20 --compact-every 5 --audit-every 5 --source-pack --output target/stable-lifecycle-packed.json
+
       - name: Install single CLI (macOS)
         if: runner.os == 'macOS'
         run: cargo install --path . --locked --debug --root "${{ runner.temp }}/fxi-install"
@@ -112,6 +119,14 @@ jobs:
           path: target/differential-failures/*.json
           if-no-files-found: ignore
 
+      - name: Retain stable lifecycle report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-lifecycle-${{ matrix.os }}
+          path: target/stable-lifecycle*.json
+          if-no-files-found: ignore
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
@@ -139,6 +154,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: python3 scripts/test_benchmarks.py
       - run: python3 scripts/test_test_storage.py
+      - run: python3 scripts/test_stable_lifecycle.py
 
   fuzz-targets:
     name: compile bounded fuzz targets
