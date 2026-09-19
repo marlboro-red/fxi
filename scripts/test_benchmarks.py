@@ -51,6 +51,23 @@ def load_harness(name):
 
 
 class IndexerHarnessTests(unittest.TestCase):
+    def test_chromium_equal_counts_do_not_hide_wrong_results(self):
+        harness = load_harness('benchmark-chromium')
+        result = harness.difference({'a', 'wrong'}, {'a', 'right'})
+        self.assertFalse(result['exact'])
+        self.assertEqual(result['missing'], ['right'])
+        self.assertEqual(result['extra'], ['wrong'])
+        self.assertTrue(harness.difference(set(), set())['exact'])
+
+    def test_chromium_paths_reject_duplicates_and_outside_root(self):
+        harness = load_harness('benchmark-chromium')
+        root = Path('/benchmark/corpus')
+        self.assertEqual(harness.paths(b'./a\n/benchmark/corpus/b\n', root), {'a', 'b'})
+        with self.assertRaises(ValueError):
+            harness.paths(b'./a\n/benchmark/corpus/a\n', root)
+        with self.assertRaises(ValueError):
+            harness.paths(b'/elsewhere/a\n', root)
+
     def test_publication_policies_are_per_variant_even_with_same_binary(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
