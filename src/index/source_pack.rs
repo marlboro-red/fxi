@@ -132,11 +132,22 @@ pub(crate) fn requested() -> bool {
 }
 
 pub(crate) fn present(index: &Path) -> bool {
-    fs::read_dir(index.join("segments")).is_ok_and(|entries| {
-        entries
-            .flatten()
-            .any(|entry| entry.path().join(TABLE).is_file())
-    })
+    (|| -> Result<bool> {
+        let meta: super::types::IndexMeta =
+            serde_json::from_slice(&fs::read(index.join("meta.json"))?)?;
+        meta.validate_format()?;
+        for id in meta
+            .base_segment
+            .into_iter()
+            .chain(meta.delta_segments.iter().copied())
+        {
+            if meta.segment_path(index, id)?.join(TABLE).is_file() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })()
+    .unwrap_or(false)
 }
 
 /// Streams bytes from the indexing read into an unpublished segment. Only the
@@ -348,8 +359,11 @@ pub(crate) fn merge_captured(
     for doc in old_docs.iter().filter(|doc| doc.is_valid()) {
         segments.entry(doc.segment_id).or_default().push(doc);
     }
+    let meta: super::types::IndexMeta =
+        serde_json::from_slice(&fs::read(old_index.join("meta.json"))?)?;
+    meta.validate_format()?;
     for (segment, docs) in segments {
-        let directory = old_index.join("segments").join(format!("seg_{segment:04}"));
+        let directory = meta.segment_path(old_index, segment)?;
         let Ok(pack) = SourcePack::open(&directory) else {
             continue;
         };

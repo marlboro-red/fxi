@@ -237,6 +237,9 @@ pub struct IndexMeta {
     #[serde(default)]
     pub profile: IndexProfile,
     pub version: u32,
+    /// Experimental stable segment objects, bound by generation metadata.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub segment_objects: std::collections::BTreeMap<SegmentId, String>,
     pub root_path: PathBuf,
     pub doc_count: u32,
     pub segment_count: u16,
@@ -273,7 +276,7 @@ impl IndexMeta {
         anyhow::ensure!(
             matches!(
                 (self.version, self.profile),
-                (1 | 2, IndexProfile::Full) | (3, IndexProfile::Lean)
+                (1 | 2 | 4, IndexProfile::Full) | (3 | 5, IndexProfile::Lean)
             ),
             "Unsupported index version/profile combination; rebuild with an explicit --profile"
         );
@@ -281,7 +284,60 @@ impl IndexMeta {
             self.profile != IndexProfile::Lean || !self.has_positions,
             "Lean index metadata cannot require token positions"
         );
+        if self.version >= 4 {
+            let ids: std::collections::BTreeSet<_> = self
+                .base_segment
+                .into_iter()
+                .chain(self.delta_segments.iter().copied())
+                .collect();
+            anyhow::ensure!(
+                ids.len() == self.segment_count as usize
+                    && ids.len()
+                        == usize::from(self.base_segment.is_some()) + self.delta_segments.len()
+                    && ids.iter().eq(self.segment_objects.keys()),
+                "Incomplete stable segment manifest"
+            );
+            anyhow::ensure!(
+                self.segment_objects
+                    .values()
+                    .all(|name| crate::index::objects::valid_name(name)),
+                "Invalid segment object name"
+            );
+            anyhow::ensure!(
+                self.segment_objects
+                    .values()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    == ids.len(),
+                "Aliased segment objects"
+            );
+        } else {
+            anyhow::ensure!(
+                self.segment_objects.is_empty(),
+                "Object references require a stable-object format"
+            );
+        }
         Ok(())
+    }
+
+    pub(crate) fn segment_path(
+        &self,
+        index: &std::path::Path,
+        id: SegmentId,
+    ) -> anyhow::Result<PathBuf> {
+        if self.version >= 4 {
+            let name = self
+                .segment_objects
+                .get(&id)
+                .ok_or_else(|| anyhow::anyhow!("Missing segment object"))?;
+            anyhow::ensure!(
+                crate::index::objects::valid_name(name),
+                "Invalid segment object name"
+            );
+            Ok(crate::index::objects::store(index)?.join(name))
+        } else {
+            Ok(index.join("segments").join(format!("seg_{id:04}")))
+        }
     }
 }
 
@@ -290,6 +346,7 @@ impl Default for IndexMeta {
         Self {
             profile: IndexProfile::Full,
             version: 2,
+            segment_objects: Default::default(),
             root_path: PathBuf::new(),
             doc_count: 0,
             segment_count: 0,

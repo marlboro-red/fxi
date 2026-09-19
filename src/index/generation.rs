@@ -12,6 +12,8 @@ pub(crate) struct Generation {
     pub path: PathBuf,
     _lease: File,
     published: bool,
+    pub(crate) stable_objects: bool,
+    inherited_objects: std::collections::BTreeMap<u16, String>,
     /// Immutable hard links whose bytes were synced by a prior publication.
     /// Copies and legacy-layout files have no such durability proof.
     durable_links: HashSet<PathBuf>,
@@ -50,12 +52,26 @@ impl Generation {
             path,
             _lease: lease,
             published: false,
+            stable_objects: super::objects::requested(),
+            inherited_objects: Default::default(),
             durable_links: HashSet::new(),
         })
     }
 
     /// Reuse immutable segment bytes; metadata is always written afresh.
     pub fn inherit_segments(&mut self, previous: &Path) -> Result<()> {
+        // Test fixtures and legacy staging trees can omit real metadata.
+        if let Ok(bytes) = fs::read(previous.join("meta.json"))
+            && let Ok(meta) = serde_json::from_slice::<super::types::IndexMeta>(&bytes)
+        {
+            meta.validate_format()?;
+            if meta.version >= 4 {
+                super::objects::validate_manifest_binding(previous, &meta, &bytes)?;
+                self.stable_objects = true;
+                self.inherited_objects = meta.segment_objects;
+                return Ok(());
+            }
+        }
         fn link_tree(
             source: &Path,
             destination: &Path,
@@ -97,6 +113,15 @@ impl Generation {
     }
 
     pub fn publish(&mut self) -> Result<()> {
+        if self.stable_objects {
+            anyhow::ensure!(
+                !crate::index::query_local::requested()
+                    && !crate::index::negative_routing::requested()
+                    && !crate::index::generation_routing::requested(),
+                "Experimental stable segments currently require strict validation; disable checked/negative routing"
+            );
+            super::objects::prepare(&self.path, &self.inherited_objects)?;
+        }
         if crate::index::query_local::requested() {
             crate::index::reader::write_query_local_checks(&self.path)?;
         }
@@ -124,6 +149,10 @@ impl Generation {
         // Readers pin their generation with a shared lease. Cleanup is best
         // effort (Windows can retain mapped files until their last handle closes).
         self.collect_unpinned();
+        // Failure leaks reclaimable space rather than invalidating publication.
+        if sync_directory(&self.container.join("generations")).is_ok() {
+            let _ = super::objects::collect(&self.container);
+        }
         Ok(())
     }
 
@@ -173,7 +202,18 @@ fn sync_tree(
     }
     sync_directory(path)
 }
-fn sync_directory(path: &Path) -> Result<()> {
+pub(crate) fn sync_new_tree(path: &Path) -> Result<()> {
+    sync_tree(path, &HashSet::new(), &mut |path| {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?
+            .sync_all()?;
+        Ok(())
+    })
+}
+
+pub(crate) fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     File::open(path)?.sync_all()?;
     #[cfg(not(unix))]

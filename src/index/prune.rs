@@ -425,6 +425,9 @@ fn prune_locked(
         let entry = entry?;
         match entry.file_name().to_str() {
             Some("CURRENT") => bytes = bytes.saturating_add(regular(&entry.path(), false)?.len()),
+            Some("objects") => {
+                regular(&entry.path(), true)?;
+            }
             Some("generations") => {
                 regular(&entry.path(), true)?;
                 has_generations = true;
@@ -468,6 +471,19 @@ fn prune_locked(
     if has_legacy {
         bytes = bytes.saturating_add(validate_table(container, &original.root, true)?);
     }
+    if container.join("objects").try_exists()? {
+        for entry in fs::read_dir(container.join("objects"))? {
+            let entry = entry?;
+            ensure!(
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(super::objects::valid_name),
+                "Unknown segment object"
+            );
+            bytes = bytes.saturating_add(validate_segment(&entry.path(), None)?);
+        }
+    }
     // Locks are still held. Recheck the required evidence and source immediately
     // before deletion; a dry-run never creates either storage or lock files.
     if !unchanged(container, original)? {
@@ -495,11 +511,16 @@ fn validate_table(path: &Path, root: &Path, legacy: bool) -> Result<u64> {
         "query-routing.bin",
         "negative-routing.bin",
         "generation-routing.bin",
+        "objects.check",
     ];
     let mut bytes = 0u64;
     for entry in fs::read_dir(path)? {
         let entry = entry?;
-        if legacy && (entry.file_name() == "CURRENT" || entry.file_name() == "generations") {
+        if legacy
+            && (entry.file_name() == "CURRENT"
+                || entry.file_name() == "generations"
+                || entry.file_name() == "objects")
+        {
             // Container structure and CURRENT bytes were checked by the caller.
             continue;
         }
@@ -525,6 +546,7 @@ fn validate_table(path: &Path, root: &Path, legacy: bool) -> Result<u64> {
     }
     let meta: IndexMeta = serde_json::from_slice(&fs::read(path.join("meta.json"))?)?;
     meta.validate_format()?;
+    super::objects::validate_manifest_binding(path, &meta, &fs::read(path.join("meta.json"))?)?;
     ensure!(
         meta.root_path == root,
         "Generation root differs from registration"
@@ -549,6 +571,38 @@ fn validate_table(path: &Path, root: &Path, legacy: bool) -> Result<u64> {
                     && ids.contains(&document.segment_id)),
         "Invalid document references/count"
     );
+    if meta.version >= 4 {
+        for &id in &ids {
+            validate_segment(&meta.segment_path(path, id)?, Some(&meta))?;
+        }
+        if path.join("segments").try_exists()? {
+            regular(&path.join("segments"), true)?;
+            ensure!(
+                fs::read_dir(path.join("segments"))?.next().is_none(),
+                "Stable generation has local segments"
+            );
+        }
+        return Ok(bytes);
+    }
+    let mut expected: HashSet<_> = ids.iter().map(|id| format!("seg_{id:04}")).collect();
+    regular(&path.join("segments"), true)?;
+    for entry in fs::read_dir(path.join("segments"))? {
+        let entry = entry?;
+        ensure!(
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| expected.remove(name)),
+            "Unrecognized segment directory"
+        );
+        bytes = bytes.saturating_add(validate_segment(&entry.path(), Some(&meta))?);
+    }
+    ensure!(expected.is_empty(), "Missing segment directory");
+    Ok(bytes)
+}
+
+fn validate_segment(path: &Path, meta: Option<&IndexMeta>) -> Result<u64> {
+    regular(path, true)?;
     let segment_files = [
         "grams.dict",
         "grams.postings",
@@ -562,42 +616,30 @@ fn validate_table(path: &Path, root: &Path, legacy: bool) -> Result<u64> {
         "source.table",
         "source.data",
     ];
-    let mut expected: HashSet<_> = ids.iter().map(|id| format!("seg_{id:04}")).collect();
-    regular(&path.join("segments"), true)?;
-    for entry in fs::read_dir(path.join("segments"))? {
-        let entry = entry?;
+    let mut bytes = 0u64;
+    for file in fs::read_dir(path)? {
+        let file = file?;
         ensure!(
-            entry
-                .file_name()
+            file.file_name()
                 .to_str()
-                .is_some_and(|name| expected.remove(name)),
-            "Unrecognized segment directory"
+                .is_some_and(|name| segment_files.contains(&name)),
+            "Unrecognized segment file"
         );
-        regular(&entry.path(), true)?;
-        for file in fs::read_dir(entry.path())? {
-            let file = file?;
-            ensure!(
-                file.file_name()
-                    .to_str()
-                    .is_some_and(|name| segment_files.contains(&name)),
-                "Unrecognized segment file: {:?}",
-                file.file_name()
-            );
-            bytes = bytes.saturating_add(regular(&file.path(), false)?.len());
-        }
-        for name in ["grams.dict", "grams.postings"] {
-            regular(&entry.path().join(name), false)?;
-        }
+        bytes = bytes.saturating_add(regular(&file.path(), false)?.len());
+    }
+    for name in ["grams.dict", "grams.postings"] {
+        regular(&path.join(name), false)?;
+    }
+    if let Some(meta) = meta {
         if meta.profile == IndexProfile::Full {
             for name in ["tokens.dict", "tokens.postings", "linemap.bin"] {
-                regular(&entry.path().join(name), false)?;
+                regular(&path.join(name), false)?;
             }
         }
         if meta.has_positions {
-            regular(&entry.path().join("tokens.positions"), false)?;
+            regular(&path.join("tokens.positions"), false)?;
         }
     }
-    ensure!(expected.is_empty(), "Missing segment directory");
     Ok(bytes)
 }
 

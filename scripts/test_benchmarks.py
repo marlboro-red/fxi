@@ -66,7 +66,7 @@ class IndexerHarnessTests(unittest.TestCase):
                 'from pathlib import Path\n'
                 'args = sys.argv[1:]\n'
                 "with open(os.environ['BENCH_TEST_LOG'], 'a') as out:\n"
-                "    out.write(json.dumps({'args': args, 'query_local': os.environ['FXI_QUERY_LOCAL'], 'generation_routing': os.environ['FXI_GENERATION_ROUTING']}) + '\\n')\n"
+                "    out.write(json.dumps({'args': args, 'query_local': os.environ['FXI_QUERY_LOCAL'], 'generation_routing': os.environ['FXI_GENERATION_ROUTING'], 'stable': os.environ['FXI_STABLE_SEGMENTS']}) + '\\n')\n"
                 "if args[0] == 'index':\n"
                 "    store = Path(os.environ['FXI_INDEXES']) / 'test-index'\n"
                 "    generation = store / 'generations' / 'one'\n"
@@ -92,6 +92,26 @@ class IndexerHarnessTests(unittest.TestCase):
             report = json.loads(output.read_text())
             self.assertTrue(report['manifest_verified_before_and_after'])
             self.assertEqual(report['files'], 16)
+
+            log.unlink()
+            subprocess.run([sys.executable, str(Path(__file__).with_name('compare-publication.py')),
+                            '--corpus', str(corpus), '--baseline', str(binary), '--candidate', str(binary),
+                            '--candidate-stable-segments', '--keep-fixture',
+                            '--repetitions', '1', '--output', str(output)],
+                           env={**os.environ, 'BENCH_TEST_LOG': str(log)}, check=True,
+                           capture_output=True, timeout=30)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            builds = [c for c in calls if '--force' in c['args']]
+            updates = [c for c in calls if c['args'][0] == 'index' and '--force' not in c['args']]
+            self.assertEqual([c['stable'] for c in builds], ['0', '1'])
+            self.assertEqual([c['stable'] for c in updates], ['0', '1'])
+            report = json.loads(output.read_text())
+            fixture, = report['retained_fixtures']
+            self.assertNotEqual(fixture['before'], fixture['after'])
+            for path in fixture.values():
+                self.assertTrue(Path(path).is_dir())
+            import shutil
+            shutil.rmtree(report['base'])
 
     def test_focused_open_probe_uses_each_index_and_stops_after_measurement(self):
         with tempfile.TemporaryDirectory() as temporary:

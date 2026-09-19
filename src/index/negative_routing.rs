@@ -35,7 +35,7 @@ struct Certificate {
     stamps: Vec<[u64; 7]>,
 }
 
-fn requested() -> bool {
+pub(crate) fn requested() -> bool {
     cfg!(unix) && std::env::var_os("FXI_NEGATIVE_ROUTING").is_some_and(|value| value == "1")
 }
 
@@ -72,19 +72,19 @@ fn segments(meta: &IndexMeta) -> Vec<SegmentId> {
         .collect()
 }
 
-fn dependencies(index: &Path, meta: &IndexMeta) -> Vec<PathBuf> {
+fn dependencies(index: &Path, meta: &IndexMeta) -> Result<Vec<PathBuf>> {
     let mut paths = vec![
         index.join("meta.json"),
         index.join("docs.bin"),
         index.join("paths.bin"),
     ];
     for id in segments(meta) {
-        let segment = index.join("segments").join(format!("seg_{id:04}"));
+        let segment = meta.segment_path(index, id)?;
         for name in ["grams.dict", "grams.postings", "bloom.bin"] {
             paths.push(segment.join(name));
         }
     }
-    paths
+    Ok(paths)
 }
 
 fn stamps(paths: &[PathBuf]) -> Result<Vec<[u64; 7]>> {
@@ -113,7 +113,7 @@ fn write_certificate(index: &Path) -> Result<()> {
     let initial_metadata_stamp = stamp(&metadata_path)?;
     let metadata = fs::read(&metadata_path)?;
     let meta: IndexMeta = serde_json::from_slice(&metadata)?;
-    let paths = dependencies(index, &meta);
+    let paths = dependencies(index, &meta)?;
     let before = stamps(&paths)?;
     ensure!(
         before[0] == initial_metadata_stamp,
@@ -216,7 +216,7 @@ fn prove_absent(index: &Path, literal: &[u8]) -> Result<Option<IndexMeta>> {
     if grams.is_empty() {
         return Ok(None);
     }
-    let paths = dependencies(index, &meta);
+    let paths = dependencies(index, &meta)?;
     ensure!(
         certificate.stamps.len() == paths.len(),
         "routing dependency count mismatch"
@@ -320,7 +320,7 @@ mod tests {
         fs::write(posting_path, postings).unwrap();
         let meta: IndexMeta =
             serde_json::from_slice(&fs::read(index.join("meta.json")).unwrap()).unwrap();
-        certificate.stamps = stamps(&dependencies(&index, &meta)).unwrap();
+        certificate.stamps = stamps(&dependencies(&index, &meta).unwrap()).unwrap();
         write_old(&certificate);
         assert!(
             prove_absent(&index, b"abcd")

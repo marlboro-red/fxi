@@ -25,8 +25,10 @@ def main():
     p.add_argument('--baseline-query-local', action='store_true')
     p.add_argument('--candidate-generation-routing', action='store_true')
     p.add_argument('--baseline-generation-routing', action='store_true')
+    p.add_argument('--candidate-stable-segments', action='store_true', help='Prepare and update candidate using experimental stable segment objects')
     p.add_argument('--corpus', type=Path, help='Copy an existing corpus for a realistic one-file update; never modifies the supplied source')
     p.add_argument('--chunk-size', type=int, default=2048, help='Initial chunk size for --corpus')
+    p.add_argument('--keep-fixture', action='store_true', help='Retain corpus and prepared indexes for separate query controls')
     p.add_argument('--repetitions', type=int, default=5)
     p.add_argument('--output', type=Path, required=True)
     args = p.parse_args()
@@ -58,13 +60,13 @@ def main():
            'FXI_SOURCE_PACK': '0', 'FXI_TRACE_UPDATES': '1', 'FXI_APP_DATA': str(base / 'app-data')}
     def run(command, indexes, variant):
         query_local, generation_routing = policies[variant]
-        return sp.run([str(x) for x in command], cwd=root, env={**env, 'FXI_INDEXES': str(indexes), 'FXI_QUERY_LOCAL': '1' if query_local else '0', 'FXI_GENERATION_ROUTING': '1' if generation_routing else '0'},
+        return sp.run([str(x) for x in command], cwd=root, env={**env, 'FXI_INDEXES': str(indexes), 'FXI_QUERY_LOCAL': '1' if query_local else '0', 'FXI_GENERATION_ROUTING': '1' if generation_routing else '0', 'FXI_STABLE_SEGMENTS': '1' if variant == 'after' and args.candidate_stable_segments else '0', 'FXI_NEGATIVE_ROUTING': '0'},
                       capture_output=True, text=True, check=True, timeout=120)
-    result = {'base': str(base), 'source_corpus': str(args.corpus.resolve()) if args.corpus else None, 'files': None if args.corpus else 4096, 'profile': 'lean' if args.corpus else 'full', 'source_pack': False, 'candidate_query_local': args.candidate_query_local, 'baseline_query_local': args.baseline_query_local, 'candidate_generation_routing': args.candidate_generation_routing, 'baseline_generation_routing': args.baseline_generation_routing,
+    result = {'candidate_stable_segments': args.candidate_stable_segments, 'base': str(base), 'source_corpus': str(args.corpus.resolve()) if args.corpus else None, 'files': None if args.corpus else 4096, 'profile': 'lean' if args.corpus else 'full', 'source_pack': False, 'candidate_query_local': args.candidate_query_local, 'baseline_query_local': args.baseline_query_local, 'candidate_generation_routing': args.candidate_generation_routing, 'baseline_generation_routing': args.baseline_generation_routing,
               'harness_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'manifest_helper_sha256': hashlib.sha256(manifest_helper.read_bytes()).hexdigest(), 'corpus_manifest': manifest,
               'binaries': {v: {'path': str(b), 'sha256': hashlib.sha256(b.read_bytes()).hexdigest()} for v, b in binaries.items()},
-              'rows': []}
+              'rows': [], 'retained_fixtures': []}
     for chunk_size in ([args.chunk_size] if args.corpus else [4096, 64, 16]):
         added = root / '__fxi_publication_probe_94283.rs'
         if args.corpus:
@@ -74,6 +76,12 @@ def main():
         prepared = base / f'prepared-{chunk_size}'
         preparation_variant = 'after' if args.candidate_query_local else 'before'
         run([binaries[preparation_variant], 'index', '--force', '--profile', result['profile'], '--chunk-size', chunk_size, root], prepared, preparation_variant)
+        candidate_prepared = prepared
+        if args.candidate_stable_segments:
+            if args.candidate_query_local or args.candidate_generation_routing:
+                p.error('Stable segment experiment currently requires strict validation')
+            candidate_prepared = base / f'prepared-stable-{chunk_size}'
+            run([binaries['after'], 'index', '--force', '--profile', result['profile'], '--chunk-size', chunk_size, root], candidate_prepared, 'after')
         current, = prepared.rglob('CURRENT')
         generation = current.parent / 'generations' / current.read_text().strip()
         original = json.loads((generation / 'meta.json').read_text())
@@ -90,7 +98,7 @@ def main():
         for repetition in range(args.repetitions):
             for variant in (['before', 'after'] if repetition % 2 == 0 else ['after', 'before']):
                 indexes = base / f'{segments}-{repetition}-{variant}'
-                shutil.copytree(prepared, indexes)
+                shutil.copytree(candidate_prepared if variant == 'after' else prepared, indexes)
                 start = time.perf_counter()
                 proc = run([binaries[variant], 'index', root], indexes, variant)
                 elapsed = time.perf_counter() - start
@@ -110,12 +118,18 @@ def main():
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2) + '\n')
         print(segments, row['median_seconds'], flush=True)
-        shutil.rmtree(prepared)
+        if args.keep_fixture:
+            result['retained_fixtures'].append({'root': str(root), 'before': str(prepared), 'after': str(candidate_prepared)})
+        else:
+            shutil.rmtree(prepared)
+            if candidate_prepared != prepared:
+                shutil.rmtree(candidate_prepared)
         added.unlink()
     assert helper.corpus_manifest(root) == manifest, 'Publication corpus changed outside the probe'
     result['manifest_verified_before_and_after'] = True
     args.output.write_text(json.dumps(result, indent=2) + '\n')
-    shutil.rmtree(root)
+    if not args.keep_fixture:
+        shutil.rmtree(root)
 
 
 if __name__ == '__main__':

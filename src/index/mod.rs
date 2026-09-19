@@ -65,3 +65,5 @@ pub use reader::IndexReader;
 pub use types::*;
 
 pub(crate) mod generation;
+
+pub(crate) mod objects;

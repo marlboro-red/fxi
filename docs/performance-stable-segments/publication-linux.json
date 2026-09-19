@@ -1,0 +1,162 @@
+{
+  "candidate_stable_segments": true,
+  "base": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7",
+  "source_corpus": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-common-indexer-corpus-1td4bkex",
+  "files": 65284,
+  "profile": "lean",
+  "source_pack": false,
+  "candidate_query_local": false,
+  "baseline_query_local": false,
+  "candidate_generation_routing": false,
+  "baseline_generation_routing": false,
+  "harness_sha256": "57a5b6fc7f117d09e4b3bb9fd2b24a8302d68ce799766c02b21c055937ddcadf",
+  "manifest_helper_sha256": "98c9bce4ef50f7f8866fecadff7018cc0468e5204c544f1b4404d6ba5b969992",
+  "corpus_manifest": {
+    "files": 65284,
+    "source_bytes": 1311592608,
+    "sha256": "adb3052a8f1cd3f0d7b49c7dff2cc5ad36b831da7a4c238c2f899db85ae57854"
+  },
+  "binaries": {
+    "before": {
+      "path": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-writer-reuse-candidate-818t5lfn/fxi",
+      "sha256": "3a53cfa0e12d45639fcba451790738a876529d62373400b0d15d715ce57bd9b1"
+    },
+    "after": {
+      "path": "/private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-stable-candidate-mblpqacu/fxi",
+      "sha256": "f98c2249dda3789b5f9f171bb18522de13d062e9aced52f110014e72dcbb557d"
+    }
+  },
+  "rows": [
+    {
+      "inherited_segments": 32,
+      "samples": {
+        "before": [
+          {
+            "seconds": 0.2495456250035204,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=34.787ms diff=144.870ms scoped=false\nfxid: writer timings load=0.630ms inherit=31.639ms paths=4.721ms\nfxid: writer timings encode=4.202ms publish=17.770ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=59.262ms\n"
+          },
+          {
+            "seconds": 0.3373165410012007,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=40.172ms diff=189.045ms scoped=false\nfxid: writer timings load=0.639ms inherit=32.223ms paths=6.216ms\nfxid: writer timings encode=4.318ms publish=52.647ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=96.382ms\n"
+          },
+          {
+            "seconds": 0.3484384590119589,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=34.774ms diff=177.863ms scoped=false\nfxid: writer timings load=0.615ms inherit=32.173ms paths=6.100ms\nfxid: writer timings encode=4.122ms publish=78.656ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=122.013ms\n"
+          },
+          {
+            "seconds": 0.31131279101828113,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=35.858ms diff=195.311ms scoped=false\nfxid: writer timings load=0.644ms inherit=33.469ms paths=6.924ms\nfxid: writer timings encode=4.348ms publish=22.285ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=67.992ms\n"
+          },
+          {
+            "seconds": 0.33000337501289323,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=34.726ms diff=194.806ms scoped=false\nfxid: writer timings load=0.684ms inherit=33.195ms paths=6.985ms\nfxid: writer timings encode=4.496ms publish=41.472ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=87.204ms\n"
+          },
+          {
+            "seconds": 0.3085373750072904,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=34.664ms diff=192.957ms scoped=false\nfxid: writer timings load=0.696ms inherit=31.694ms paths=6.650ms\nfxid: writer timings encode=4.449ms publish=24.519ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=68.412ms\n"
+          },
+          {
+            "seconds": 0.3050662080058828,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=35.442ms diff=190.803ms scoped=false\nfxid: writer timings load=0.691ms inherit=31.862ms paths=6.171ms\nfxid: writer timings encode=4.181ms publish=23.835ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=67.132ms\n"
+          },
+          {
+            "seconds": 0.2986235420103185,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=35.538ms diff=184.078ms scoped=false\nfxid: writer timings load=0.673ms inherit=32.063ms paths=4.897ms\nfxid: writer timings encode=4.495ms publish=24.779ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=67.296ms\n"
+          },
+          {
+            "seconds": 0.306236042000819,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=36.342ms diff=194.183ms scoped=false\nfxid: writer timings load=0.680ms inherit=32.369ms paths=6.124ms\nfxid: writer timings encode=4.201ms publish=20.127ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=63.898ms\n"
+          },
+          {
+            "seconds": 0.31632258399622515,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=36.584ms diff=194.824ms scoped=false\nfxid: writer timings load=0.688ms inherit=34.537ms paths=4.467ms\nfxid: writer timings encode=4.744ms publish=27.452ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=72.278ms\n"
+          },
+          {
+            "seconds": 0.3078476669907104,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=34.176ms diff=193.938ms scoped=false\nfxid: writer timings load=0.647ms inherit=33.077ms paths=4.254ms\nfxid: writer timings encode=4.423ms publish=25.382ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=68.181ms\n"
+          }
+        ],
+        "after": [
+          {
+            "seconds": 0.28832595897256397,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=35.990ms diff=195.110ms scoped=false\nfxid: writer timings load=0.644ms inherit=0.225ms paths=4.376ms\nfxid: writer timings encode=4.874ms publish=36.197ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=46.684ms\n"
+          },
+          {
+            "seconds": 0.283229416992981,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=36.233ms diff=195.710ms scoped=false\nfxid: writer timings load=0.622ms inherit=0.237ms paths=4.301ms\nfxid: writer timings encode=5.045ms publish=30.645ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=41.195ms\n"
+          },
+          {
+            "seconds": 0.29161812498932704,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=39.918ms diff=179.674ms scoped=false\nfxid: writer timings load=0.624ms inherit=0.218ms paths=4.109ms\nfxid: writer timings encode=4.666ms publish=51.380ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=61.390ms\n"
+          },
+          {
+            "seconds": 0.3099166250030976,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=34.568ms diff=195.643ms scoped=false\nfxid: writer timings load=0.721ms inherit=0.235ms paths=5.320ms\nfxid: writer timings encode=5.330ms publish=56.366ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=68.404ms\n"
+          },
+          {
+            "seconds": 0.3820182500057854,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=39.268ms diff=193.729ms scoped=false\nfxid: writer timings load=0.677ms inherit=0.239ms paths=4.240ms\nfxid: writer timings encode=4.787ms publish=123.373ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=133.733ms\n"
+          },
+          {
+            "seconds": 0.29059237500769086,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=35.297ms diff=187.674ms scoped=false\nfxid: writer timings load=0.694ms inherit=0.217ms paths=4.539ms\nfxid: writer timings encode=4.885ms publish=45.267ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=55.974ms\n"
+          },
+          {
+            "seconds": 0.28854770798352547,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=34.439ms diff=192.288ms scoped=false\nfxid: writer timings load=0.628ms inherit=0.211ms paths=4.744ms\nfxid: writer timings encode=4.846ms publish=40.018ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=50.798ms\n"
+          },
+          {
+            "seconds": 0.2941022500162944,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=34.672ms diff=193.239ms scoped=false\nfxid: writer timings load=0.668ms inherit=0.233ms paths=4.562ms\nfxid: writer timings encode=5.059ms publish=42.739ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=53.666ms\n"
+          },
+          {
+            "seconds": 0.2783194170042407,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=35.799ms diff=190.861ms scoped=false\nfxid: writer timings load=0.660ms inherit=0.264ms paths=4.580ms\nfxid: writer timings encode=5.054ms publish=29.899ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=40.869ms\n"
+          },
+          {
+            "seconds": 0.2788089999812655,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=35.065ms diff=191.219ms scoped=false\nfxid: writer timings load=0.673ms inherit=0.277ms paths=4.510ms\nfxid: writer timings encode=5.176ms publish=30.757ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=41.785ms\n"
+          },
+          {
+            "seconds": 0.28423187500447966,
+            "stdout": "Detected codebase root: /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus\nDetected 1 changes: 1 new, 0 modified, 0 deleted (0.0% of index)\nPerforming incremental update...\nWrote delta segment seg_0033: 1 files indexed, 0 tombstones\n",
+            "stderr": "fxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: prepare=35.714ms diff=193.693ms scoped=false\nfxid: writer timings load=0.666ms inherit=0.230ms paths=4.214ms\nfxid: writer timings encode=5.208ms publish=33.495ms\nfxid: update timing /private/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus: publication=44.219ms\n"
+          }
+        ]
+      },
+      "median_seconds": {
+        "before": 0.3085373750072904,
+        "after": 0.28854770798352547
+      }
+    }
+  ],
+  "retained_fixtures": [
+    {
+      "root": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/corpus",
+      "before": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/prepared-2048",
+      "after": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-iaep0gg7/prepared-stable-2048"
+    }
+  ],
+  "manifest_verified_before_and_after": true
+}

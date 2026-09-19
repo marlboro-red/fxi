@@ -652,9 +652,7 @@ fn prove_absent(index: &Path, literal: &[u8]) -> Result<Option<super::types::Ind
         return Ok(None);
     }
     for segment in manifest.segments {
-        let path = index
-            .join("segments")
-            .join(format!("seg_{:04}", segment.id));
+        let path = meta.segment_path(index, segment.id)?;
         let checks = MappedBytes::open(&path.join(NAME))?;
         anyhow::ensure!(
             checks.len() >= 8 && &checks[..8] == PAGED_MAGIC,

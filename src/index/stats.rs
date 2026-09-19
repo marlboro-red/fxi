@@ -45,7 +45,7 @@ pub fn show_stats(root_path: &Path) -> Result<()> {
     }
 
     // Index size
-    if let Ok(size) = dir_size(index_path) {
+    if let Ok(size) = index_size(index_path, &reader.meta) {
         println!();
         println!("Index size:       {}", format_size(size));
     }
@@ -110,6 +110,17 @@ pub fn list_indexes() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Logical bytes reachable from this generation, excluding retired objects.
+fn index_size(path: &Path, meta: &crate::index::types::IndexMeta) -> Result<u64> {
+    let mut size = dir_size(path)?;
+    if meta.version >= 4 {
+        for &id in meta.segment_objects.keys() {
+            size += dir_size(&meta.segment_path(path, id)?)?;
+        }
+    }
+    Ok(size)
 }
 
 /// Calculate directory size recursively

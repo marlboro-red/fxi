@@ -970,6 +970,7 @@ impl ChunkedIndexWriter {
         let delta_baseline = delta_segments.len();
 
         let meta = IndexMeta {
+            segment_objects: Default::default(),
             profile: self.config.profile,
             version: self.config.profile.format_version(),
             root_path: self.root_path.clone(),
@@ -1305,6 +1306,9 @@ impl DeltaSegmentWriter {
         }
         let written = std::time::Instant::now();
         self.generation.publish()?;
+        if self.generation.stable_objects {
+            *meta = serde_json::from_reader(File::open(self.index_path.join("meta.json"))?)?;
+        }
         if trace {
             eprintln!(
                 "fxid: writer timings encode={:.3}ms publish={:.3}ms",
@@ -1437,6 +1441,52 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn stable_delta_returns_published_metadata_and_retains_lazy_old_readers() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        fs::write(root.join("base.rs"), "original marker\n").unwrap();
+        crate::index::build::build_index(&root, true).unwrap();
+        let legacy = crate::index::reader::IndexReader::open(&root).unwrap();
+        let mut meta = legacy.meta.clone();
+        let mut migration = DeltaSegmentWriter::with_reader(&root, 2, Some(&legacy)).unwrap();
+        migration.generation.stable_objects = true;
+        migration
+            .add_file(create_test_processed_file("new.rs", "new marker\n"))
+            .unwrap();
+        migration.finalize(&mut meta).unwrap();
+        assert_eq!(meta.version, 4);
+        assert_eq!(meta.segment_objects.len(), 2);
+        meta.validate_format().unwrap();
+        let resident = crate::index::reader::IndexReader::open(&root).unwrap();
+        let mut delta = DeltaSegmentWriter::with_reader(&root, 3, Some(&resident)).unwrap();
+        delta
+            .add_file(create_test_processed_file("next.rs", "next marker\n"))
+            .unwrap();
+        delta.finalize(&mut meta).unwrap();
+        meta.validate_format().unwrap();
+        assert_eq!(meta.segment_objects.len(), 3);
+        let actual = crate::index::reader::IndexReader::open(&root).unwrap();
+        assert_eq!(meta.segment_objects, actual.meta.segment_objects);
+        crate::index::compact::merge_segments(&root).unwrap();
+        assert_eq!(legacy.get_token_docs("original").unwrap().len(), 1);
+        assert_eq!(resident.get_token_docs("original").unwrap().len(), 1);
+        assert!(
+            legacy
+                .get_line_map(legacy.documents()[0].doc_id)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            resident
+                .get_line_map(resident.documents()[0].doc_id)
+                .unwrap()
+                .is_some()
+        );
+        drop((legacy, resident, actual));
+        crate::utils::remove_index(&root).unwrap();
+    }
 
     #[test]
     fn delta_writer_shares_reader_tables_and_keeps_old_results_after_publication() {

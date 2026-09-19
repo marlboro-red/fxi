@@ -129,6 +129,7 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
 
     // Step 4: Write merged segment atomically
     let mut generation = crate::index::generation::Generation::new(&root)?;
+    generation.stable_objects |= meta.version >= 4;
     let new_segment_id: SegmentId = 1;
     let segments_path = generation.path.join("segments");
     let new_segment_path = segments_path.join(format!("seg_{:04}", new_segment_id));
@@ -140,8 +141,8 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
     // and document remapping remain live, but output evidence is streamed.
     let input_paths: Vec<_> = segment_ids
         .iter()
-        .map(|id| index_path.join("segments").join(format!("seg_{id:04}")))
-        .collect();
+        .map(|&id| meta.segment_path(&index_path, id))
+        .collect::<Result<_>>()?;
     let gram_count = stream::grams(&input_paths, &new_segment_path, &remapping, &stop_grams)?;
     let (token_count, has_positions) = if meta.profile == IndexProfile::Full {
         let result = stream::tokens(&input_paths, &new_segment_path, &remapping)?;
@@ -180,6 +181,7 @@ pub fn merge_segments(root_path: &Path) -> Result<()> {
 
     let new_meta = IndexMeta {
         profile: meta.profile,
+        segment_objects: Default::default(),
         version: meta.profile.format_version(),
         root_path: meta.root_path,
         doc_count: remapping.valid_docs.len() as u32,

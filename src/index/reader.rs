@@ -1375,6 +1375,9 @@ impl IndexReader {
         let metadata = std::fs::read(&meta_path).context("Failed to open meta.json")?;
         let meta: IndexMeta = serde_json::from_slice(&metadata)?;
         meta.validate_format()?;
+        if meta.version >= 4 {
+            crate::index::objects::validate_manifest_binding(&index_path, &meta, &metadata)?;
+        }
         if !query_local {
             crate::index::generation_routing::validate(&index_path)?;
         }
@@ -1425,7 +1428,7 @@ impl IndexReader {
         let segments = segment_ids
             .par_iter()
             .map(|&seg_id| {
-                let path = index_path.join("segments").join(format!("seg_{seg_id:04}"));
+                let path = meta.segment_path(&index_path, seg_id)?;
                 SegmentReader::open_with_policy(
                     &path,
                     seg_id,
@@ -2411,7 +2414,7 @@ fn read_documents_version(index_path: &Path, version: u32) -> Result<Vec<Documen
 
 fn decode_documents_version(data: &[u8], version: u32) -> Result<Vec<Document>> {
     anyhow::ensure!(
-        matches!(version, 1..=3),
+        matches!(version, 1..=5),
         "Unsupported index version; rebuild the index"
     );
     anyhow::ensure!(data.len() >= 4, "Truncated document header");
@@ -2705,7 +2708,7 @@ pub(crate) fn write_query_local_checks(index_path: &Path) -> Result<()> {
         .then(|| crate::index::generation_routing::Builder::new(&ids))
         .transpose()?;
     for id in ids {
-        let path = index_path.join("segments").join(format!("seg_{id:04}"));
+        let path = meta.segment_path(index_path, id)?;
         let segment = SegmentReader::open(
             &path,
             id,
@@ -2767,7 +2770,7 @@ pub(crate) fn validate_negative_routing_core(index_path: &Path, meta: &IndexMeta
         .into_iter()
         .chain(meta.delta_segments.iter().copied())
     {
-        let path = index_path.join("segments").join(format!("seg_{id:04}"));
+        let path = meta.segment_path(index_path, id)?;
         let segment = SegmentReader::open(
             &path,
             id,

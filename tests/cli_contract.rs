@@ -9,9 +9,13 @@ struct Fixture {
     dir: tempfile::TempDir,
     root: PathBuf,
     indexes: PathBuf,
+    stable: bool,
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_stable(false)
+    }
+    fn with_stable(stable: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("repo");
         let indexes = dir.path().join("indexes");
@@ -32,7 +36,12 @@ impl Fixture {
         for n in 0..20 {
             fs::write(root.join(format!("filler{n}.txt")), "unrelated\n").unwrap();
         }
-        let this = Self { dir, root, indexes };
+        let this = Self {
+            dir,
+            root,
+            indexes,
+            stable,
+        };
         this.ok(&["index", "--force"]);
         this
     }
@@ -43,7 +52,11 @@ impl Fixture {
             .env("FXI_APP_DATA", self.dir.path().join("app-data"))
             .env("FXI_INDEXES", &self.indexes)
             .env("FXI_SOCKET", self.dir.path().join("isolated.sock"))
-            .env("NO_COLOR", "1");
+            .env("NO_COLOR", "1")
+            .env("FXI_STABLE_SEGMENTS", if self.stable { "1" } else { "0" })
+            .env("FXI_QUERY_LOCAL", "0")
+            .env("FXI_GENERATION_ROUTING", "0")
+            .env("FXI_NEGATIVE_ROUTING", "0");
         command
     }
     fn run(&self, args: &[&str]) -> Output {
@@ -154,6 +167,17 @@ fn bad_input_and_operational_errors_fail_without_launching_a_tui() {
 #[cfg(unix)]
 #[test]
 fn daemon_mutations_are_visible_and_graceful_stop_persists_last_save() {
+    daemon_mutations_and_shutdown(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn stable_daemon_mutations_and_graceful_stop_preserve_visibility() {
+    daemon_mutations_and_shutdown(true);
+}
+
+#[cfg(unix)]
+fn daemon_mutations_and_shutdown(stable: bool) {
     use std::{
         process::Stdio,
         time::{Duration, Instant},
@@ -165,7 +189,7 @@ fn daemon_mutations_are_visible_and_graceful_stop_persists_last_save() {
             let _ = self.0.wait();
         }
     }
-    let f = Fixture::new();
+    let f = Fixture::with_stable(stable);
     let start = |watch: bool| {
         let mut command = f.command();
         command.args(["daemon", "foreground"]);

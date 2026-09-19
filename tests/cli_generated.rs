@@ -15,9 +15,10 @@ struct Corpus {
     dir: tempfile::TempDir,
     root: PathBuf,
     files: BTreeMap<PathBuf, Vec<String>>,
+    stable: bool,
 }
 impl Corpus {
-    fn new(seed: u64, profile: &str) -> Self {
+    fn new(seed: u64, profile: &str, stable: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("repo");
         fs::create_dir_all(root.join(".git")).unwrap();
@@ -84,7 +85,12 @@ impl Corpus {
             fs::write(root.join(&path), text).unwrap();
             files.insert(path, lines);
         }
-        let corpus = Self { dir, root, files };
+        let corpus = Self {
+            dir,
+            root,
+            files,
+            stable,
+        };
         corpus.run(&[
             "index".into(),
             "--force".into(),
@@ -100,6 +106,10 @@ impl Corpus {
             .env("FXI_INDEXES", self.dir.path().join("indexes"))
             .env("FXI_SOCKET", self.dir.path().join("isolated.sock"))
             .env("NO_COLOR", "1")
+            .env("FXI_STABLE_SEGMENTS", if self.stable { "1" } else { "0" })
+            .env("FXI_QUERY_LOCAL", "0")
+            .env("FXI_NEGATIVE_ROUTING", "0")
+            .env("FXI_GENERATION_ROUTING", "0")
             .args(args)
             .output()
             .unwrap();
@@ -120,15 +130,24 @@ impl Corpus {
 
 #[test]
 fn generated_cli_modes_agree_with_exhaustive_source_scan() {
-    generated_modes("full");
+    generated_modes("full", false);
 }
 
 #[test]
 fn lean_cli_modes_agree_with_exhaustive_source_scan() {
-    generated_modes("lean");
+    generated_modes("lean", false);
 }
 
-fn generated_modes(profile: &str) {
+#[test]
+fn stable_full_cli_modes_agree_with_exhaustive_source_scan() {
+    generated_modes("full", true);
+}
+#[test]
+fn stable_lean_cli_modes_agree_with_exhaustive_source_scan() {
+    generated_modes("lean", true);
+}
+
+fn generated_modes(profile: &str, stable: bool) {
     let seed = std::env::var("FXI_CLI_SEED")
         .map(|s| s.parse().expect("FXI_CLI_SEED must be u64"))
         .unwrap_or(0x5eed_fa17);
@@ -136,7 +155,7 @@ fn generated_modes(profile: &str) {
         .ok()
         .map(|s| s.parse::<usize>().expect("FXI_CLI_CASE must be 0..127"));
     assert!(replay.is_none_or(|n| n < 128));
-    let corpus = Corpus::new(seed, profile);
+    let corpus = Corpus::new(seed, profile, stable);
     for case in 0..128 {
         if replay.is_some_and(|n| n != case) {
             continue;
