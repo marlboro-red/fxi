@@ -53,6 +53,11 @@ compaction, stats and prune are supported. The default layout is unchanged.
 
 ## Validation and measurement
 
+The subsequent [lifecycle validation](../validation-stable-segments/NOTES.md)
+adds actual process termination at publication/GC boundaries, overlapping readers,
+and sustained CLI histories. It found and fixed an empty-generation orphan that
+could prevent object reclamation after a crash. The format remains opt-in.
+
 Coverage includes full/lean update and deletion, legacy migration, shared object
 identity, pinned generation retention across compaction and later collection,
 lazy old-reader token/line-map access, returned writer metadata, packed capture,

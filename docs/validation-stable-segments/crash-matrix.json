@@ -1,0 +1,827 @@
+{
+  "arch": "aarch64",
+  "cases": [
+    {
+      "boundary": "generation_created",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "object_installed",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "objects_synced",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "manifest_written",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "generation_synced",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_file_synced",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_renamed",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "current_directory_synced",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "generations_retired",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "objects_marked",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "generation_created",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "object_installed",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "objects_synced",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "manifest_written",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "generation_synced",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_file_synced",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_renamed",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "current_directory_synced",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "generations_retired",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "objects_marked",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "generation_created",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "object_installed",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "objects_synced",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "manifest_written",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "generation_synced",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_file_synced",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_renamed",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "current_directory_synced",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "generations_retired",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "objects_marked",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "object_deleted",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "generation_created",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "object_installed",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "objects_synced",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "manifest_written",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "generation_synced",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_file_synced",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "full",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_renamed",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "current_directory_synced",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "generations_retired",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "objects_marked",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "full",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "generation_created",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "object_installed",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "objects_synced",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "manifest_written",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "generation_synced",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_file_synced",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_renamed",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "current_directory_synced",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "generations_retired",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "objects_marked",
+      "operation": "initial",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "generation_created",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "object_installed",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "objects_synced",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "manifest_written",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "generation_synced",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_file_synced",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_renamed",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "current_directory_synced",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "generations_retired",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "objects_marked",
+      "operation": "update",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "generation_created",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "object_installed",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "objects_synced",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "manifest_written",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "generation_synced",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_file_synced",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_renamed",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "current_directory_synced",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "generations_retired",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "objects_marked",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "object_deleted",
+      "operation": "compact",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "generation_created",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "object_installed",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "objects_synced",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "manifest_written",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "generation_synced",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_file_synced",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 0,
+      "profile": "lean",
+      "published_new": false,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 5
+    },
+    {
+      "boundary": "current_renamed",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "current_directory_synced",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "generations_retired",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    },
+    {
+      "boundary": "objects_marked",
+      "operation": "rebuild",
+      "pre_recovery_source_queries_verified": 5,
+      "profile": "lean",
+      "published_new": true,
+      "reclamation_verified": true,
+      "recovery_source_queries_verified": 5,
+      "source_queries_verified": 10
+    }
+  ],
+  "kind": "process_termination_not_power_loss",
+  "os": "macos"
+}
