@@ -962,7 +962,26 @@ fn reconcile_index_with_paths(
     Ok(UpdateOutcome::Incremental)
 }
 
-type ScannedFile = (PathBuf, PathBuf, u64, u64);
+/// Retain only changes while walking. Unchanged files need one seen-document bit,
+/// not an owned absolute path, relative path and a second path hash table.
+#[derive(Default, Debug)]
+struct ScanChanges {
+    new_files: Vec<(PathBuf, PathBuf)>,
+    modified_files: Vec<(PathBuf, PathBuf, u32)>,
+    rejected_unchanged: Vec<(PathBuf, u64)>,
+    seen: roaring::RoaringBitmap,
+}
+
+impl ScanChanges {
+    fn append(&mut self, other: &mut Self) {
+        self.new_files.append(&mut other.new_files);
+        self.modified_files.append(&mut other.modified_files);
+        self.rejected_unchanged
+            .append(&mut other.rejected_unchanged);
+        self.seen |= &other.seen;
+        other.seen.clear();
+    }
+}
 
 fn file_hints_can_be_scoped(
     root: &Path,
@@ -1059,23 +1078,23 @@ fn compute_index_diff(
 
     // Complete scans parallelize metadata reads across the tree. A precise
     // scope uses the serial walker to avoid starting workers for a few files.
-    let scanned: Vec<ScannedFile> = {
+    let changes = {
         let errors = Arc::new(Mutex::new(Vec::<String>::new()));
-        let entries: Arc<Mutex<Vec<ScannedFile>>> = Arc::new(Mutex::new(Vec::with_capacity(
-            scope.map_or(indexed_files.len(), HashSet::len),
-        )));
+        let entries = Arc::new(Mutex::new(ScanChanges::default()));
 
-        struct ScanVisitor {
+        struct ScanVisitor<'a> {
             root: PathBuf,
             errors: Arc<Mutex<Vec<String>>>,
             max_file_size: u64,
-            shared: Arc<Mutex<Vec<ScannedFile>>>,
-            // Batch into a thread-local vec; take the shared lock once per
-            // walker thread instead of once per file
-            local: Vec<ScannedFile>,
+            shared: Arc<Mutex<ScanChanges>>,
+            indexed_files: &'a HashMap<PathBuf, (u32, u64, u64)>,
+            rejected: &'a HashMap<PathBuf, u64>,
+            forced: Option<&'a HashSet<PathBuf>>,
+            // Classify in each walker thread; merge only changes and seen IDs.
+            local: ScanChanges,
         }
 
-        impl ScanVisitor {
+        impl ScanVisitor<'_> {
             fn metadata(&self, entry: &ignore::DirEntry) -> Option<std::fs::Metadata> {
                 match entry.metadata() {
                     Ok(meta) => Some(meta),
@@ -1087,17 +1106,15 @@ fn compute_index_diff(
             }
 
             fn flush(&mut self) {
-                if !self.local.is_empty() {
-                    let mut entries = self
-                        .shared
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    entries.append(&mut self.local);
-                }
+                let mut entries = self
+                    .shared
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                entries.append(&mut self.local);
             }
         }
 
-        impl ignore::ParallelVisitor for ScanVisitor {
+        impl ignore::ParallelVisitor for ScanVisitor<'_> {
             fn visit(
                 &mut self,
                 result: Result<ignore::DirEntry, ignore::Error>,
@@ -1134,35 +1151,61 @@ fn compute_index_diff(
                                 .min(u64::MAX as u128) as u64
                         })
                         .unwrap_or(0);
-                    let rel_path = rel_path.to_path_buf();
-                    self.local
-                        .push((entry.into_path(), rel_path, mtime, metadata.len()));
+                    if let Some(&(id, old_mtime, old_size)) = self.indexed_files.get(rel_path) {
+                        self.local.seen.insert(id);
+                        if mtime != old_mtime
+                            || metadata.len() != old_size
+                            || self.forced.is_some_and(|paths| paths.contains(rel_path))
+                        {
+                            self.local.modified_files.push((
+                                entry.path().to_path_buf(),
+                                rel_path.to_path_buf(),
+                                id,
+                            ));
+                        }
+                    } else if self.rejected.get(rel_path) == Some(&mtime)
+                        && !self.forced.is_some_and(|paths| paths.contains(rel_path))
+                    {
+                        self.local
+                            .rejected_unchanged
+                            .push((rel_path.to_path_buf(), mtime));
+                    } else {
+                        self.local
+                            .new_files
+                            .push((entry.path().to_path_buf(), rel_path.to_path_buf()));
+                    }
                 }
                 ignore::WalkState::Continue
             }
         }
 
-        impl Drop for ScanVisitor {
+        impl Drop for ScanVisitor<'_> {
             fn drop(&mut self) {
                 self.flush();
             }
         }
 
-        struct ScanBuilder {
+        struct ScanBuilder<'a> {
             root: PathBuf,
             errors: Arc<Mutex<Vec<String>>>,
             max_file_size: u64,
-            shared: Arc<Mutex<Vec<ScannedFile>>>,
+            shared: Arc<Mutex<ScanChanges>>,
+            indexed_files: &'a HashMap<PathBuf, (u32, u64, u64)>,
+            rejected: &'a HashMap<PathBuf, u64>,
+            forced: Option<&'a HashSet<PathBuf>>,
         }
 
-        impl<'s> ignore::ParallelVisitorBuilder<'s> for ScanBuilder {
+        impl<'s> ignore::ParallelVisitorBuilder<'s> for ScanBuilder<'s> {
             fn build(&mut self) -> Box<dyn ignore::ParallelVisitor + 's> {
                 Box::new(ScanVisitor {
                     root: self.root.clone(),
                     errors: Arc::clone(&self.errors),
                     max_file_size: self.max_file_size,
                     shared: Arc::clone(&self.shared),
-                    local: Vec::with_capacity(1024),
+                    indexed_files: self.indexed_files,
+                    rejected: self.rejected,
+                    forced: self.forced,
+                    local: ScanChanges::default(),
                 })
             }
         }
@@ -1172,6 +1215,9 @@ fn compute_index_diff(
             errors: Arc::clone(&errors),
             max_file_size,
             shared: Arc::clone(&entries),
+            indexed_files,
+            rejected,
+            forced,
         };
 
         // Include every ancestor so the walker constructs the normal nested
@@ -1212,13 +1258,16 @@ fn compute_index_diff(
                     })
                 })
             });
-        if let Some(scope) = scope {
+        if scope.is_some() {
             let mut visitor = ScanVisitor {
                 root: root.to_path_buf(),
                 errors: Arc::clone(&errors),
                 max_file_size,
                 shared: Arc::clone(&entries),
-                local: Vec::with_capacity(scope.len()),
+                indexed_files,
+                rejected,
+                forced,
+                local: ScanChanges::default(),
             };
             for entry in walk.build() {
                 ignore::ParallelVisitor::visit(&mut visitor, entry);
@@ -1239,51 +1288,24 @@ fn compute_index_diff(
         Arc::try_unwrap(entries).unwrap().into_inner().unwrap()
     };
 
-    let mut new_files = Vec::new();
-    let mut modified_files = Vec::new();
-    let mut rejected_unchanged: Vec<_> = rejected
+    let mut rejected_unchanged = changes.rejected_unchanged;
+    rejected_unchanged.extend(
+        rejected
+            .iter()
+            .filter(|(path, _)| scope.is_some_and(|paths| !paths.contains(*path)))
+            .map(|(path, mtime)| (path.clone(), *mtime)),
+    );
+    let deleted_files = indexed_files
         .iter()
-        .filter(|(path, _)| scope.is_some_and(|paths| !paths.contains(*path)))
-        .map(|(path, mtime)| (path.clone(), *mtime))
-        .collect();
-    let mut seen_paths: std::collections::HashSet<&Path> =
-        std::collections::HashSet::with_capacity(scanned.len());
-
-    for (full_path, rel_path, current_mtime, current_size) in &scanned {
-        seen_paths.insert(rel_path.as_path());
-
-        if let Some(&(doc_id, indexed_mtime, indexed_size)) = indexed_files.get(rel_path) {
-            // File exists in index - check if modified
-            if *current_mtime != indexed_mtime
-                || *current_size != indexed_size
-                || forced.is_some_and(|paths| paths.contains(rel_path))
-            {
-                modified_files.push((full_path.clone(), rel_path.clone(), doc_id));
-            }
-        } else if rejected.get(rel_path) == Some(current_mtime)
-            && !forced.is_some_and(|paths| paths.contains(rel_path))
-        {
-            // Previously rejected (binary sniff etc.) and unchanged since:
-            // skip instead of re-reading and re-rejecting it
-            rejected_unchanged.push((rel_path.clone(), *current_mtime));
-        } else {
-            // New file
-            new_files.push((full_path.clone(), rel_path.clone()));
-        }
-    }
-
-    // Find deleted files
-    let deleted_files: Vec<PathBuf> = indexed_files
-        .keys()
-        .filter(|path| {
-            scope.is_none_or(|paths| paths.contains(*path)) && !seen_paths.contains(path.as_path())
+        .filter(|(path, (id, _, _))| {
+            scope.is_none_or(|paths| paths.contains(*path)) && !changes.seen.contains(*id)
         })
-        .cloned()
+        .map(|(path, _)| path.clone())
         .collect();
 
     Ok(IndexDiff {
-        new_files,
-        modified_files,
+        new_files: changes.new_files,
+        modified_files: changes.modified_files,
         deleted_files,
         rejected_unchanged,
         indexed_count,
@@ -1910,6 +1932,62 @@ mod scoped_reconciliation_tests {
             .collect();
         paths.sort();
         paths
+    }
+
+    #[test]
+    fn parallel_diff_tracks_sparse_ids_and_preserves_forced_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join(".git")).unwrap();
+        let mut indexed = HashMap::new();
+        for (name, id) in [
+            ("keep.rs", 0),
+            ("edit.rs", 65535),
+            ("gone.rs", 65536),
+            ("force.rs", u32::MAX),
+        ] {
+            let path = temp.path().join(name);
+            fs::write(&path, "original\n").unwrap();
+            let metadata = fs::metadata(&path).unwrap();
+            let mtime = metadata
+                .modified()
+                .unwrap()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+            indexed.insert(PathBuf::from(name), (id, mtime, metadata.len()));
+        }
+        fs::remove_file(temp.path().join("gone.rs")).unwrap();
+        fs::write(temp.path().join("edit.rs"), "longer replacement\n").unwrap();
+        fs::write(temp.path().join("new.rs"), "new\n").unwrap();
+        let forced = HashSet::from([PathBuf::from("force.rs")]);
+        let diff = compute_index_diff(
+            temp.path(),
+            &indexed,
+            indexed.len(),
+            &HashMap::new(),
+            None,
+            Some(&forced),
+        )
+        .unwrap();
+        assert_eq!(diff.deleted_files, [PathBuf::from("gone.rs")]);
+        assert_eq!(
+            diff.new_files,
+            [(temp.path().join("new.rs"), PathBuf::from("new.rs"))]
+        );
+        let mut modified: Vec<_> = diff
+            .modified_files
+            .into_iter()
+            .map(|(_, path, id)| (path, id))
+            .collect();
+        modified.sort();
+        assert_eq!(
+            modified,
+            [
+                (PathBuf::from("edit.rs"), 65535),
+                (PathBuf::from("force.rs"), u32::MAX)
+            ]
+        );
+        assert!(diff.rejected_unchanged.is_empty());
     }
 
     fn matches(reader: &IndexReader, text: &str) -> Vec<PathBuf> {
