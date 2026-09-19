@@ -16,9 +16,10 @@ struct Corpus {
     root: PathBuf,
     files: BTreeMap<PathBuf, Vec<String>>,
     stable: bool,
+    checked: bool,
 }
 impl Corpus {
-    fn new(seed: u64, profile: &str, stable: bool) -> Self {
+    fn new(seed: u64, profile: &str, stable: bool, checked: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("repo");
         fs::create_dir_all(root.join(".git")).unwrap();
@@ -90,6 +91,7 @@ impl Corpus {
             root,
             files,
             stable,
+            checked,
         };
         corpus.run(&[
             "index".into(),
@@ -107,9 +109,20 @@ impl Corpus {
             .env("FXI_SOCKET", self.dir.path().join("isolated.sock"))
             .env("NO_COLOR", "1")
             .env("FXI_STABLE_SEGMENTS", if self.stable { "1" } else { "0" })
-            .env("FXI_QUERY_LOCAL", "0")
+            .env("FXI_QUERY_LOCAL", if self.checked { "1" } else { "0" })
             .env("FXI_NEGATIVE_ROUTING", "0")
-            .env("FXI_GENERATION_ROUTING", "0")
+            .env(
+                "FXI_GENERATION_ROUTING",
+                if self.checked { "1" } else { "0" },
+            )
+            .env(
+                "FXI_SOURCE_PACK",
+                if self.checked && cfg!(unix) { "1" } else { "0" },
+            )
+            .env(
+                "FXI_SOURCE_PACK_COMPRESSION",
+                if self.checked && cfg!(unix) { "1" } else { "0" },
+            )
             .args(args)
             .output()
             .unwrap();
@@ -130,24 +143,34 @@ impl Corpus {
 
 #[test]
 fn generated_cli_modes_agree_with_exhaustive_source_scan() {
-    generated_modes("full", false);
+    generated_modes("full", false, false);
 }
 
 #[test]
 fn lean_cli_modes_agree_with_exhaustive_source_scan() {
-    generated_modes("lean", false);
+    generated_modes("lean", false, false);
 }
 
 #[test]
 fn stable_full_cli_modes_agree_with_exhaustive_source_scan() {
-    generated_modes("full", true);
+    generated_modes("full", true, false);
 }
 #[test]
 fn stable_lean_cli_modes_agree_with_exhaustive_source_scan() {
-    generated_modes("lean", true);
+    generated_modes("lean", true, false);
 }
 
-fn generated_modes(profile: &str, stable: bool) {
+#[test]
+fn checked_stable_full_cli_modes_agree_with_exhaustive_source_scan() {
+    generated_modes("full", true, true);
+}
+
+#[test]
+fn checked_stable_lean_cli_modes_agree_with_exhaustive_source_scan() {
+    generated_modes("lean", true, true);
+}
+
+fn generated_modes(profile: &str, stable: bool, checked: bool) {
     let seed = std::env::var("FXI_CLI_SEED")
         .map(|s| s.parse().expect("FXI_CLI_SEED must be u64"))
         .unwrap_or(0x5eed_fa17);
@@ -155,7 +178,7 @@ fn generated_modes(profile: &str, stable: bool) {
         .ok()
         .map(|s| s.parse::<usize>().expect("FXI_CLI_CASE must be 0..127"));
     assert!(replay.is_none_or(|n| n < 128));
-    let corpus = Corpus::new(seed, profile, stable);
+    let corpus = Corpus::new(seed, profile, stable, checked);
     for case in 0..128 {
         if replay.is_some_and(|n| n != case) {
             continue;

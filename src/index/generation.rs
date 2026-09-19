@@ -116,15 +116,19 @@ impl Generation {
 
     pub fn publish(&mut self) -> Result<()> {
         if self.stable_objects {
-            anyhow::ensure!(
-                !crate::index::query_local::requested()
-                    && !crate::index::negative_routing::requested()
-                    && !crate::index::generation_routing::requested(),
-                "Experimental stable segments currently require strict validation; disable checked/negative routing"
-            );
+            let checks = crate::index::query_local::requested()
+                .then(|| {
+                    crate::index::reader::prepare_query_local_checks(
+                        &self.path,
+                        Some(&self.inherited_objects),
+                    )
+                })
+                .transpose()?;
             super::objects::prepare(&self.path, &self.inherited_objects)?;
-        }
-        if crate::index::query_local::requested() {
+            if let Some(checks) = checks {
+                checks.publish(&self.path)?;
+            }
+        } else if crate::index::query_local::requested() {
             crate::index::reader::write_query_local_checks(&self.path)?;
         }
         crate::index::negative_routing::write_if_requested(&self.path)?;

@@ -59,9 +59,13 @@ struct Fixture {
     root: PathBuf,
     runtime: PathBuf,
     profile: &'static str,
+    checked: bool,
 }
 impl Fixture {
     fn new(profile: &'static str, initial: bool) -> Self {
+        Self::new_mode(profile, initial, false)
+    }
+    fn new_mode(profile: &'static str, initial: bool, checked: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("source");
         fs::create_dir_all(root.join(".git")).unwrap();
@@ -80,6 +84,7 @@ impl Fixture {
             root,
             runtime,
             profile,
+            checked,
         };
         if !initial {
             fixture.run_child("rebuild", None);
@@ -103,9 +108,12 @@ impl Fixture {
                 crate::utils::app_data::indexes_path().unwrap(),
             )
             .env("FXI_STABLE_SEGMENTS", "1")
-            .env("FXI_QUERY_LOCAL", "0")
+            .env("FXI_QUERY_LOCAL", if self.checked { "1" } else { "0" })
             .env("FXI_NEGATIVE_ROUTING", "0")
-            .env("FXI_GENERATION_ROUTING", "0")
+            .env(
+                "FXI_GENERATION_ROUTING",
+                if self.checked { "1" } else { "0" },
+            )
             .env("FXI_SOURCE_PACK", "0")
             .env("TMPDIR", &self.runtime)
             .env("TMP", &self.runtime)
@@ -236,7 +244,12 @@ fn process_kills_preserve_a_complete_generation_and_recover_orphans() {
         "generations_retired",
         "objects_marked",
     ];
-    for profile in ["full", "lean"] {
+    for (profile, checked) in [
+        ("full", false),
+        ("lean", false),
+        ("full", true),
+        ("lean", true),
+    ] {
         for operation in ["initial", "update", "compact", "rebuild"] {
             let mut points = before.to_vec();
             points.extend(after);
@@ -244,7 +257,7 @@ fn process_kills_preserve_a_complete_generation_and_recover_orphans() {
                 points.push("object_deleted");
             }
             for point in points {
-                let fixture = Fixture::new(profile, operation == "initial");
+                let fixture = Fixture::new_mode(profile, operation == "initial", checked);
                 let pointer = fs::read(fixture.container().join("CURRENT")).ok();
                 if operation == "update" {
                     fixture.mutate();
@@ -275,6 +288,7 @@ fn process_kills_preserve_a_complete_generation_and_recover_orphans() {
                 fixture.verify_reclaimed();
                 cases.push(serde_json::json!({
                     "profile": profile,
+                    "checked": checked,
                     "operation": operation,
                     "boundary": point,
                     "published_new": published != pointer,

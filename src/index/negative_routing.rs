@@ -5,10 +5,11 @@
 //! supply the negative proof. Missing, damaged, stale, or unsupported evidence
 //! always falls back to ordinary opening and its existing corruption errors.
 //!
-//! Current limitation: collecting an older generation changes ctime on inherited
-//! hard-linked files, including the new generation's links. A certificate can
+//! Legacy-layout limitation: collecting an older generation changes ctime on
+//! inherited hard-linked files, including the new generation's links. A certificate can
 //! therefore become ineligible immediately after delta publication. Retaining
-//! ctime is essential for correctness; full builds do not share these inodes.
+//! ctime is essential for correctness; stable objects avoid this link-count
+//! churn by retaining the same object paths across generations.
 use crate::index::types::{IndexMeta, SegmentId};
 use crate::query::parser::{Query, QueryNode};
 use anyhow::{Context, Result, ensure};

@@ -2692,7 +2692,39 @@ pub(crate) fn read_bloom_filter(segment_path: &Path) -> Result<BloomFilter> {
 
 /// Produce optional checksum evidence only after strict staging validation.
 pub(crate) fn write_query_local_checks(index_path: &Path) -> Result<()> {
-    let meta: IndexMeta = serde_json::from_reader(File::open(index_path.join("meta.json"))?)?;
+    prepare_query_local_checks(index_path, None)?.publish(index_path)
+}
+
+/// Segment-local proofs are completed while new segments are private. The
+/// generation proof is issued only after object export finalizes metadata.
+/// Inherited objects are validated but never modified, even if proofs are absent.
+pub(crate) struct PreparedQueryLocalChecks {
+    routing: Option<Vec<crate::index::query_local::RoutingSegment>>,
+    generation_routing: Option<crate::index::generation_routing::Builder>,
+}
+
+impl PreparedQueryLocalChecks {
+    pub(crate) fn publish(self, index_path: &Path) -> Result<()> {
+        crate::index::query_local::write_routing_manifest(index_path, self.routing)?;
+        if let Some(builder) = self.generation_routing {
+            builder.write(index_path)?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn prepare_query_local_checks(
+    index_path: &Path,
+    inherited: Option<&std::collections::BTreeMap<SegmentId, String>>,
+) -> Result<PreparedQueryLocalChecks> {
+    let mut meta: IndexMeta = serde_json::from_reader(File::open(index_path.join("meta.json"))?)?;
+    if inherited.is_some() {
+        // A stable delta temporarily carries old object references alongside
+        // legacy-version staging metadata. Publication installs the complete
+        // final map; the caller's inherited map resolves read-only objects here.
+        anyhow::ensure!(meta.version < 4, "Expected unpublished staging metadata");
+        meta.segment_objects.clear();
+    }
     meta.validate_format()?;
     let documents = read_documents_version(index_path, meta.version)?;
     let paths = read_paths(index_path)?;
@@ -2708,7 +2740,17 @@ pub(crate) fn write_query_local_checks(index_path: &Path) -> Result<()> {
         .then(|| crate::index::generation_routing::Builder::new(&ids))
         .transpose()?;
     for id in ids {
-        let path = meta.segment_path(index_path, id)?;
+        let inherited_name = inherited.and_then(|objects| objects.get(&id));
+        let path = if let Some(name) = inherited_name {
+            anyhow::ensure!(
+                crate::index::objects::valid_name(name),
+                "Invalid inherited object"
+            );
+            crate::index::objects::store(index_path)?.join(name)
+        } else {
+            meta.segment_path(index_path, id)?
+        };
+        let writable = inherited_name.is_none() && meta.version < 4;
         let segment = SegmentReader::open(
             &path,
             id,
@@ -2719,11 +2761,13 @@ pub(crate) fn write_query_local_checks(index_path: &Path) -> Result<()> {
         if let Some(builder) = &mut generation_routing {
             builder.add(id, &segment.trigram_dict.data)?;
         }
-        crate::index::query_local::write(
-            &path,
-            &segment.trigram_dict.data,
-            &segment.trigram_postings,
-        )?;
+        if writable {
+            crate::index::query_local::write(
+                &path,
+                &segment.trigram_dict.data,
+                &segment.trigram_postings,
+            )?;
+        }
         let bloom = segment
             .bloom_filter
             .as_ref()
@@ -2733,7 +2777,9 @@ pub(crate) fn write_query_local_checks(index_path: &Path) -> Result<()> {
                     .context("Strict publisher requires an owned Bloom")
             })
             .transpose()?;
-        crate::index::query_local::write_bloom_proof(&path, &segment.trigram_dict.data, bloom)?;
+        if writable {
+            crate::index::query_local::write_bloom_proof(&path, &segment.trigram_dict.data, bloom)?;
+        }
         if let Some(records) = &mut routing {
             if let Some(record) = crate::index::query_local::routing_segment(
                 &path,
@@ -2748,11 +2794,10 @@ pub(crate) fn write_query_local_checks(index_path: &Path) -> Result<()> {
             }
         }
     }
-    crate::index::query_local::write_routing_manifest(index_path, routing)?;
-    if let Some(builder) = generation_routing {
-        builder.write(index_path)?;
-    }
-    Ok(())
+    Ok(PreparedQueryLocalChecks {
+        routing,
+        generation_routing,
+    })
 }
 
 /// Establish exactly the core invariants required by a files-only gram query,
