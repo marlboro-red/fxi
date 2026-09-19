@@ -1,0 +1,16 @@
+--- a/src/index/build.rs
++++ b/src/index/build.rs
+@@ -1185,6 +1185,13 @@
+         let filter_scope = scope.cloned();
+         let filter_root = root.to_path_buf();
+         let mut walk = WalkBuilder::new(root);
++        if let Some(threads) = std::env::var("FXI_SCAN_THREADS")
++            .ok()
++            .and_then(|v| v.parse::<usize>().ok())
++            .filter(|&v| v > 0 && v <= 64)
++        {
++            walk.threads(threads);
++        }
+         walk.hidden(true)
+             .git_ignore(true)
+             .git_global(true)

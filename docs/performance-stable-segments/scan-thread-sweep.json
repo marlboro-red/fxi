@@ -1,0 +1,512 @@
+{
+  "binary_sha256": "bcb26ced4d1c18558476cdf17df6487c6611f4098ce02d3f6e76b91ef83e3ebd",
+  "binary": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-scan-sweep-duf_whdw/fxi",
+  "corpus_manifest": {
+    "files": 65287,
+    "source_bytes": 1311967080,
+    "sha256": "364baf7b324340e0b66c4630c18954b72c96812044f77f6b9d2a7d9d1e28f3cb"
+  },
+  "fixture": {
+    "root": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-_bn7z5xu/corpus",
+    "before": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-_bn7z5xu/prepared-2048",
+    "after": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-publication-comparison-_bn7z5xu/prepared-candidate-2048"
+  },
+  "samples": {
+    "1": [
+      {
+        "prepare": 42.456,
+        "diff": 352.515
+      },
+      {
+        "prepare": 43.728,
+        "diff": 353.952
+      },
+      {
+        "prepare": 44.871,
+        "diff": 346.673
+      },
+      {
+        "prepare": 45.147,
+        "diff": 352.108
+      },
+      {
+        "prepare": 45.152,
+        "diff": 350.979
+      },
+      {
+        "prepare": 43.983,
+        "diff": 353.207
+      },
+      {
+        "prepare": 43.307,
+        "diff": 350.561
+      },
+      {
+        "prepare": 41.26,
+        "diff": 347.486
+      },
+      {
+        "prepare": 42.953,
+        "diff": 346.57
+      },
+      {
+        "prepare": 40.708,
+        "diff": 351.932
+      },
+      {
+        "prepare": 42.856,
+        "diff": 337.438
+      },
+      {
+        "prepare": 41.687,
+        "diff": 347.246
+      },
+      {
+        "prepare": 42.779,
+        "diff": 352.7
+      },
+      {
+        "prepare": 43.784,
+        "diff": 349.413
+      },
+      {
+        "prepare": 44.837,
+        "diff": 349.833
+      }
+    ],
+    "2": [
+      {
+        "prepare": 44.196,
+        "diff": 216.432
+      },
+      {
+        "prepare": 42.992,
+        "diff": 217.518
+      },
+      {
+        "prepare": 43.35,
+        "diff": 220.063
+      },
+      {
+        "prepare": 42.614,
+        "diff": 211.825
+      },
+      {
+        "prepare": 44.006,
+        "diff": 218.607
+      },
+      {
+        "prepare": 42.161,
+        "diff": 222.332
+      },
+      {
+        "prepare": 44.792,
+        "diff": 222.673
+      },
+      {
+        "prepare": 44.623,
+        "diff": 217.127
+      },
+      {
+        "prepare": 44.452,
+        "diff": 214.69
+      },
+      {
+        "prepare": 43.051,
+        "diff": 224.25
+      },
+      {
+        "prepare": 42.784,
+        "diff": 210.586
+      },
+      {
+        "prepare": 44.155,
+        "diff": 220.76
+      },
+      {
+        "prepare": 44.928,
+        "diff": 218.352
+      },
+      {
+        "prepare": 44.145,
+        "diff": 215.378
+      },
+      {
+        "prepare": 43.705,
+        "diff": 226.638
+      }
+    ],
+    "4": [
+      {
+        "prepare": 47.937,
+        "diff": 154.934
+      },
+      {
+        "prepare": 45.248,
+        "diff": 146.391
+      },
+      {
+        "prepare": 43.555,
+        "diff": 147.029
+      },
+      {
+        "prepare": 43.199,
+        "diff": 154.647
+      },
+      {
+        "prepare": 44.071,
+        "diff": 154.778
+      },
+      {
+        "prepare": 43.545,
+        "diff": 145.575
+      },
+      {
+        "prepare": 43.967,
+        "diff": 148.58
+      },
+      {
+        "prepare": 42.757,
+        "diff": 153.101
+      },
+      {
+        "prepare": 42.966,
+        "diff": 154.282
+      },
+      {
+        "prepare": 44.726,
+        "diff": 153.82
+      },
+      {
+        "prepare": 44.107,
+        "diff": 144.567
+      },
+      {
+        "prepare": 42.186,
+        "diff": 146.741
+      },
+      {
+        "prepare": 43.461,
+        "diff": 150.821
+      },
+      {
+        "prepare": 44.545,
+        "diff": 149.723
+      },
+      {
+        "prepare": 45.162,
+        "diff": 153.151
+      }
+    ],
+    "6": [
+      {
+        "prepare": 41.34,
+        "diff": 135.206
+      },
+      {
+        "prepare": 43.233,
+        "diff": 133.067
+      },
+      {
+        "prepare": 40.971,
+        "diff": 130.735
+      },
+      {
+        "prepare": 43.56,
+        "diff": 131.481
+      },
+      {
+        "prepare": 43.093,
+        "diff": 132.588
+      },
+      {
+        "prepare": 42.005,
+        "diff": 130.985
+      },
+      {
+        "prepare": 42.415,
+        "diff": 131.121
+      },
+      {
+        "prepare": 43.031,
+        "diff": 133.996
+      },
+      {
+        "prepare": 44.191,
+        "diff": 133.852
+      },
+      {
+        "prepare": 44.756,
+        "diff": 134.198
+      },
+      {
+        "prepare": 44.553,
+        "diff": 130.946
+      },
+      {
+        "prepare": 42.61,
+        "diff": 132.432
+      },
+      {
+        "prepare": 42.355,
+        "diff": 132.703
+      },
+      {
+        "prepare": 44.009,
+        "diff": 132.863
+      },
+      {
+        "prepare": 43.6,
+        "diff": 132.999
+      }
+    ],
+    "8": [
+      {
+        "prepare": 43.122,
+        "diff": 124.372
+      },
+      {
+        "prepare": 43.14,
+        "diff": 125.858
+      },
+      {
+        "prepare": 42.973,
+        "diff": 126.45
+      },
+      {
+        "prepare": 43.921,
+        "diff": 124.982
+      },
+      {
+        "prepare": 44.009,
+        "diff": 128.312
+      },
+      {
+        "prepare": 42.699,
+        "diff": 123.615
+      },
+      {
+        "prepare": 42.959,
+        "diff": 125.273
+      },
+      {
+        "prepare": 44.711,
+        "diff": 122.743
+      },
+      {
+        "prepare": 41.484,
+        "diff": 127.222
+      },
+      {
+        "prepare": 44.54,
+        "diff": 119.566
+      },
+      {
+        "prepare": 42.754,
+        "diff": 124.088
+      },
+      {
+        "prepare": 43.909,
+        "diff": 123.394
+      },
+      {
+        "prepare": 44.34,
+        "diff": 125.067
+      },
+      {
+        "prepare": 44.366,
+        "diff": 125.496
+      },
+      {
+        "prepare": 44.311,
+        "diff": 123.704
+      }
+    ],
+    "12": [
+      {
+        "prepare": 45.539,
+        "diff": 186.99
+      },
+      {
+        "prepare": 47.012,
+        "diff": 134.32
+      },
+      {
+        "prepare": 42.651,
+        "diff": 137.565
+      },
+      {
+        "prepare": 42.765,
+        "diff": 138.672
+      },
+      {
+        "prepare": 43.119,
+        "diff": 138.305
+      },
+      {
+        "prepare": 44.314,
+        "diff": 137.657
+      },
+      {
+        "prepare": 42.307,
+        "diff": 140.294
+      },
+      {
+        "prepare": 44.917,
+        "diff": 138.911
+      },
+      {
+        "prepare": 41.455,
+        "diff": 134.604
+      },
+      {
+        "prepare": 43.779,
+        "diff": 138.603
+      },
+      {
+        "prepare": 45.049,
+        "diff": 133.549
+      },
+      {
+        "prepare": 42.313,
+        "diff": 142.196
+      },
+      {
+        "prepare": 44.603,
+        "diff": 134.553
+      },
+      {
+        "prepare": 47.666,
+        "diff": 142.584
+      },
+      {
+        "prepare": 42.523,
+        "diff": 137.538
+      }
+    ],
+    "16": [
+      {
+        "prepare": 44.276,
+        "diff": 143.545
+      },
+      {
+        "prepare": 45.194,
+        "diff": 141.611
+      },
+      {
+        "prepare": 42.23,
+        "diff": 143.016
+      },
+      {
+        "prepare": 42.105,
+        "diff": 140.484
+      },
+      {
+        "prepare": 43.066,
+        "diff": 141.968
+      },
+      {
+        "prepare": 43.776,
+        "diff": 143.936
+      },
+      {
+        "prepare": 44.231,
+        "diff": 141.299
+      },
+      {
+        "prepare": 44.951,
+        "diff": 140.89
+      },
+      {
+        "prepare": 43.621,
+        "diff": 146.001
+      },
+      {
+        "prepare": 43.783,
+        "diff": 141.107
+      },
+      {
+        "prepare": 42.552,
+        "diff": 137.313
+      },
+      {
+        "prepare": 45.138,
+        "diff": 141.599
+      },
+      {
+        "prepare": 43.909,
+        "diff": 142.113
+      },
+      {
+        "prepare": 43.988,
+        "diff": 144.435
+      },
+      {
+        "prepare": 43.611,
+        "diff": 139.05
+      }
+    ],
+    "24": [
+      {
+        "prepare": 45.967,
+        "diff": 143.253
+      },
+      {
+        "prepare": 43.281,
+        "diff": 148.584
+      },
+      {
+        "prepare": 44.535,
+        "diff": 139.071
+      },
+      {
+        "prepare": 44.84,
+        "diff": 145.671
+      },
+      {
+        "prepare": 43.362,
+        "diff": 142.879
+      },
+      {
+        "prepare": 45.174,
+        "diff": 135.556
+      },
+      {
+        "prepare": 43.808,
+        "diff": 143.478
+      },
+      {
+        "prepare": 43.541,
+        "diff": 142.498
+      },
+      {
+        "prepare": 43.988,
+        "diff": 145.046
+      },
+      {
+        "prepare": 44.046,
+        "diff": 141.654
+      },
+      {
+        "prepare": 43.713,
+        "diff": 141.709
+      },
+      {
+        "prepare": 44.668,
+        "diff": 142.358
+      },
+      {
+        "prepare": 41.811,
+        "diff": 140.097
+      },
+      {
+        "prepare": 45.222,
+        "diff": 145.803
+      },
+      {
+        "prepare": 41.822,
+        "diff": 140.623
+      }
+    ]
+  }
+}

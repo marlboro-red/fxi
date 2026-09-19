@@ -355,3 +355,90 @@ trade for this result. **The production changes were reverted.** This is evidenc
 against this specific implementation, not evidence that validation reuse can never
 help. In-process reuse or embedding evidence in an existing manifest could avoid
 its per-object I/O cost, but need separate correctness and performance validation.
+
+### Reconciliation worker-count probe
+
+A temporary walker-thread override swept 1, 2, 4, 6, 8, 12, 16 and 24 workers
+in 15 randomized rounds of unchanged-tree reconciliation on the retained Linux
+fixture. Median filesystem-diff phase times were respectively 350.56, 218.35,
+150.82, 132.70, 124.98, 138.31, 141.61 and 142.50 ms. The pinned `ignore` dependency
+normally chooses available parallelism capped at 12. Eight workers were better
+on this Mac, but this is not evidence for an eight-worker default across devices
+and filesystems. The override was removed; shipping worker selection is unchanged.
+
+[Raw phase samples and binary hash](scan-thread-sweep.json),
+[temporary override patch](scan-thread-probe.patch), applied to `9270a70`.
+These are warm unchanged-tree phase measurements, not durable-update or search
+latencies; do not compare them directly with whole-update tables. The experiment
+used private indexes and paused/resumed the unrelated watcher.
+
+### Retained: classify reconciliation changes during the walk
+
+The old full scan collected owned absolute/relative paths and metadata for every
+eligible file, then built another path hash table to find deletions. The new scan
+classifies each file in its walker thread, retaining only new/modified/rejected
+records and a Roaring bitmap of seen document IDs. Merging thread-local results
+lets deletion detection use the already-validated indexed document IDs. Scoped
+watcher scans use the same classifier. Ignore rules, metadata reads, forced hints,
+source-error propagation, storage formats and worker counts are unchanged.
+
+This applies to normal indexing as well as the stable experiment. A specific
+regression covers IDs 0, 65,535, 65,536 and `u32::MAX`, preserving forced rereads
+and exact additions/deletions. Existing reconciliation tests cover ignored paths,
+symlinks, scope fallback, preserved timestamps and transient failures.
+
+Same previous combined-mode binary versus a frozen candidate, both stable,
+query-local and generation routing; eleven alternating pairs, exact source-result
+checks, no compilation/tests during timing, watcher paused with a resume guard:
+
+| Fixture | Previous ms | Streaming diff ms | Faster pairs |
+| --- | ---: | ---: | ---: |
+| 1 segment / 4,096 files, full | 44.58 | 42.90 | 8/11 |
+| 64 segments / 4,096 files, full | 66.91 | 68.65 | 5/11 |
+| 256 segments / 4,096 files, full | 141.88 | 141.19 | 6/11 |
+| 32 segments / 65,287 Linux files, lean, compressed packs | 385.38 | 368.83 | 7/11 |
+
+[Raw small samples](streaming-diff-small.json),
+[raw large samples](streaming-diff-linux.json). Small-fixture differences are
+mixed. Large-tree reconciliation itself improves 183.505 to 157.470 ms (14.2%),
+with 10/11 faster phase pairs and 26.632 ms median paired saving. Publication
+varied in the other direction, so the whole-update median improvement is only
+4.3%, with 7/11 faster pairs. Do not turn that small campaign into a guaranteed
+end-to-end improvement or tail-latency claim.
+
+A separate 11-pair unchanged-tree reconciliation campaign using macOS `time -l`
+measured peak RSS of **275.44 to 246.22 MiB**, a **10.6% reduction**, with all 11
+candidate samples lower. [Raw RSS samples](streaming-diff-rss.json) retain phase
+traces and process-resource output. This measures the complete standalone process,
+including mapped index pages, not just allocator heap usage.
+
+[31-pair query controls](streaming-diff-queries.json) retain exact ripgrep result
+checks: absent 4.536/4.650 ms, selective 11.080/11.271 ms, broad regex
+97.055/97.503 ms, previous/candidate respectively. These are effectively unchanged
+query timings, not search improvements. Corpus manifests were rechecked after
+controls and private benchmark corpus/index copies were removed.
+
+The realistic fixture and all timings remain warm-filesystem Linux *source* on
+macOS, not native Linux performance or a refreshed competitor comparison. The
+single-segment stable-layout penalty relative to legacy storage, full filesystem
+reconciliation, global metadata rewriting and inherited posting validation remain
+open work. This change reduces temporary memory and scan work without introducing
+another on-disk proof, filesystem flush or tuning option.
+
+Validation for retained implementation `83c3081`: **1,143 all-target Rust test
+executions passed**, with two ignored child-helper entries; Clippy with warnings
+denied, Rust 1.88, rustfmt and all 21 Python harness tests passed. The
+[full/lean checked packed lifecycle campaign](streaming-diff-lifecycle.json.gz)
+completed **2,000 history updates**, 40 compactions, two final reclamation updates
+and **5,786 source-oracle queries comparing 1,166,220 matching rows**. It ran
+concurrently with the local test suite; its subprocess timings are diagnostics,
+not benchmark evidence. Production registry entries stayed at 19,881. The watcher
+was resumed, and benchmark/lifecycle fixture workspaces were cleaned.
+
+Reproduce the durable update comparison with `scripts/compare-publication.py`,
+using the saved before/after binaries, `--baseline-stable-segments`,
+`--candidate-stable-segments`, both query-local and generation-routing flags,
+and `--repetitions 11`. Add `--corpus PATH --source-pack --keep-fixture` for the
+large fixture and subsequent `compare-startup.py` controls. Reports retain exact
+binary hashes, corpus identity, policy flags and raw samples. No competitor
+rankings were refreshed in this round.

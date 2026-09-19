@@ -126,3 +126,11 @@ single-segment index regress. It remains opt-in. The combined checked-mode follo
 creates segment proofs before object export and generation certificates afterward,
 without modifying shared objects; missing inherited proofs retain safe fallback.
 Global document/path rewrites and full standalone reconciliation remain.
+
+Full/scoped reconciliation now classifies files in walker threads and retains
+changed records plus seen document-ID bitmaps, avoiding temporary path copies for
+unchanged files and a second path hash table. This lowers measured large-tree scan
+work and process RSS without changing scan coverage, read-error handling, formats
+or worker selection. It does not eliminate full scans or global metadata rewrites.
+The same report records a rejected per-object validation-proof prototype; inherited
+posting validation was not relaxed by the retained change.
