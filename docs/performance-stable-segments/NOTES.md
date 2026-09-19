@@ -108,3 +108,51 @@ harness tests. Production index registrations had no additions or removals.
 An additional isolated native-daemon contract passed for stable storage: update
 visibility, compaction/reload, removal, and persistence of a final save during
 graceful watched shutdown.
+
+
+## Follow-up: avoid syncing cleanup directories when nothing changed
+
+Publication already syncs `generations/` before replacing CURRENT. Its second
+sync is now conditional on an actual retirement attempt. The flag is set before
+removal, even if removal fails after partial progress. A required sync failure
+still prevents object collection. Object collection returns without another
+object-store sync when its garbage set is empty. Tests inject removal and sync
+failure and verify that referenced/orphan objects are not reclaimed prematurely.
+
+A fresh complete campaign against the same original `a7ff31e` control produced:
+
+| Inherited segments / fixture | Control ms | Final candidate ms | Faster pairs |
+| --- | ---: | ---: | ---: |
+| 1 / 4,096 files | 35.72 | 40.91 | 0/7 |
+| 64 / 4,096 files | 192.00 | 51.84 | 7/7 |
+| 256 / 4,096 files | 660.77 | 91.27 | 7/7 |
+| 32 / 65,284 Linux files | 311.68 | 285.13 | 10/11 |
+
+[Raw synthetic samples](publication-small-sync.json) and
+[raw Linux samples](publication-linux-sync.json) include output and phase traces.
+The final candidate is **3.7× faster at 64 segments, 7.2× faster at 256 segments,
+and 8.5% faster on Linux** in this campaign. It remains **14.5% slower at one
+segment**. These are whole-update measurements, not just the removed phase.
+The two campaigns independently support the fragmentation benefit; differences
+between their medians do not isolate the cleanup tweak's effect on their own.
+The layout remains opt-in, rather than promoting a small-index regression.
+
+Final [31-pair query controls](queries-linux-sync.json) measure absent
+30.054 → 30.139 ms, selective 31.765 → 31.948 ms, and broad regex
+652.881 → 623.975 ms. The [normal-layout binary control](queries-legacy-control-sync.json)
+measures 29.778 → 29.809, 31.670 → 31.489, and 634.698 → 627.438 ms.
+Given the earlier flat broad-query campaign and variation in both controls,
+these results support no material search regression, not an established new
+broad-query speedup. [Old-binary rejection](compatibility-sync.json) also passes.
+
+This finishes the first storage experiment, not the proposed architecture work:
+metadata still rewrites globally, strict readers still validate inherited posting
+evidence, and GC scans generation references and object names. Incremental
+metadata, checked-proof compatibility, bounded maintenance and query-local
+validation remain separate experiments with their own correctness gates.
+
+Final follow-up validation passed 1,115 all-target test executions, Clippy,
+Rust 1.88, rustfmt and all 11 Python harness tests. The first storage commit
+(`703e981`) passed all eight CI jobs, including Windows, macOS and Linux.
+Both benchmark campaigns resumed the existing watcher. Private retained
+benchmark corpora/indexes were removed after their query controls completed.

@@ -170,6 +170,9 @@ pub(crate) fn collect(container: &Path) -> Result<()> {
             garbage.push(entry.path());
         }
     }
+    if garbage.is_empty() {
+        return Ok(());
+    }
     for path in garbage {
         fs::remove_dir_all(path)?;
     }

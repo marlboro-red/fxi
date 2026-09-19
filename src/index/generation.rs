@@ -148,18 +148,32 @@ impl Generation {
         sync_directory(&self.container)?;
         // Readers pin their generation with a shared lease. Cleanup is best
         // effort (Windows can retain mapped files until their last handle closes).
-        self.collect_unpinned();
+        let retirement_attempted = self.collect_unpinned();
         // Failure leaks reclaimable space rather than invalidating publication.
-        if sync_directory(&self.container.join("generations")).is_ok() {
-            let _ = super::objects::collect(&self.container);
-        }
+        let _ = self.collect_objects_after_retirement(retirement_attempted, sync_directory);
         Ok(())
     }
 
-    fn collect_unpinned(&self) {
+    fn collect_objects_after_retirement(
+        &self,
+        attempted: bool,
+        sync: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<()> {
+        if attempted {
+            sync(&self.container.join("generations"))?;
+        }
+        super::objects::collect(&self.container)
+    }
+
+    fn collect_unpinned(&self) -> bool {
+        self.collect_unpinned_with(&mut |path| fs::remove_dir_all(path))
+    }
+
+    fn collect_unpinned_with(&self, remove: &mut impl FnMut(&Path) -> std::io::Result<()>) -> bool {
         let Ok(entries) = fs::read_dir(self.container.join("generations")) else {
-            return;
+            return false;
         };
+        let mut retirement_attempted = false;
         for entry in entries.flatten() {
             let path = entry.path();
             if path == self.path {
@@ -173,9 +187,13 @@ impl Generation {
                 continue;
             };
             if lease.try_lock_exclusive().is_ok() {
-                let _ = fs::remove_dir_all(&path);
+                // Even an error can follow partial deletion; that attempt must
+                // be made durable before reclaiming any referenced objects.
+                retirement_attempted = true;
+                let _ = remove(&path);
             }
         }
+        retirement_attempted
     }
 }
 
@@ -261,6 +279,57 @@ pub(crate) fn resolve(container: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retirement_reports_mutations_but_not_pinned_or_empty_scans() {
+        let root = tempfile::tempdir().unwrap();
+        let mut previous = Generation::new(root.path()).unwrap();
+        fs::write(previous.path.join("meta.json"), b"{}").unwrap();
+        previous.publish().unwrap();
+        let mut current = Generation::new(root.path()).unwrap();
+        fs::write(current.path.join("meta.json"), b"{}").unwrap();
+        current.publish().unwrap();
+        assert!(!current.collect_unpinned());
+        let retired = previous.path.clone();
+        drop(previous);
+        assert!(
+            current.collect_unpinned_with(&mut |_| Err(std::io::Error::other("partial deletion")))
+        );
+        assert!(retired.exists());
+        assert!(current.collect_unpinned());
+        assert!(!retired.exists());
+        assert!(!current.collect_unpinned());
+    }
+
+    #[test]
+    fn failed_retirement_sync_prevents_object_deletion() {
+        let root = tempfile::tempdir().unwrap();
+        let current = Generation::new(root.path()).unwrap();
+        let meta = super::super::types::IndexMeta::default();
+        fs::write(
+            current.path.join("meta.json"),
+            serde_json::to_vec(&meta).unwrap(),
+        )
+        .unwrap();
+        let orphan = current.container.join("objects/gen-orphan-seg-0001");
+        fs::create_dir_all(&orphan).unwrap();
+        assert!(
+            current
+                .collect_objects_after_retirement(true, |_| anyhow::bail!("injected sync failure"))
+                .is_err()
+        );
+        assert!(orphan.exists());
+        current
+            .collect_objects_after_retirement(true, |path| {
+                assert!(path.ends_with("generations"));
+                Ok(())
+            })
+            .unwrap();
+        assert!(!orphan.exists());
+        current
+            .collect_objects_after_retirement(false, |_| panic!("no retirement to sync"))
+            .unwrap();
+    }
 
     #[test]
     fn publication_syncs_new_and_copied_bytes_but_reuses_durable_hardlinks() {

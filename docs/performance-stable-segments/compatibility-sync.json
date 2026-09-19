@@ -1,0 +1,5 @@
+{
+  "previous_binary": "/var/folders/6w/jph_9hyd71gbqw76h25h2zz00000gn/T/fxi-writer-reuse-candidate-818t5lfn/fxi",
+  "returncode": 1,
+  "stderr": "Error: Unsupported index version/profile combination; rebuild with an explicit --profile\n"
+}

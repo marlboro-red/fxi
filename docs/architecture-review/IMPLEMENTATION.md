@@ -114,3 +114,14 @@ foreign segment's document, both during lazy API loading and streamed compaction
 Errors remain cached as errors and failed compaction does not publish. A mixed
 legacy fixture also confirms that missing optional positions/line maps remain
 absent instead of being manufactured by the merger.
+
+
+## Opt-in stable segment objects
+
+The [stable-segment experiment](../performance-stable-segments/NOTES.md) adds
+independent immutable objects and generation reference manifests, with
+lease-aware collection, metadata bindings, migration, compaction and prune.
+Measured fragmented-update gains are substantial, but small updates on a
+single-segment index regress. It remains opt-in and currently requires strict
+publication: checked-routing proof creation cannot mutate shared objects.
+Global document/path rewrites and full standalone reconciliation remain.
