@@ -1284,25 +1284,32 @@ impl DeltaSegmentWriter {
 
         // Write meta.json atomically (commits the transaction)
         write_meta_atomic(&self.index_path, meta)?;
-        if has_new_documents && let Some(capture) = capture {
-            let directory = self
-                .index_path
-                .join("segments")
-                .join(format!("seg_{:04}", self.segment_id));
-            capture.finish_with_paths(
-                all_documents
-                    .iter()
-                    .filter(|doc| doc.segment_id == self.segment_id),
-                |id| {
-                    let index = id as usize;
-                    if index < self.base.path_count() {
-                        self.base.path(index)
-                    } else {
-                        self.new_paths.get(index - self.base.path_count())
-                    }
-                },
-                &directory,
-            )?;
+        if let Some(capture) = capture {
+            if has_new_documents {
+                let directory = self
+                    .index_path
+                    .join("segments")
+                    .join(format!("seg_{:04}", self.segment_id));
+                capture.finish_with_paths(
+                    all_documents
+                        .iter()
+                        .filter(|doc| doc.segment_id == self.segment_id),
+                    |id| {
+                        let index = id as usize;
+                        if index < self.base.path_count() {
+                            self.base.path(index)
+                        } else {
+                            self.new_paths.get(index - self.base.path_count())
+                        }
+                    },
+                    &directory,
+                )?;
+            } else {
+                // An unused capture still owns an unpublished staging lease.
+                // Release it before publication: its missing manifest would
+                // otherwise make object collection conservatively abort.
+                drop(capture);
+            }
         }
         let written = std::time::Instant::now();
         self.generation.publish()?;
@@ -1441,6 +1448,107 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    fn deletion_capture_reclaims_retired_stable_objects(profile: IndexProfile) {
+        use crate::index::reader::IndexReader;
+        use crate::index::source_pack::CaptureWriter;
+
+        let directory = TempDir::new().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let mut writer = ChunkedIndexWriter::new(
+            &root,
+            IndexConfig {
+                profile,
+                ..IndexConfig::default()
+            },
+        )
+        .unwrap();
+        writer.generation.stable_objects = true;
+        for (id, name, content) in [
+            (1, "deleted.rs", "deleted marker\n"),
+            (2, "retained.rs", "retained marker\n"),
+        ] {
+            fs::write(root.join(name), content).unwrap();
+            writer
+                .write_chunk(id, vec![create_test_processed_file(name, content)])
+                .unwrap();
+        }
+        writer.finalize().unwrap();
+        drop(writer);
+
+        // Keep old objects alive through compaction, then release the reader so
+        // the deletion's publication must retire the generation and its objects.
+        let old = IndexReader::open(&root).unwrap();
+        let old_generation = old.generation_path().to_path_buf();
+        let objects = crate::index::objects::store(&old_generation).unwrap();
+        let retired: Vec<_> = old
+            .meta
+            .segment_objects
+            .values()
+            .map(|name| objects.join(name))
+            .collect();
+        crate::index::compact::merge_segments(&root).unwrap();
+        assert!(retired.iter().all(|path| path.exists()));
+        drop(old);
+
+        let current = IndexReader::open(&root).unwrap();
+        let mut meta = current.meta.clone();
+        let expected_objects: HashSet<_> = meta.segment_objects.values().cloned().collect();
+        assert_eq!(expected_objects.len(), 1);
+        let capture = CaptureWriter::temporary(&root, true).unwrap();
+        assert!(capture.is_some());
+        let generations = current.generation_path().parent().unwrap();
+        let capture_generation = fs::read_dir(generations)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.join("capture").is_dir())
+            .unwrap();
+        let mut deletion = DeltaSegmentWriter::with_reader(&root, 2, Some(&current)).unwrap();
+        deletion.mark_tombstone(Path::new("deleted.rs"));
+        fs::remove_file(root.join("deleted.rs")).unwrap();
+        deletion.finalize_with_capture(&mut meta, capture).unwrap();
+
+        let actual = IndexReader::open(&root).unwrap();
+        let live_paths: Vec<_> = actual
+            .documents()
+            .iter()
+            .filter(|doc| doc.is_valid())
+            .map(|doc| actual.get_path(doc).unwrap().clone())
+            .collect();
+        let actual_objects: HashSet<_> = fs::read_dir(&objects)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        let old_generation_retired = !old_generation.exists();
+        let capture_generation_retired = !capture_generation.exists();
+        let retired_objects_removed = retired.iter().all(|path| !path.exists());
+        drop((current, actual));
+        crate::utils::remove_index(&root).unwrap();
+
+        assert_eq!(live_paths, vec![PathBuf::from("retained.rs")]);
+        assert_eq!(meta.valid_doc_count, 1);
+        assert_eq!(meta.tombstone_count, 1);
+        assert!(old_generation_retired);
+        assert!(capture_generation_retired);
+        assert!(
+            retired_objects_removed,
+            "unused capture staging prevented object collection during deletion publication"
+        );
+        assert_eq!(actual_objects, expected_objects);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_deletion_capture_releases_staging_before_stable_object_gc() {
+        deletion_capture_reclaims_retired_stable_objects(IndexProfile::Full);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lean_deletion_capture_releases_staging_before_stable_object_gc() {
+        deletion_capture_reclaims_retired_stable_objects(IndexProfile::Lean);
+    }
 
     #[test]
     fn stable_delta_returns_published_metadata_and_retains_lazy_old_readers() {
