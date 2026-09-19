@@ -41,6 +41,8 @@ impl Generation {
                 Err(e) => return Err(e.into()),
             }
         };
+        #[cfg(test)]
+        super::lifecycle_tests::checkpoint("generation_created");
         let lease = OpenOptions::new()
             .read(true)
             .write(true)
@@ -138,17 +140,27 @@ impl Generation {
             Ok(())
         })?;
         sync_directory(&self.container.join("generations"))?;
+        #[cfg(test)]
+        super::lifecycle_tests::checkpoint("generation_synced");
         let pending = self.container.join("CURRENT.tmp");
         let mut file = File::create(&pending)?;
         writeln!(file, "{}", self.path.file_name().unwrap().to_str().unwrap())?;
         file.sync_all()?;
         drop(file);
+        #[cfg(test)]
+        super::lifecycle_tests::checkpoint("current_file_synced");
         fs::rename(pending, self.container.join("CURRENT"))?;
         self.published = true;
+        #[cfg(test)]
+        super::lifecycle_tests::checkpoint("current_renamed");
         sync_directory(&self.container)?;
+        #[cfg(test)]
+        super::lifecycle_tests::checkpoint("current_directory_synced");
         // Readers pin their generation with a shared lease. Cleanup is best
         // effort (Windows can retain mapped files until their last handle closes).
         let retirement_attempted = self.collect_unpinned();
+        #[cfg(test)]
+        super::lifecycle_tests::checkpoint("generations_retired");
         // Failure leaks reclaimable space rather than invalidating publication.
         let _ = self.collect_objects_after_retirement(retirement_attempted, sync_directory);
         Ok(())
@@ -179,12 +191,31 @@ impl Generation {
             if path == self.path {
                 continue;
             }
-            let Ok(lease) = OpenOptions::new()
+            let lease = match OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open(path.join("lease"))
-            else {
-                continue;
+            {
+                Ok(lease) => lease,
+                Err(error) => {
+                    // The writer lock excludes another generation creator. A
+                    // killed process can leave mkdir completed but no lease.
+                    // Only remove an empty, recognized, real directory: a
+                    // nonempty unleased tree may be damaged and is preserved.
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && entry.file_type().is_ok_and(|kind| kind.is_dir())
+                        && entry.file_name().to_str().is_some_and(|name| {
+                            name.starts_with("gen-")
+                                && name.len() > 4
+                                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                        })
+                        && fs::read_dir(&path).is_ok_and(|mut entries| entries.next().is_none())
+                    {
+                        retirement_attempted = true;
+                        let _ = fs::remove_dir(&path);
+                    }
+                    continue;
+                }
             };
             if lease.try_lock_exclusive().is_ok() {
                 // Even an error can follow partial deletion; that attempt must
@@ -279,6 +310,32 @@ pub(crate) fn resolve(container: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_recovers_only_empty_recognized_unleased_generations() {
+        let root = tempfile::tempdir().unwrap();
+        let current = Generation::new(root.path()).unwrap();
+        let generations = current.path.parent().unwrap();
+        let empty = generations.join("gen-crashed");
+        let damaged = generations.join("gen-damaged");
+        let unknown = generations.join("unrecognized");
+        for path in [&empty, &damaged, &unknown] {
+            fs::create_dir(path).unwrap();
+        }
+        fs::write(damaged.join("keep"), b"evidence").unwrap();
+        #[cfg(unix)]
+        let linked = {
+            let linked = generations.join("gen-symlink");
+            std::os::unix::fs::symlink(&unknown, &linked).unwrap();
+            linked
+        };
+        assert!(current.collect_unpinned());
+        assert!(!empty.exists());
+        assert!(damaged.join("keep").is_file());
+        assert!(unknown.is_dir());
+        #[cfg(unix)]
+        assert!(linked.is_symlink());
+    }
 
     #[test]
     fn retirement_reports_mutations_but_not_pinned_or_empty_scans() {

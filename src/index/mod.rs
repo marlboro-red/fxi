@@ -67,3 +67,6 @@ pub use types::*;
 pub(crate) mod generation;
 
 pub(crate) mod objects;
+
+#[cfg(test)]
+mod lifecycle_tests;

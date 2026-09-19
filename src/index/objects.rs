@@ -69,6 +69,8 @@ pub(crate) fn prepare(index: &Path, inherited: &BTreeMap<u16, String>) -> Result
             // referenced by CURRENT. Failure leaves an unreachable orphan.
             super::generation::sync_new_tree(&local)?;
             fs::rename(&local, &target)?;
+            #[cfg(test)]
+            super::lifecycle_tests::checkpoint("object_installed");
             name
         };
         ensure!(valid_name(&name), "Invalid segment object name");
@@ -85,6 +87,8 @@ pub(crate) fn prepare(index: &Path, inherited: &BTreeMap<u16, String>) -> Result
     }
     super::generation::sync_directory(&objects)?;
     super::generation::sync_directory(objects.parent().context("Missing object store parent")?)?;
+    #[cfg(test)]
+    super::lifecycle_tests::checkpoint("objects_synced");
     meta.version = match meta.profile {
         super::types::IndexProfile::Full => 4,
         super::types::IndexProfile::Lean => 5,
@@ -97,6 +101,8 @@ pub(crate) fn prepare(index: &Path, inherited: &BTreeMap<u16, String>) -> Result
         index.join("objects.check"),
         xxhash_rust::xxh3::xxh3_64(&metadata).to_le_bytes(),
     )?;
+    #[cfg(test)]
+    super::lifecycle_tests::checkpoint("manifest_written");
     Ok(())
 }
 
@@ -170,11 +176,15 @@ pub(crate) fn collect(container: &Path) -> Result<()> {
             garbage.push(entry.path());
         }
     }
+    #[cfg(test)]
+    super::lifecycle_tests::checkpoint("objects_marked");
     if garbage.is_empty() {
         return Ok(());
     }
     for path in garbage {
         fs::remove_dir_all(path)?;
+        #[cfg(test)]
+        super::lifecycle_tests::checkpoint("object_deleted");
     }
     super::generation::sync_directory(&objects)
 }
