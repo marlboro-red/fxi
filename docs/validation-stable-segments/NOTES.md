@@ -3,7 +3,8 @@
 The opt-in immutable-segment experiment needed evidence beyond short update
 benchmarks. This campaign tests interrupted publication, live reader leases,
 and repeated source changes against independent source scans. It found two
-reclamation defects; neither failure was a demonstrated wrong search result.
+reclamation defects and a Windows reader-open failure during publication.
+None was a demonstrated wrong search result.
 The layout remains opt-in. Performance comparisons and its single-segment
 regression remain in the [storage experiment](../performance-stable-segments/NOTES.md).
 
@@ -26,6 +27,16 @@ regression remain in the [storage experiment](../performance-stable-segments/NOT
    The [original failure report](lifecycle-packed-before-fix.json.gz) retains
    command samples and the failure; that harness revision did not retain the
    failing step's storage snapshot before raising. Subsequent runs do.
+3. Windows CI's overlapping-reader test failed with `Access is denied` while
+   opening a reader during publication. A delete-pending lease is a plausible
+   cause: Windows may return that error instead of `NotFound`. Lease acquisition
+   now retries other errors only when a successful re-resolution shows CURRENT
+   moved to another generation. An unchanged or unresolvable CURRENT preserves
+   the original error, retries remain bounded at eight, and content validation
+   is unchanged. Deterministic tests cover transition, persistent denial, failed
+   re-resolution, and the retry bound; native Windows concurrency is the
+   integration check. The initial failing run is
+   [35437823113](https://github.com/marlboro-red/fxi/actions/runs/35437823113).
 
 ## Interrupted publication and overlapping readers
 
@@ -72,10 +83,11 @@ Every successful update checks reachability and live document counts. Final
 compaction followed by a real publication must leave exactly the current manifest's
 objects. The extra publication lets the compactor's own old-reader lease close.
 
-The final release passed **3,000 history updates, 60 explicit compactions, and
+The release containing both reclamation fixes passed **3,000 history updates, 60 explicit compactions, and
 8,326 oracle queries**, comparing 1,740,678 matching rows. Four additional
 reclamation updates followed final compaction. Both campaigns used the same
 release binary (SHA-256 `af9861a2bc2502e27851fd6cebca1844e7e35169d0c2c7a95fa523b6ccf4ab9c`).
+These recorded histories precede the subsequent Windows lease-retry fix.
 
 | Campaign / profile | Updates | Peak logical bytes | Final logical bytes | Peak / final objects | Update median / p95 ms |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -114,7 +126,7 @@ lifecycle reports as artifacts. Harness
 regressions exercise false-result detection, leaks, storage isolation, cleanup,
 and seed reproducibility.
 
-Local final-code checks passed: 1,125 all-target Rust test executions (the two
+Before the Windows lease-retry follow-up, local checks passed: 1,125 all-target Rust test executions (the two
 ignored entries are child-process helpers), Clippy with warnings denied, Rust
 1.88 all-target checking, rustfmt, release build, and 17 Python harness tests.
 Both source-capture reclamation regressions were also observed failing before

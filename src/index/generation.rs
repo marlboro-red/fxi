@@ -272,17 +272,35 @@ pub(crate) fn sync_directory(path: &Path) -> Result<()> {
 
 /// Resolve and pin the same generation before opening any of its files.
 pub(crate) fn pin(root: &Path) -> Result<(PathBuf, Option<File>)> {
+    pin_with(root, &mut |path| {
+        let lease = File::open(path.join("lease"))?;
+        FileExt::lock_shared(&lease)?;
+        Ok(lease)
+    })
+}
+
+fn pin_with(
+    root: &Path,
+    acquire: &mut impl FnMut(&Path) -> std::io::Result<File>,
+) -> Result<(PathBuf, Option<File>)> {
     for _ in 0..8 {
         let path = crate::utils::get_index_dir(root)?;
         if path == crate::utils::app_data::get_index_container(root)? {
             return Ok((path, None)); // Legacy layout, never garbage-collected.
         }
-        let lease = match File::open(path.join("lease")) {
+        let lease = match acquire(&path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                // Windows can deny opening a delete-pending lease rather than
+                // report NotFound. Retry only if publication actually moved
+                // CURRENT; a failure on an unchanged generation remains an error.
+                if crate::utils::get_index_dir(root).is_ok_and(|current| current != path) {
+                    continue;
+                }
+                return Err(e.into());
+            }
         };
-        FileExt::lock_shared(&lease)?;
         if path.join("meta.json").exists() {
             return Ok((path, Some(lease)));
         }
@@ -310,6 +328,131 @@ pub(crate) fn resolve(container: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pin_retries_a_failed_lease_when_publication_moved_current() {
+        let root = tempfile::tempdir().unwrap();
+        let first = Generation::new(root.path()).unwrap();
+        let next = Generation::new(root.path()).unwrap();
+        fs::write(next.path.join("meta.json"), b"{}").unwrap();
+        fs::write(
+            first.container.join("CURRENT"),
+            first.path.file_name().unwrap().as_encoded_bytes(),
+        )
+        .unwrap();
+        let mut attempts = 0;
+        let (path, lease) = pin_with(root.path(), &mut |path| {
+            attempts += 1;
+            if attempts == 1 {
+                assert_eq!(path, first.path);
+                fs::write(
+                    first.container.join("CURRENT"),
+                    next.path.file_name().unwrap().as_encoded_bytes(),
+                )?;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "retired lease",
+                ));
+            }
+            let lease = File::open(path.join("lease"))?;
+            FileExt::lock_shared(&lease)?;
+            Ok(lease)
+        })
+        .unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(path, next.path);
+        assert!(lease.is_some());
+        drop((lease, next, first));
+        crate::utils::remove_index(root.path()).unwrap();
+    }
+
+    #[test]
+    fn pin_preserves_permission_errors_on_an_unchanged_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let current = Generation::new(root.path()).unwrap();
+        fs::write(
+            current.container.join("CURRENT"),
+            current.path.file_name().unwrap().as_encoded_bytes(),
+        )
+        .unwrap();
+        let mut attempts = 0;
+        let error = pin_with(root.path(), &mut |_| {
+            attempts += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "real permission failure",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        drop(current);
+        crate::utils::remove_index(root.path()).unwrap();
+    }
+
+    #[test]
+    fn pin_bounds_retries_when_publication_keeps_moving() {
+        let root = tempfile::tempdir().unwrap();
+        let first = Generation::new(root.path()).unwrap();
+        let next = Generation::new(root.path()).unwrap();
+        fs::write(
+            first.container.join("CURRENT"),
+            first.path.file_name().unwrap().as_encoded_bytes(),
+        )
+        .unwrap();
+        let mut attempts = 0;
+        let error = pin_with(root.path(), &mut |path| {
+            attempts += 1;
+            let replacement = if path == first.path {
+                &next.path
+            } else {
+                &first.path
+            };
+            fs::write(
+                first.container.join("CURRENT"),
+                replacement.file_name().unwrap().as_encoded_bytes(),
+            )?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "retired lease",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 8);
+        assert!(error.to_string().contains("changed repeatedly"));
+        drop((next, first));
+        crate::utils::remove_index(root.path()).unwrap();
+    }
+
+    #[test]
+    fn pin_preserves_acquisition_error_when_current_cannot_be_resolved() {
+        let root = tempfile::tempdir().unwrap();
+        let current = Generation::new(root.path()).unwrap();
+        let pointer = current.container.join("CURRENT");
+        fs::write(
+            &pointer,
+            current.path.file_name().unwrap().as_encoded_bytes(),
+        )
+        .unwrap();
+        let mut attempts = 0;
+        let error = pin_with(root.path(), &mut |_| {
+            attempts += 1;
+            fs::write(&pointer, b"invalid-manifest")?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "original acquisition error",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(error.to_string(), "original acquisition error");
+        drop(current);
+        fs::remove_file(pointer).unwrap();
+        crate::utils::remove_index(root.path()).unwrap();
+    }
 
     #[test]
     fn cleanup_recovers_only_empty_recognized_unleased_generations() {
