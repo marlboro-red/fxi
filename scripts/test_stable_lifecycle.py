@@ -23,7 +23,7 @@ args = sys.argv[1:]
 root = Path.cwd()
 env_keys = ['FXI_APP_DATA', 'FXI_INDEXES', 'FXI_SOCKET', 'XDG_RUNTIME_DIR',
             'FXI_STABLE_SEGMENTS', 'FXI_QUERY_LOCAL', 'FXI_NEGATIVE_ROUTING',
-            'FXI_GENERATION_ROUTING', 'FXI_SOURCE_PACK']
+            'FXI_GENERATION_ROUTING', 'FXI_SOURCE_PACK', 'FXI_SOURCE_PACK_COMPRESSION']
 with open(os.environ['LIFECYCLE_TEST_LOG'], 'a') as out:
     out.write(json.dumps({'args': args, 'env': {k: os.environ.get(k) for k in env_keys}}) + '\n')
 store = Path(os.environ['FXI_INDEXES']) / 'fake'
@@ -87,6 +87,22 @@ else:
 
 
 class SourceOracleTests(unittest.TestCase):
+    def test_generation_routing_requires_query_local(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
+            HARNESS.parse_args(['--binary', __file__, '--output', 'unused-report.json',
+                                '--generation-routing'])
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn('--generation-routing requires --query-local', stderr.getvalue())
+
+    def test_source_pack_compression_requires_source_pack(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
+            HARNESS.parse_args(['--binary', __file__, '--output', 'unused-report.json',
+                                '--source-pack-compression'])
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn('--source-pack-compression requires --source-pack', stderr.getvalue())
+
     def test_oracle_checks_utf8_offsets_crlf_and_missing_final_newline(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -129,7 +145,8 @@ class SourceOracleTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == 'posix', 'The fake executable uses a Unix shebang')
 class FakeCampaignTests(unittest.TestCase):
-    def run_fake(self, omit=False, leak=False):
+    def run_fake(self, omit=False, leak=False, query_local=False, generation_routing=False,
+                 source_pack=False, source_pack_compression=False):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             binary = base / 'fake-fxi'
@@ -143,11 +160,16 @@ class FakeCampaignTests(unittest.TestCase):
                                          'LIFECYCLE_TEST_LEAK': '1' if leak else '0',
                                          'FXI_INDEXES': str(external), 'FXI_APP_DATA': str(external),
                                          'FXI_SOCKET': str(external / 'real.sock'),
-                                         'FXI_QUERY_LOCAL': '1', 'FXI_GENERATION_ROUTING': '1'}):
+                                         'FXI_QUERY_LOCAL': '1', 'FXI_GENERATION_ROUTING': '1',
+                                         'FXI_SOURCE_PACK_COMPRESSION': '1'}):
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    flags = (['--query-local'] if query_local else [])
+                    flags += ['--generation-routing'] if generation_routing else []
+                    flags += ['--source-pack'] if source_pack else []
+                    flags += ['--source-pack-compression'] if source_pack_compression else []
                     code = HARNESS.main(['--binary', str(binary), '--output', str(output),
                                          '--steps', '4', '--files', '16', '--compact-every', '4',
-                                         '--audit-every', '4', '--checkpoint-every', '4'])
+                                         '--audit-every', '4', '--checkpoint-every', '4', *flags])
             report = json.loads(output.read_text())
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             self.assertEqual(list(external.iterdir()), [])
@@ -161,13 +183,24 @@ class FakeCampaignTests(unittest.TestCase):
                     self.assertTrue(Path(env[name]).is_relative_to(report['temporary_workspace']))
                 self.assertEqual([env[k] for k in ('FXI_STABLE_SEGMENTS', 'FXI_QUERY_LOCAL',
                                                    'FXI_NEGATIVE_ROUTING', 'FXI_GENERATION_ROUTING')],
-                                 ['1', '0', '0', '0'])
+                                 ['1', '1' if query_local else '0', '0',
+                                  '1' if generation_routing else '0'])
+                self.assertEqual(env['FXI_SOURCE_PACK'], '1' if source_pack else '0')
+                self.assertEqual(env['FXI_SOURCE_PACK_COMPRESSION'], '1' if source_pack_compression else '0')
+            self.assertEqual(report['query_local'], query_local)
+            self.assertEqual(report['generation_routing'], generation_routing)
+            self.assertEqual(report['source_pack'], source_pack)
+            self.assertEqual(report['source_pack_compression'], source_pack_compression)
+            if query_local:
+                self.assertTrue(any('-l' in call['args'] and HARNESS.ABSENT in call['args']
+                                    for call in calls))
             return code, report
 
     def test_both_profiles_raw_samples_storage_and_cleanup(self):
         code, report = self.run_fake()
         self.assertEqual(code, 0, report.get('traceback'))
         self.assertEqual(report['status'], 'passed')
+        self.assertEqual(report['policy'], 'stable segments, strict validation, no routing certificates')
         self.assertEqual(report['checks']['reclamations'], 2)
         self.assertGreater(report['checks']['queries'], 40)
         self.assertEqual([r['profile'] for r in report['profiles']], ['full', 'lean'])
@@ -176,6 +209,20 @@ class FakeCampaignTests(unittest.TestCase):
             self.assertEqual(profile['operation_counts'], dict(add=1, delete=1, edit=1, rename=1))
             self.assertEqual(profile['final_storage']['noncurrent_object_count'], 0)
             self.assertGreater(profile['reclaimed_object_count'], 0)
+
+    def test_checked_policy_reaches_build_update_compaction_and_search(self):
+        code, report = self.run_fake(query_local=True)
+        self.assertEqual(code, 0, report.get('traceback'))
+        self.assertEqual(report['policy'], 'stable segments, checked query-local validation, no generation routing')
+
+    def test_checked_routing_and_source_packs_reach_both_profiles(self):
+        for compressed in (False, True):
+            with self.subTest(compressed=compressed):
+                code, report = self.run_fake(query_local=True, generation_routing=True, source_pack=True,
+                                             source_pack_compression=compressed)
+                self.assertEqual(code, 0, report.get('traceback'))
+                self.assertEqual(report['policy'], 'stable segments, checked query-local validation, generation routing')
+                self.assertEqual([profile['profile'] for profile in report['profiles']], ['full', 'lean'])
 
     def test_false_negative_fails_and_still_cleans_private_workspace(self):
         code, report = self.run_fake(omit=True)

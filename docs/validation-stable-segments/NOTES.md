@@ -141,4 +141,5 @@ per-root writers, not watcher event storms. Existing migration, integrity,
 CLI-differential, and daemon tests remain necessary; this campaign does not replace
 them. Default promotion still needs broader platform performance measurements,
 watcher/concurrent workload stress, and resolution of the documented small-index
-cost and experimental routing incompatibilities.
+cost. The subsequent [combined-mode experiment](../performance-stable-segments/NOTES.md#combined-checked-search-and-stable-objects)
+addresses the routing incompatibility and adds checked lifecycle coverage.

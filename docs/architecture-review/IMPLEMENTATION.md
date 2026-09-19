@@ -122,6 +122,7 @@ The [stable-segment experiment](../performance-stable-segments/NOTES.md) adds
 independent immutable objects and generation reference manifests, with
 lease-aware collection, metadata bindings, migration, compaction and prune.
 Measured fragmented-update gains are substantial, but small updates on a
-single-segment index regress. It remains opt-in and currently requires strict
-publication: checked-routing proof creation cannot mutate shared objects.
+single-segment index regress. It remains opt-in. The combined checked-mode follow-up
+creates segment proofs before object export and generation certificates afterward,
+without modifying shared objects; missing inherited proofs retain safe fallback.
 Global document/path rewrites and full standalone reconciliation remain.

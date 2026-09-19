@@ -66,14 +66,14 @@ class IndexerHarnessTests(unittest.TestCase):
                 'from pathlib import Path\n'
                 'args = sys.argv[1:]\n'
                 "with open(os.environ['BENCH_TEST_LOG'], 'a') as out:\n"
-                "    out.write(json.dumps({'args': args, 'query_local': os.environ['FXI_QUERY_LOCAL'], 'generation_routing': os.environ['FXI_GENERATION_ROUTING'], 'stable': os.environ['FXI_STABLE_SEGMENTS']}) + '\\n')\n"
+                "    out.write(json.dumps({'args': args, 'query_local': os.environ['FXI_QUERY_LOCAL'], 'generation_routing': os.environ['FXI_GENERATION_ROUTING'], 'stable': os.environ['FXI_STABLE_SEGMENTS'], 'packed': os.environ['FXI_SOURCE_PACK'], 'compressed': os.environ['FXI_SOURCE_PACK_COMPRESSION']}) + '\\n')\n"
                 "if args[0] == 'index':\n"
                 "    store = Path(os.environ['FXI_INDEXES']) / 'test-index'\n"
                 "    generation = store / 'generations' / 'one'\n"
                 '    generation.mkdir(parents=True, exist_ok=True)\n'
                 "    (store / 'CURRENT').write_text('one')\n"
                 "    added = '--force' not in args\n"
-                "    (generation / 'meta.json').write_text(json.dumps({'doc_count': 16 + added, 'segment_count': 1 + added}))\n"
+                "    (generation / 'meta.json').write_text(json.dumps({'version': 3 + 2 * int(os.environ['FXI_STABLE_SEGMENTS']), 'doc_count': 16 + added, 'segment_count': 1 + added}))\n"
                 'else:\n'
                 "    print('__fxi_publication_probe_94283.rs' if any('newPublicationMarker' in a for a in args) else '0.rs')\n"
             )
@@ -96,7 +96,9 @@ class IndexerHarnessTests(unittest.TestCase):
             log.unlink()
             subprocess.run([sys.executable, str(Path(__file__).with_name('compare-publication.py')),
                             '--corpus', str(corpus), '--baseline', str(binary), '--candidate', str(binary),
-                            '--candidate-stable-segments', '--keep-fixture',
+                            '--candidate-stable-segments', '--keep-fixture', '--source-pack',
+                            '--baseline-query-local', '--baseline-generation-routing',
+                            '--candidate-query-local', '--candidate-generation-routing',
                             '--repetitions', '1', '--output', str(output)],
                            env={**os.environ, 'BENCH_TEST_LOG': str(log)}, check=True,
                            capture_output=True, timeout=30)
@@ -105,6 +107,7 @@ class IndexerHarnessTests(unittest.TestCase):
             updates = [c for c in calls if c['args'][0] == 'index' and '--force' not in c['args']]
             self.assertEqual([c['stable'] for c in builds], ['0', '1'])
             self.assertEqual([c['stable'] for c in updates], ['0', '1'])
+            self.assertTrue(all(c['query_local'] == c['generation_routing'] == c['packed'] == c['compressed'] == '1' for c in builds + updates))
             report = json.loads(output.read_text())
             fixture, = report['retained_fixtures']
             self.assertNotEqual(fixture['before'], fixture['after'])

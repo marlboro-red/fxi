@@ -43,11 +43,10 @@ counts are introduced by the new layout.
 
 ## Deliberate experimental boundary
 
-Stable publication currently rejects `FXI_QUERY_LOCAL=1`,
-`FXI_GENERATION_ROUTING=1`, and enabled negative routing. Existing checked-proof
-publication can add sidecars in inherited segment directories, which would
-violate object immutability. Supporting checked publication requires a separate
-proof-publication design; this experiment must not silently mutate shared objects.
+The initial prototype rejected checked and negative-routing publication because
+it could add sidecars inside inherited objects. The combined-mode follow-up below
+removes this restriction by completing new segment proofs before export and
+issuing generation-owned certificates afterward. Inherited objects stay read-only.
 Ordinary strict search, full/lean profiles, source capture/packs, updates,
 compaction, stats and prune are supported. The default layout is unchanged.
 
@@ -183,3 +182,50 @@ whose checksum appears in the report. Final production code remains `7784a15`.
 
 The retained code commit `7784a15` also passed all eight GitHub CI jobs, including
 Windows, macOS and Linux ([run](https://github.com/marlboro-red/fxi/actions/runs/35417456112)).
+
+
+## Combined checked search and stable objects
+
+Publication now has two proof phases. First, strictly validate staging data and
+inherited objects against the new generation's document membership. Create gram
+and Bloom proof files only inside new, private segment directories. Next, export
+and sync new objects and finalize the version 4/5 reference manifest. Finally,
+issue query-routing and generation-routing certificates against the final
+metadata/docs/paths. Negative-routing certificates are also generation-owned and
+issued after export. The existing durability barriers and reader leases remain.
+
+No inherited object is modified to add missing proofs. Enabling checked mode on
+an existing strict stable index leaves old proof-less objects intact; posting
+validation falls back until compaction or a forced rebuild creates new objects
+with proofs. Generation-wide absence evidence can still be issued independently.
+Malformed existing evidence is rejected, not silently rewritten or recertified.
+Stable references also avoid the hard-link count changes that can invalidate
+Unix stamp-based negative certificates during legacy generation cleanup.
+
+To build and search with the combined experiment on Unix, keep these options in
+the environment for indexing, updates, compaction, and searches:
+
+```sh
+export FXI_STABLE_SEGMENTS=1
+export FXI_QUERY_LOCAL=1
+export FXI_GENERATION_ROUTING=1
+export FXI_SOURCE_PACK=1
+export FXI_SOURCE_PACK_COMPRESSION=1
+fxi index --force --profile lean PATH
+fxi -l --regex 'pattern' PATH
+```
+
+The defaults and format versions are unchanged. Source packs remain Unix-only;
+checked stable publication itself is portable. Query-local and generation-routing
+validation retain their documented integrity boundaries: checks can skip evidence
+irrelevant to a query, unlike a full strict validation pass. Publication still
+validates inherited postings and rebuilds global routing/document/path metadata;
+this change does not make durable updates proportional only to changed bytes.
+
+Validation adds full/lean checked lifecycle and migration tests, byte-for-byte
+inherited-object snapshots plus Unix mtime/ctime checks, pinned-reader retention,
+missing-proof fallback, corruption rejection with unchanged CURRENT, compressed
+packs and negative routing. Certificates are checked against final metadata hashes
+so an invalid certificate followed by a correct slow fallback cannot mask an
+issuance-order bug. Generated CLI tests add 128 cases per checked stable profile.
+The process-kill matrix now covers strict and checked publication: 164 scenarios.

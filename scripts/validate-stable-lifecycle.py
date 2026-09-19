@@ -18,8 +18,10 @@ in a temporary directory, removed on success or failure. Only the JSON report
 persists. Timings are raw subprocess wall times, NOT a comparative benchmark;
 run without concurrent compilation or other load when interpreting latency.
 This is sequential CLI validation, not crash injection or long-lived-reader
-concurrency testing. Checked/routing policies are disabled. Source packs are
-optional, explicitly recorded, and only supported by FXI on Unix.
+concurrency testing. Checked search and generation routing require explicit
+--query-local and --generation-routing flags; defaults use strict validation.
+Source packs and optional --source-pack-compression are explicitly recorded;
+FXI supports source packs on Unix.
 """
 
 import argparse
@@ -59,7 +61,8 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def private_environment(base, source_pack):
+def private_environment(base, source_pack, query_local=False, generation_routing=False,
+                        source_pack_compression=False):
     # Do not inherit experimental FXI policy, storage or socket overrides.
     env = {key: value for key, value in os.environ.items() if not key.startswith('FXI_')}
     for key, name in [('FXI_APP_DATA', 'app'), ('FXI_INDEXES', 'indexes'),
@@ -70,8 +73,11 @@ def private_environment(base, source_pack):
         directory.mkdir(parents=True, exist_ok=True)
         env[key] = str(directory)
     env.update(FXI_SOCKET=str(base / 'unused.sock'), FXI_STABLE_SEGMENTS='1',
-               FXI_QUERY_LOCAL='0', FXI_NEGATIVE_ROUTING='0', FXI_GENERATION_ROUTING='0',
-               FXI_SOURCE_PACK='1' if source_pack else '0', FXI_STALE_WARN_SECS='0',
+               FXI_QUERY_LOCAL='1' if query_local else '0', FXI_NEGATIVE_ROUTING='0',
+               FXI_GENERATION_ROUTING='1' if generation_routing else '0',
+               FXI_SOURCE_PACK='1' if source_pack else '0',
+               FXI_SOURCE_PACK_COMPRESSION='1' if source_pack_compression else '0',
+               FXI_STALE_WARN_SECS='0',
                NO_COLOR='1', LC_ALL='C')
     return env
 
@@ -327,6 +333,11 @@ class Runner:
                 self.check(sources, pattern, mode, insensitive)
             self.check(sources, MARKER, output_mode='files')
             self.check(sources, 'alpha', output_mode='counts')
+            if self.env['FXI_QUERY_LOCAL'] == '1':
+                # Checked absence and generation routing preflight apply to
+                # files-only requests; content queries do not exercise them.
+                self.check(sources, ABSENT, output_mode='files')
+                self.check(sources, 'foo/bar', output_mode='files')
 
 
 def latency_summary(samples):
@@ -352,7 +363,8 @@ def save_report(path, report):
 
 def run_profile(base, binary, args, report, profile):
     workspace = base / profile
-    env = private_environment(workspace, args.source_pack)
+    env = private_environment(workspace, args.source_pack, args.query_local, args.generation_routing,
+                              args.source_pack_compression)
     corpus = Corpus(workspace / 'repo', args.seed, args.files)
     runner = Runner(binary, corpus.root, env, report, profile, args.timeout)
     result = {'profile': profile, 'operations': [], 'compactions': [], 'operation_counts': {}}
@@ -446,6 +458,12 @@ def parse_args(argv=None):
     parser.add_argument('--checkpoint-every', type=int, default=100)
     parser.add_argument('--timeout', type=float, default=120, help='Seconds per CLI subprocess')
     parser.add_argument('--source-pack', action='store_true')
+    parser.add_argument('--source-pack-compression', action='store_true',
+                        help='Compress captured source packs; requires --source-pack')
+    parser.add_argument('--query-local', action='store_true',
+                        help='Prepare checked evidence and request experimental query-local validation')
+    parser.add_argument('--generation-routing', action='store_true',
+                        help='Enable experimental generation routing; requires --query-local')
     args = parser.parse_args(argv)
     if args.files < 16 or any(getattr(args, field) < 1 for field in
                              ['steps', 'chunk_size', 'compact_every', 'audit_every', 'checkpoint_every']) or args.timeout <= 0:
@@ -454,6 +472,10 @@ def parse_args(argv=None):
         parser.error('profiles must be distinct')
     if args.source_pack and os.name != 'posix':
         parser.error('--source-pack requires Unix')
+    if args.source_pack_compression and not args.source_pack:
+        parser.error('--source-pack-compression requires --source-pack')
+    if args.generation_routing and not args.query_local:
+        parser.error('--generation-routing requires --query-local')
     args.binary, args.output = args.binary.resolve(), args.output.resolve()
     if not args.binary.is_file():
         parser.error('binary must be an existing executable file')
@@ -464,11 +486,17 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    policy = 'stable segments, strict validation, no routing certificates'
+    if args.query_local:
+        routing = 'generation routing' if args.generation_routing else 'no generation routing'
+        policy = f'stable segments, checked query-local validation, {routing}'
     report = {'schema': 1, 'status': 'running', 'started_utc': datetime.now(timezone.utc).isoformat(),
               'seed': args.seed, 'steps_per_profile': args.steps, 'initial_files': args.files,
               'compact_every': args.compact_every, 'audit_every': args.audit_every,
               'chunk_size': args.chunk_size, 'source_pack': args.source_pack,
-              'policy': 'stable segments, strict validation, no routing certificates',
+              'source_pack_compression': args.source_pack_compression,
+              'query_local': args.query_local, 'generation_routing': args.generation_routing,
+              'policy': policy,
               'timing_note': 'Diagnostic subprocess wall times only. Do not infer comparative benchmark results; run without concurrent compilation/load.',
               'platform': platform.platform(), 'python': sys.version, 'cpu_count': os.cpu_count(),
               'load_start': list(os.getloadavg()) if hasattr(os, 'getloadavg') else None,
@@ -480,6 +508,7 @@ def main(argv=None):
                                       'compactions', 'reclamations'], 0), 'samples': [], 'profiles': [],
               'limitations': ['Sequential CLI processes; no long-lived reader leases or concurrent writers.',
                               'No power-loss/fault injection; no migration from legacy format.',
+                              'Policy flags record requests, not proof that a fast path was used; strict fallback remains possible.',
                               'Synthetic bounded text corpus; simple shared Python/Rust regex subset.',
                               'Storage bytes are logical; allocated bytes use st_blocks when available.']}
     base = None

@@ -64,9 +64,12 @@ jobs:
       - name: Validate stable segment lifecycle
         run: python scripts/validate-stable-lifecycle.py --binary target/debug/fxi${{ runner.os == 'Windows' && '.exe' || '' }} --steps 20 --compact-every 5 --audit-every 5 --output target/stable-lifecycle.json
 
+      - name: Validate checked stable segment lifecycle
+        run: python scripts/validate-stable-lifecycle.py --binary target/debug/fxi${{ runner.os == 'Windows' && '.exe' || '' }} --query-local --generation-routing --steps 20 --compact-every 5 --audit-every 5 --output target/stable-lifecycle-checked.json
+
       - name: Validate packed stable segment lifecycle
         if: runner.os != 'Windows'
-        run: python scripts/validate-stable-lifecycle.py --binary target/debug/fxi --steps 20 --compact-every 5 --audit-every 5 --source-pack --output target/stable-lifecycle-packed.json
+        run: python scripts/validate-stable-lifecycle.py --binary target/debug/fxi --steps 20 --compact-every 5 --audit-every 5 --query-local --generation-routing --source-pack --source-pack-compression --output target/stable-lifecycle-packed.json
 
       - name: Install single CLI (macOS)
         if: runner.os == 'macOS'

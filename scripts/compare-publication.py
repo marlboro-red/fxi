@@ -26,6 +26,7 @@ def main():
     p.add_argument('--candidate-generation-routing', action='store_true')
     p.add_argument('--baseline-generation-routing', action='store_true')
     p.add_argument('--candidate-stable-segments', action='store_true', help='Prepare and update candidate using experimental stable segment objects')
+    p.add_argument('--source-pack', action='store_true', help='Enable compressed source packs for both layouts')
     p.add_argument('--corpus', type=Path, help='Copy an existing corpus for a realistic one-file update; never modifies the supplied source')
     p.add_argument('--chunk-size', type=int, default=2048, help='Initial chunk size for --corpus')
     p.add_argument('--keep-fixture', action='store_true', help='Retain corpus and prepared indexes for separate query controls')
@@ -57,12 +58,12 @@ def main():
     spec.loader.exec_module(helper)
     manifest = helper.corpus_manifest(root)
     env = {**os.environ, 'FXI_SOCKET': str(base / 'unused.sock'), 'XDG_RUNTIME_DIR': str(base),
-           'FXI_SOURCE_PACK': '0', 'FXI_TRACE_UPDATES': '1', 'FXI_APP_DATA': str(base / 'app-data')}
+           'FXI_SOURCE_PACK': '1' if args.source_pack else '0', 'FXI_SOURCE_PACK_COMPRESSION': '1' if args.source_pack else '0', 'FXI_TRACE_UPDATES': '1', 'FXI_APP_DATA': str(base / 'app-data')}
     def run(command, indexes, variant):
         query_local, generation_routing = policies[variant]
         return sp.run([str(x) for x in command], cwd=root, env={**env, 'FXI_INDEXES': str(indexes), 'FXI_QUERY_LOCAL': '1' if query_local else '0', 'FXI_GENERATION_ROUTING': '1' if generation_routing else '0', 'FXI_STABLE_SEGMENTS': '1' if variant == 'after' and args.candidate_stable_segments else '0', 'FXI_NEGATIVE_ROUTING': '0'},
                       capture_output=True, text=True, check=True, timeout=120)
-    result = {'candidate_stable_segments': args.candidate_stable_segments, 'base': str(base), 'source_corpus': str(args.corpus.resolve()) if args.corpus else None, 'files': None if args.corpus else 4096, 'profile': 'lean' if args.corpus else 'full', 'source_pack': False, 'candidate_query_local': args.candidate_query_local, 'baseline_query_local': args.baseline_query_local, 'candidate_generation_routing': args.candidate_generation_routing, 'baseline_generation_routing': args.baseline_generation_routing,
+    result = {'candidate_stable_segments': args.candidate_stable_segments, 'base': str(base), 'source_corpus': str(args.corpus.resolve()) if args.corpus else None, 'files': None if args.corpus else 4096, 'profile': 'lean' if args.corpus else 'full', 'source_pack': args.source_pack, 'candidate_query_local': args.candidate_query_local, 'baseline_query_local': args.baseline_query_local, 'candidate_generation_routing': args.candidate_generation_routing, 'baseline_generation_routing': args.baseline_generation_routing,
               'harness_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'manifest_helper_sha256': hashlib.sha256(manifest_helper.read_bytes()).hexdigest(), 'corpus_manifest': manifest,
               'binaries': {v: {'path': str(b), 'sha256': hashlib.sha256(b.read_bytes()).hexdigest()} for v, b in binaries.items()},
@@ -74,19 +75,23 @@ def main():
         else:
             added.unlink(missing_ok=True)
         prepared = base / f'prepared-{chunk_size}'
-        preparation_variant = 'after' if args.candidate_query_local else 'before'
-        run([binaries[preparation_variant], 'index', '--force', '--profile', result['profile'], '--chunk-size', chunk_size, root], prepared, preparation_variant)
-        candidate_prepared = prepared
-        if args.candidate_stable_segments:
-            if args.candidate_query_local or args.candidate_generation_routing:
-                p.error('Stable segment experiment currently requires strict validation')
-            candidate_prepared = base / f'prepared-stable-{chunk_size}'
-            run([binaries['after'], 'index', '--force', '--profile', result['profile'], '--chunk-size', chunk_size, root], candidate_prepared, 'after')
+        # Each binary prepares its own policy/layout; never let the candidate's
+        # stable flag accidentally turn the legacy control into a stable index.
+        run([binaries['before'], 'index', '--force', '--profile', result['profile'], '--chunk-size', chunk_size, root], prepared, 'before')
+        candidate_prepared = base / f'prepared-candidate-{chunk_size}'
+        run([binaries['after'], 'index', '--force', '--profile', result['profile'], '--chunk-size', chunk_size, root], candidate_prepared, 'after')
         current, = prepared.rglob('CURRENT')
         generation = current.parent / 'generations' / current.read_text().strip()
         original = json.loads((generation / 'meta.json').read_text())
         segments = original['segment_count']
         files = original['doc_count']
+        candidate_current, = candidate_prepared.rglob('CURRENT')
+        candidate_generation = candidate_current.parent / 'generations' / candidate_current.read_text().strip()
+        candidate_meta = json.loads((candidate_generation / 'meta.json').read_text())
+        legacy_version = 3 if result['profile'] == 'lean' else 2
+        assert original['version'] == legacy_version, 'Baseline must use the legacy layout'
+        assert candidate_meta['version'] == (legacy_version + 2 if args.candidate_stable_segments else legacy_version)
+        assert candidate_meta['segment_count'] == segments and candidate_meta['doc_count'] == files
         assert files >= 16, 'Use at least 16 indexed files so adding one does not trigger a full rebuild'
         result['files'] = files
         control_pattern = 'folio_wait_bit_common' if args.corpus else 'shared'
@@ -112,7 +117,7 @@ def main():
                 assert meta['doc_count'] == files + 1 and meta['segment_count'] == segments + 1
                 samples[variant].append({'seconds': elapsed, 'stdout': proc.stdout, 'stderr': proc.stderr})
                 shutil.rmtree(indexes)
-        row = {'inherited_segments': segments, 'samples': samples,
+        row = {'inherited_segments': segments, 'prepared_versions': {'before': original['version'], 'after': candidate_meta['version']}, 'samples': samples,
                'median_seconds': {v: statistics.median(s['seconds'] for s in values) for v, values in samples.items()}}
         result['rows'].append(row)
         args.output.parent.mkdir(parents=True, exist_ok=True)
