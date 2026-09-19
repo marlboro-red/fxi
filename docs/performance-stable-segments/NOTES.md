@@ -156,3 +156,25 @@ Rust 1.88, rustfmt and all 11 Python harness tests. The first storage commit
 (`703e981`) passed all eight CI jobs, including Windows, macOS and Linux.
 Both benchmark campaigns resumed the existing watcher. Private retained
 benchmark corpora/indexes were removed after their query controls completed.
+
+
+## Rejected experiment: write final metadata before object flushing
+
+An additional prototype moved all new objects and wrote final metadata/check
+before flushing any object tree. All object, directory and CURRENT durability
+barriers remained. Injected object-sync failure tests confirmed that old CURRENT
+remained unchanged and abandoned objects were reclaimable. The goal was to let
+the filesystem combine more unpublished writes into one flush wave.
+
+The [11-pair screen](publication-small-batched.json) measured 32.274 → 43.335 ms
+at one segment, 192.517 → 54.302 ms at 64, and 692.786 → 94.842 ms at 256,
+against the same original control. It did **not** remove the small-index penalty
+or show a compelling benefit beyond the retained implementation. Cross-campaign
+variation prevents attributing the differences versus the earlier candidate
+solely to write ordering. We reverted this experiment and did not spend another
+large-corpus campaign on it. The [patch](rejected-batched-writes.patch), applied
+to `7784a15`, records the exact code and regression test behind the frozen binary
+whose checksum appears in the report. Final production code remains `7784a15`.
+
+The retained code commit `7784a15` also passed all eight GitHub CI jobs, including
+Windows, macOS and Linux ([run](https://github.com/marlboro-red/fxi/actions/runs/35417456112)).

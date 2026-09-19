@@ -1,0 +1,98 @@
+diff --git a/src/index/objects.rs b/src/index/objects.rs
+index 9a37808..d9bef61 100644
+--- a/src/index/objects.rs
++++ b/src/index/objects.rs
+@@ -33,6 +33,14 @@ pub(crate) fn store(index: &Path) -> Result<PathBuf> {
+ /// Export only new segments. Existing objects must never be rewritten, linked,
+ /// renamed or have optional evidence added by a later generation.
+ pub(crate) fn prepare(index: &Path, inherited: &BTreeMap<u16, String>) -> Result<()> {
++    prepare_with_sync(index, inherited, super::generation::sync_new_tree)
++}
++
++fn prepare_with_sync(
++    index: &Path,
++    inherited: &BTreeMap<u16, String>,
++    mut sync_object: impl FnMut(&Path) -> Result<()>,
++) -> Result<()> {
+     let mut meta: IndexMeta = serde_json::from_slice(&fs::read(index.join("meta.json"))?)?;
+     let objects = store(index)?;
+     fs::create_dir_all(&objects)?;
+@@ -45,6 +53,7 @@ pub(crate) fn prepare(index: &Path, inherited: &BTreeMap<u16, String>) -> Result
+         .and_then(|v| v.to_str())
+         .context("Invalid generation name")?;
+     let mut references = BTreeMap::new();
++    let mut installed = Vec::new();
+     for id in meta
+         .base_segment
+         .into_iter()
+@@ -65,10 +74,10 @@ pub(crate) fn prepare(index: &Path, inherited: &BTreeMap<u16, String>) -> Result
+                 fs::symlink_metadata(&local)?.file_type().is_dir(),
+                 "New segment is not a directory"
+             );
+-            // Complete and sync the new object's bytes before its name can be
+-            // referenced by CURRENT. Failure leaves an unreachable orphan.
+-            super::generation::sync_new_tree(&local)?;
++            // Still unpublished: complete all writes before flushing, while
++            // retaining every object durability barrier before CURRENT.
+             fs::rename(&local, &target)?;
++            installed.push(target);
+             name
+         };
+         ensure!(valid_name(&name), "Invalid segment object name");
+@@ -83,8 +92,6 @@ pub(crate) fn prepare(index: &Path, inherited: &BTreeMap<u16, String>) -> Result
+             "Duplicate segment ID"
+         );
+     }
+-    super::generation::sync_directory(&objects)?;
+-    super::generation::sync_directory(objects.parent().context("Missing object store parent")?)?;
+     meta.version = match meta.profile {
+         super::types::IndexProfile::Full => 4,
+         super::types::IndexProfile::Lean => 5,
+@@ -97,6 +104,12 @@ pub(crate) fn prepare(index: &Path, inherited: &BTreeMap<u16, String>) -> Result
+         index.join("objects.check"),
+         xxhash_rust::xxh3::xxh3_64(&metadata).to_le_bytes(),
+     )?;
++    for object in installed {
++        sync_object(&object)?;
++    }
++    super::generation::sync_directory(&objects)?;
++    super::generation::sync_directory(objects.parent().context("Missing object store parent")?)?;
++    // publish still syncs the final generation and generations/ before CURRENT.
+     Ok(())
+ }
+ 
+@@ -203,6 +216,34 @@ mod tests {
+         generation
+     }
+ 
++    #[test]
++    fn batched_writes_stay_unpublished_when_object_sync_fails() {
++        let root = tempfile::tempdir().unwrap();
++        let mut current = staged(root.path());
++        current.publish().unwrap();
++        let container = current.path.parent().unwrap().parent().unwrap();
++        let pointer = fs::read(container.join("CURRENT")).unwrap();
++        let pending = staged(root.path());
++        let mut called = false;
++        let failed = prepare_with_sync(&pending.path, &BTreeMap::new(), |object| {
++            called = true;
++            assert_eq!(object.parent().unwrap(), container.join("objects"));
++            assert_eq!(fs::read(object.join("evidence")).unwrap(), b"immutable");
++            let metadata = fs::read(pending.path.join("meta.json")).unwrap();
++            let meta: IndexMeta = serde_json::from_slice(&metadata).unwrap();
++            validate_manifest_binding(&pending.path, &meta, &metadata).unwrap();
++            assert_eq!(fs::read(container.join("CURRENT")).unwrap(), pointer);
++            anyhow::bail!("injected object sync failure")
++        });
++        assert!(called && failed.is_err());
++        assert_eq!(fs::read(container.join("CURRENT")).unwrap(), pointer);
++        assert_eq!(fs::read_dir(container.join("objects")).unwrap().count(), 2);
++        drop(pending);
++        collect(container).unwrap();
++        assert_eq!(fs::read_dir(container.join("objects")).unwrap().count(), 1);
++        assert_eq!(fs::read(container.join("CURRENT")).unwrap(), pointer);
++    }
++
+     #[test]
+     fn failed_publication_orphans_are_reclaimed_only_after_pinned_generations_retire() {
+         let root = tempfile::tempdir().unwrap();
