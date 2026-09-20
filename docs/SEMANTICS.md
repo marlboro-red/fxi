@@ -136,9 +136,9 @@ ranked filename fallback.
 
 A file is indexed iff **all** of the following hold:
 
-- not excluded by `.gitignore` / global gitignore / `.git/info/exclude`
-- not hidden, and not under `.git`, `node_modules`, `target`, `__pycache__`,
-  `.venv`, `venv`, `.codesearch`
+- not excluded by `.ignore` / `.gitignore` / global gitignore / `.git/info/exclude`
+- not hidden; visible directory names such as `node_modules`, `target`,
+  `__pycache__`, and `venv` are eligible unless ignore rules exclude them
 - **not a symlink** — like ripgrep, only real files are indexed, so symlinked
   duplicates never appear in results (`test_symlinks_not_indexed`)
 - not a known-binary extension (images, archives, media, wasm, etc. — see

@@ -378,20 +378,6 @@ pub fn build_index_with_profile(
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
-            .filter_entry(|entry| {
-                let name = entry.file_name().to_string_lossy();
-                // Skip common non-code directories
-                !matches!(
-                    name.as_ref(),
-                    ".git"
-                        | "node_modules"
-                        | "target"
-                        | ".codesearch"
-                        | "__pycache__"
-                        | ".venv"
-                        | "venv"
-                )
-            })
             .build_parallel()
             .visit(&mut builder);
 
@@ -1236,17 +1222,7 @@ fn compute_index_diff(
             .git_global(true)
             .git_exclude(true)
             .filter_entry(move |entry| {
-                let name = entry.file_name().to_string_lossy();
-                !matches!(
-                    name.as_ref(),
-                    ".git"
-                        | "node_modules"
-                        | "target"
-                        | ".codesearch"
-                        | "__pycache__"
-                        | ".venv"
-                        | "venv"
-                ) && relevant.as_ref().is_none_or(|paths| {
+                relevant.as_ref().is_none_or(|paths| {
                     entry.path().strip_prefix(&filter_root).is_ok_and(|path| {
                         if entry.file_type().is_some_and(|kind| kind.is_dir()) {
                             paths.contains(path)
@@ -2206,6 +2182,9 @@ mod scoped_reconciliation_tests {
             "ignored.skip",
             "blocked/file.rs",
             "node_modules/file.rs",
+            "target/file.rs",
+            "venv/file.rs",
+            "__pycache__/file.rs",
             ".hidden.rs",
             "image.png",
             "empty.rs",
@@ -2228,12 +2207,53 @@ mod scoped_reconciliation_tests {
         let after = IndexReader::open(&root).unwrap();
         assert_eq!(
             matches(&after, "newmarker"),
-            vec![PathBuf::from("nested/good.rs")]
+            vec![
+                PathBuf::from("__pycache__/file.rs"),
+                PathBuf::from("nested/good.rs"),
+                PathBuf::from("node_modules/file.rs"),
+                PathBuf::from("target/file.rs"),
+                PathBuf::from("venv/file.rs"),
+            ]
         );
         assert_eq!(before.meta.rejected_files, after.meta.rejected_files);
         let scoped_paths = paths(&after);
         build_index(&root, true).unwrap();
         assert_eq!(scoped_paths, paths(&IndexReader::open(&root).unwrap()));
+        crate::utils::remove_index(&root).unwrap();
+    }
+
+    #[test]
+    fn dependency_directory_coverage_obeys_ignore_changes_and_negations() {
+        let temp = tempfile::tempdir().unwrap();
+        // An explicitly selected root with a formerly excluded name is eligible too.
+        let root = temp.path().join("target");
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        fs::create_dir_all(root.join("venv")).unwrap();
+        fs::write(root.join("node_modules/keep.rs"), "coverageMarker").unwrap();
+        fs::write(root.join("node_modules/drop.rs"), "coverageMarker").unwrap();
+        fs::write(root.join("venv/main.rs"), "coverageMarker").unwrap();
+        fs::write(
+            root.join(".ignore"),
+            "node_modules/*\n!node_modules/keep.rs\nvenv/\n",
+        )
+        .unwrap();
+        build_index(&root, true).unwrap();
+        let before = IndexReader::open(&root).unwrap();
+        assert_eq!(paths(&before), vec![PathBuf::from("node_modules/keep.rs")]);
+        fs::write(root.join(".ignore"), "").unwrap();
+        reconcile_index_paths(&root, Some(&before), 100, &[".ignore".into()]).unwrap();
+        let expanded = IndexReader::open(&root).unwrap();
+        assert_eq!(
+            paths(&expanded),
+            vec![
+                PathBuf::from("node_modules/drop.rs"),
+                PathBuf::from("node_modules/keep.rs"),
+                PathBuf::from("venv/main.rs"),
+            ]
+        );
+        fs::write(root.join(".ignore"), "node_modules/\nvenv/\n").unwrap();
+        reconcile_index_paths(&root, Some(&expanded), 100, &[".ignore".into()]).unwrap();
+        assert!(paths(&IndexReader::open(&root).unwrap()).is_empty());
         crate::utils::remove_index(&root).unwrap();
     }
 

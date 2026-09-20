@@ -260,10 +260,16 @@ pruning so existing waiters cannot acquire a different lock inode. See
 indexes left by older test runs.
 
 Coverage follows ignore rules and configured eligibility limits. Hidden paths,
-symlinks, common generated/dependency directories, known binary types,
+symlinks, known binary types,
 non-UTF-8 content, and oversized files can be excluded. Searching an index is not
 an exhaustive scan of every byte on disk. [SEMANTICS.md](docs/SEMANTICS.md)
 documents these exclusions and what stale indexes can miss.
+
+Directory names such as `target`, `node_modules`, and `venv` are not excluded
+unconditionally. Use `.gitignore` or `.ignore` to exclude them (for example,
+add `node_modules/` and `target/`, one per line). Nested ignore rules and
+negations apply. Run `fxi index PATH` after changing ignore rules or upgrading
+from a version that skipped these names to reconcile coverage.
 
 ## Performance, resources, and evidence
 

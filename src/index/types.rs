@@ -398,6 +398,7 @@ pub struct IndexConfig {
     pub stop_gram_count: usize,
     pub delta_threshold: usize,
     pub compaction_ratio: f32,
+    /// Legacy metadata field; traversal exclusions come from ignore files.
     pub ignored_paths: Vec<String>,
     /// Scoring weights for search result ranking
     pub scoring_weights: ScoringWeights,
@@ -415,12 +416,7 @@ impl Default for IndexConfig {
             stop_gram_count: 0,
             delta_threshold: 100,
             compaction_ratio: 0.5,
-            ignored_paths: vec![
-                ".git".to_string(),
-                "node_modules".to_string(),
-                "target".to_string(),
-                ".codesearch".to_string(),
-            ],
+            ignored_paths: Vec::new(),
             scoring_weights: ScoringWeights::default(),
             // Files per segment chunk: bounds indexing peak RSS (the
             // dominant term) and yields multiple segments, which the reader
