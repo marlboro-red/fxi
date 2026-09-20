@@ -207,8 +207,15 @@ fn finite(hir: &Hir) -> Option<Vec<Vec<u8>>> {
 fn alternatives(strings: Vec<Vec<u8>>) -> Vec<PlanStep> {
     let mut plans = Vec::new();
     for string in strings {
-        if string.len() < 3 {
+        if string.len() < 2 {
             return Vec::new();
+        }
+        if string.len() == 2 {
+            plans.push(QueryPlan {
+                steps: vec![PlanStep::BytePair([string[0], string[1]])],
+                verification: None,
+            });
+            continue;
         }
         let grams = if let Ok(text) = std::str::from_utf8(&string) {
             crate::utils::query_trigrams(text)

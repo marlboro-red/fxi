@@ -1782,6 +1782,48 @@ impl IndexReader {
         }
     }
 
+    /// Every occurrence of a byte pair in a file of at least three bytes has
+    /// a preceding or following byte. Union those trigram postings; include
+    /// tiny files separately because they have no trigram evidence. This also
+    /// handles occurrences at either file boundary without changing the format.
+    pub fn get_byte_pair_docs(&self, pair: [u8; 2]) -> Result<RoaringBitmap> {
+        let mut grams = Vec::with_capacity(512);
+        for byte in 0..=u8::MAX {
+            grams.push(bytes_to_trigram(pair[0], pair[1], byte));
+            grams.push(bytes_to_trigram(byte, pair[0], pair[1]));
+        }
+        grams.sort_unstable();
+        grams.dedup();
+        // A legacy writer may have omitted any of these postings. An omitted
+        // posting cannot be treated as evidence that the pair is absent.
+        if grams.iter().any(|&gram| self.is_stop_gram(gram)) {
+            return Ok(self.valid_doc_ids().clone());
+        }
+        let mut docs = self
+            .segments
+            .par_iter()
+            .map(|segment| {
+                let mut docs = RoaringBitmap::new();
+                for &gram in &grams {
+                    // Use the normal checked lookup and payload validation path.
+                    docs |= segment.get_trigram_docs(gram)?;
+                }
+                Ok(docs)
+            })
+            .try_reduce(RoaringBitmap::new, |mut a, b| -> Result<_> {
+                a |= b;
+                Ok(a)
+            })?;
+        docs.extend(
+            self.documents
+                .iter()
+                .filter(|doc| doc.size < 3)
+                .map(|doc| doc.doc_id),
+        );
+        docs &= self.valid_doc_ids();
+        Ok(docs)
+    }
+
     /// Get documents matching a token. Returns an error if token evidence is
     /// unavailable or invalid; lean indexes require rebuilding with the full profile.
     pub fn get_token_docs(&self, token: &str) -> Result<RoaringBitmap> {

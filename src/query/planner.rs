@@ -14,6 +14,8 @@ pub struct QueryPlan {
 pub enum PlanStep {
     /// Fetch postings for trigrams and intersect
     TrigramIntersect(Vec<Trigram>),
+    /// Union adjacent trigram evidence, including files too short for a trigram.
+    BytePair([u8; 2]),
     /// Fetch postings for a token
     #[allow(dead_code)] // Reserved for explicit whole-token semantics.
     TokenLookup(String),

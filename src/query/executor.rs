@@ -984,6 +984,14 @@ impl<'a> QueryExecutor<'a> {
                     }
                 }
 
+                PlanStep::BytePair(pair) => {
+                    let docs = self.reader.get_byte_pair_docs(*pair)?;
+                    candidates = Some(match candidates {
+                        Some(existing) => existing & docs,
+                        None => docs,
+                    });
+                }
+
                 PlanStep::TokenLookup(token) => {
                     self.reader.ensure_tokens()?;
                     let docs = self.reader.get_token_docs(token)?;
