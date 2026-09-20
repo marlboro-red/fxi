@@ -5,6 +5,7 @@ answer different questions; historical measurements are not current guarantees.
 
 | Question | Report |
 | --- | --- |
+| What fixed Chromium directory coverage and slow two-byte searches? | [Chromium follow-up](performance-chromium/FOLLOWUP.md) |
 | How does FXI perform on Chromium, and how much do coverage and cache conditions change the answer? | [Chromium comparison](performance-chromium/NOTES.md) |
 | How does the stable-object experiment survive interrupted publication and sustained updates? | [Lifecycle validation](validation-stable-segments/NOTES.md) |
 | Can checked search and immutable storage work together, and where do they lose? | [Stable segment experiment](performance-stable-segments/NOTES.md) |

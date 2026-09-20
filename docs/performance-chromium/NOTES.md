@@ -1,5 +1,8 @@
 # Chromium checkout benchmark — 2026-09-20
 
+Subsequent coverage fixes and two-byte search improvements are measured in the
+[Chromium follow-up](FOLLOWUP.md). The tables below describe the original binaries.
+
 FXI is strong on selective indexed searches, build time, and build memory in this
 checkout. It is not an overall winner. The run exposed expensive short-pattern
 searches, hard-coded coverage exclusions, and large source-pack sensitivity to

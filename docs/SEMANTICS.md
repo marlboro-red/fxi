@@ -144,7 +144,8 @@ A file is indexed iff **all** of the following hold:
 - not a known-binary extension (images, archives, media, wasm, etc. — see
   `is_known_binary_ext`)
 - non-empty and at most 10 MB
-- passes the content sniff: ≤10% NUL / non-text bytes in the first 8 KB
+- passes the content sniff in the first 8 KiB: at most 10% NUL bytes and
+  12.5% control bytes (excluding tab, carriage return, and newline)
 
 Consequences worth knowing:
 
