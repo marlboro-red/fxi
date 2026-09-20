@@ -865,6 +865,21 @@ impl SegmentReader {
         }
     }
 
+    /// Union evidence without touching dictionary pages for certified negatives.
+    /// Unbound/legacy filters cannot certify absence and use checked lookups.
+    fn union_trigrams(&self, grams: &[Trigram]) -> Result<RoaringBitmap> {
+        let mut docs = RoaringBitmap::new();
+        for &gram in grams {
+            if let Some(bloom @ SegmentBloom::Mapped(_)) = &self.bloom_filter
+                && !bloom.might_contain(gram)
+            {
+                continue;
+            }
+            docs |= self.get_trigram_docs(gram)?;
+        }
+        Ok(docs)
+    }
+
     /// Check if trigrams might exist in this segment using bloom filter.
     /// Returns true if bloom filter is not present (conservative).
     #[inline]
@@ -1802,14 +1817,7 @@ impl IndexReader {
         let mut docs = self
             .segments
             .par_iter()
-            .map(|segment| {
-                let mut docs = RoaringBitmap::new();
-                for &gram in &grams {
-                    // Use the normal checked lookup and payload validation path.
-                    docs |= segment.get_trigram_docs(gram)?;
-                }
-                Ok(docs)
-            })
+            .map(|segment| segment.union_trigrams(&grams))
             .try_reduce(RoaringBitmap::new, |mut a, b| -> Result<_> {
                 a |= b;
                 Ok(a)
@@ -3436,6 +3444,10 @@ mod tests {
         let reader = open_checked_segment(dir.path(), true).unwrap();
         assert!(reader.bloom_filter.is_none());
         assert_eq!(reader.intersect_trigrams(&[1]).unwrap().len(), 2);
+        assert_eq!(
+            reader.union_trigrams(&[1, 2, 99]).unwrap(),
+            [1, 2, 3, 4].into_iter().collect()
+        );
         drop(reader);
         for gram in [1, 2, 3] {
             bloom.insert(gram);
@@ -3446,6 +3458,10 @@ mod tests {
         let reader = open_checked_segment(dir.path(), true).unwrap();
         assert!(reader.bloom_filter.is_some());
         assert_eq!(reader.intersect_trigrams(&[1]).unwrap().len(), 2);
+        assert_eq!(
+            reader.union_trigrams(&[1, 2, 99]).unwrap(),
+            [1, 2, 3, 4].into_iter().collect()
+        );
         drop(reader);
         let proof_path = dir.path().join("grams.bloom-check");
         let original = fs::read(&proof_path).unwrap();
@@ -3456,6 +3472,10 @@ mod tests {
             let reader = open_checked_segment(dir.path(), true).unwrap();
             assert!(reader.bloom_filter.is_none());
             assert_eq!(reader.intersect_trigrams(&[1]).unwrap().len(), 2);
+            assert_eq!(
+                reader.union_trigrams(&[1, 2, 99]).unwrap(),
+                [1, 2, 3, 4].into_iter().collect()
+            );
         }
         fs::write(&proof_path, original).unwrap();
         // A valid but different filter must not reuse this dictionary's proof.
@@ -3464,6 +3484,10 @@ mod tests {
         let reader = open_checked_segment(dir.path(), true).unwrap();
         assert!(reader.bloom_filter.is_none());
         assert_eq!(reader.intersect_trigrams(&[1]).unwrap().len(), 2);
+        assert_eq!(
+            reader.union_trigrams(&[1, 2, 99]).unwrap(),
+            [1, 2, 3, 4].into_iter().collect()
+        );
     }
 
     #[test]
@@ -3729,6 +3753,7 @@ mod tests {
         assert!(segment.get_trigram_docs(99).unwrap().is_empty());
         for _ in 0..2 {
             assert!(segment.get_trigram_docs(2).is_err());
+            assert!(segment.union_trigrams(&[2, 99]).is_err());
         }
         assert!(open_checked_segment(dir.path(), false).is_err());
         // Even an intersection that would stop before reaching the damage must
